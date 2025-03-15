@@ -34,7 +34,7 @@ TurboAPI outperforms FastAPI by a wide margin in both validation speed and HTTP 
 
 ### 🚀 Validation Performance
 
-![Performance Comparison](benchmarks/social/tatsat_modern_design.png)
+![Performance Comparison](benchmarks/social/turboapi_modern_design.png)
 
 **TurboAPI's validation engine is 31.3x faster than FastAPI + Pydantic**
 
@@ -42,8 +42,20 @@ TurboAPI outperforms FastAPI by a wide margin in both validation speed and HTTP 
 
 - **2.8x more requests per second** - Handle more traffic with the same hardware
 - **66% lower latency** - More responsive applications
+- **~50% faster response times** - Recent benchmarks show TurboAPI outperforms FastAPI by approximately 45-50% in API operations
 
 *[Full benchmark details](/benchmarks)*
+
+### 📊 TurboAPI vs FastAPI Benchmark
+
+Our latest benchmark comparing TurboAPI and FastAPI demonstrates significant performance advantages:
+
+```bash
+# Run the benchmark yourself
+python examples/turboapi_fastapi_benchmark.py
+```
+
+Results consistently show TurboAPI processing requests with about half the latency of FastAPI across various payload sizes and operation types.
 
 ## 🌟 Key Features
 
@@ -64,7 +76,7 @@ TurboAPI outperforms FastAPI by a wide margin in both validation speed and HTTP 
 
 ```bash
 # From PyPI
-pip install tatsat
+pip install turboapi
 
 # Installs all dependencies including Satya
 ```
@@ -131,8 +143,8 @@ from datetime import datetime
 # Add the parent directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Import tatsat
-from tatsat import (
+# Import turboapi
+from turboapi import (
     TurboAPI, APIRouter, Depends, HTTPException, 
     JSONResponse, Response, Request,
     Body, Query, Path, Header, Cookie
@@ -560,7 +572,7 @@ def read_item(item_id: int):
 TurboAPI supports efficient background task processing without blocking the main request:
 
 ```python
-from tatsat import BackgroundTasks
+from turboapi import BackgroundTasks
 
 @app.post("/send-notification/{email}")
 async def send_notification(email: str, background_tasks: BackgroundTasks):
@@ -579,7 +591,7 @@ For more complex task processing, TurboAPI can integrate with:
 Organize your routes using the `APIRouter`:
 
 ```python
-from tatsat import APIRouter
+from turboapi import APIRouter
 
 router = APIRouter(prefix="/api/v1")
 
@@ -635,7 +647,7 @@ async def websocket_endpoint(websocket: WebSocket):
 Comprehensive security features:
 
 ```python
-from tatsat.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from turboapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 

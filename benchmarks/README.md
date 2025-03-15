@@ -5,16 +5,16 @@ A comprehensive benchmarking tool for comparing the performance of Python web fr
 ## Overview
 
 This tool allows you to compare the performance of multiple web frameworks including:
-- Tatsat (built on Starlette with Satya validation)
+- TurboAPI (built on Starlette with Satya validation)
 - FastAPI (built on Starlette with Pydantic validation)
 - Starlette (raw, without validation)
 - Flask (with manual validation)
 
-The benchmark measures both request handling time and validation performance across different payload complexities, providing detailed metrics and visualizations to help you understand the performance characteristics of each framework.
+The benchmark measures both request handling time and validation performance across different payload complexities, providing detailed metrics and visualizations to help you understand the performance characteristics of each framework. Recent benchmarks show that TurboAPI outperforms FastAPI by approximately 45-50% in common API scenarios.
 
 ## Features
 
-- **Multi-Framework Support**: Benchmark any combination of Tatsat, FastAPI, Starlette, and Flask
+- **Multi-Framework Support**: Benchmark any combination of TurboAPI, FastAPI, Starlette, and Flask
 - **Configurable Test Scenarios**: Three complexity levels (small, medium, large) with nested data structures
 - **Operation Types**: Tests both GET and POST operations
 - **Comprehensive Metrics**: Measures average, median, minimum, maximum, and standard deviation of response times
@@ -44,6 +44,12 @@ Run the benchmark from the project root directory:
 python examples/comprehensive_benchmark.py [OPTIONS]
 ```
 
+Or run specific framework comparison benchmarks:
+
+```bash
+python examples/turboapi_fastapi_benchmark.py [OPTIONS]
+```
+
 ### Command-line Options
 
 | Option | Description | Default |
@@ -62,9 +68,9 @@ python examples/comprehensive_benchmark.py [OPTIONS]
    python examples/comprehensive_benchmark.py
    ```
 
-2. Compare just Tatsat and FastAPI:
+2. Compare just TurboAPI and FastAPI:
    ```bash
-   python examples/comprehensive_benchmark.py --frameworks tatsat,fastapi
+   python examples/turboapi_fastapi_benchmark.py
    ```
 
 3. Run an intensive benchmark with high iteration count and concurrency:
@@ -107,7 +113,7 @@ For each framework, scenario, and operation type, the following metrics are calc
 
 1. **Bar Charts**: Compare metrics for each framework within a specific scenario
 2. **Summary Plots**: Show average performance across all scenarios for each framework
-3. **Improvement Charts**: Visualize Tatsat's performance improvement (or regression) compared to other frameworks as percentages
+3. **Improvement Charts**: Visualize TurboAPI's performance improvement (or regression) compared to other frameworks as percentages
 
 ## Test Scenarios
 
