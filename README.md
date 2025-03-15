@@ -1,12 +1,32 @@
+<div align="center">
+
+<img src="benchmarks/social/logo.png" alt="Tatsat Logo" width="300"/>
+
 # Tatsat
 
-A lightning-fast web framework with FastAPI-compatible syntax and superior performance. Built on Starlette with Satya for ultra-efficient data validation, Tatsat delivers all the developer-friendly features of FastAPI with dramatically better performance.
+**The high-performance Python web framework with FastAPI-compatible syntax**
 
-## 🎯 Why Tatsat Exists
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Tatsat was created to solve a fundamental limitation: FastAPI is tightly coupled with Pydantic, making it nearly impossible to replace Pydantic with a faster validation system. Even when implementing custom route handlers in FastAPI, Pydantic is still used under the hood for request/response processing, severely limiting performance optimization potential.
+</div>
 
-**The solution?** Build a framework with FastAPI's elegant interface but powered by Satya, a validation library that delivers exceptional performance:
+## What is Tatsat?
+
+**Tatsat** is a lightning-fast ASGI web framework designed for speed without sacrificing developer experience. It combines:
+
+- **FastAPI-compatible syntax** - Familiar API with minimal learning curve
+- **Starlette foundation** - Robust, battle-tested ASGI implementation
+- **Satya validation** - Ultra-efficient data validation (30x faster than Pydantic)
+
+If you like FastAPI but need better performance, Tatsat is the framework you've been waiting for.
+
+## 🎯 Why Choose Tatsat?
+
+- **You need better performance** - FastAPI's tight coupling with Pydantic creates a performance bottleneck
+- **You love the FastAPI syntax** - Tatsat preserves the developer-friendly API you already know
+- **You want modern features** - All the goodies: dependency injection, auto docs, type hints, etc.
+- **You value simplicity** - Drop-in replacement with minimal learning curve
 
 ## ⚡ Performance Highlights
 
@@ -14,68 +34,42 @@ Tatsat outperforms FastAPI by a wide margin in both validation speed and HTTP re
 
 ### 🚀 Validation Performance
 
-![Validation Speed Comparison](benchmarks/charts/validation_comparison.png)
-| Payload Type | Tatsat + Satya | FastAPI + Pydantic | Improvement |
-|--------------|----------------|-------------------|-------------|
-| Simple       | 1,916,870      | 463,372           | **314% faster** |
-| Medium       | 1,704,724      | 483,471           | **253% faster** |
-| Complex      | 1,572,373      | 243,905           | **545% faster** |
+![Performance Comparison](benchmarks/social/tatsat_modern_design.png)
+
+**Tatsat's validation engine is 31.3x faster than FastAPI + Pydantic**
 
 ### 🔥 HTTP Performance
-| Metric        | Tatsat      | FastAPI    | Improvement |
-|---------------|-------------|------------|-------------|
-| Requests/sec  | 20,438      | 7,310      | **179% faster** |
-| Avg Latency   | 0.22ms      | 0.64ms     | **66% lower** |
 
-*See the [benchmarks](/benchmarks) directory for detailed methodology and results*
+- **2.8x more requests per second** - Handle more traffic with the same hardware
+- **66% lower latency** - More responsive applications
 
-## 🌟 Features
+*[Full benchmark details](/benchmarks)*
 
-Tatsat provides everything FastAPI offers and more:
+## 🌟 Key Features
 
-- **Modern ASGI Framework**: Built on Starlette, just like FastAPI
-- **Intuitive API**: Similar interface to FastAPI for minimal learning curve
-- **Superior Validation**: Satya's validation engine is 30x faster than Pydantic, 5x faster than msgspec
-- **Type Safety**: Full support for Python type hints
-- **Automatic API Documentation**: Swagger UI and ReDoc integration
-- **Powerful Dependency Injection**: Clean, modular code with dependency management
-- **Path Operations**: Intuitive route decorators for all HTTP methods
-- **Advanced Middleware Support**: Flexible middleware system
-- **Exception Handling**: Comprehensive exception management
-- **APIRouter**: Route organization with prefixes and tags
-- **WebSocket Support**: Real-time bi-directional communication
-- **Background Tasks**: Efficient asynchronous task processing
-- **Security Utilities**: OAuth2, JWT, and other authentication systems
-- **Testing Utilities**: Easy endpoint testing
+| Feature | Description |
+|---------|-------------|
+| 🔍 **FastAPI-compatible API** | Everything you love about FastAPI's interface |
+| ⚡ **30x faster validation** | Satya validation engine outperforms Pydantic |
+| 📘 **Automatic API docs** | Swagger UI and ReDoc integration |
+| 💉 **Dependency injection** | Clean, modular code with dependency management |
+| 🔄 **WebSockets** | Real-time bi-directional communication |
+| 🔒 **Security utilities** | OAuth2, JWT authentication, etc. |
+| 🧩 **API Router** | Organize routes with prefixes and tags |
+| 🔄 **Background tasks** | Efficient asynchronous task processing |
 
-## 💨 Why Satya Outperforms Pydantic
 
-Satya achieves its remarkable performance through:
 
-1. **Optimized Type Checking**: Highly efficient type validation algorithms
-2. **Reduced Object Overhead**: Minimized memory allocations during validation
-3. **Custom Validator Compilation**: Runtime-optimized validator functions
-4. **Pure Python Implementation**: No complex C-extensions, yet better performance
-5. **Efficient Error Handling**: Streamlined error reporting with minimal overhead
-6. **Fewer Nested Function Calls**: Flatter execution path for faster validation
-7. **Type Coercion Optimizations**: Smart type conversions without unnecessary operations
-
-## 📦 Installation
+## ⚙️ Installation
 
 ```bash
-# Install from PyPI
+# From PyPI
 pip install tatsat
 
-# Or install directly from the repository
-pip install -e .
-
-# Make sure you have satya installed
-pip install satya
+# Installs all dependencies including Satya
 ```
 
 ## 🚀 Quick Start
-
-Here's a minimal example to get you started:
 
 ```python
 from tatsat import Tatsat
@@ -84,15 +78,14 @@ from typing import List, Optional
 
 app = Tatsat(title="Tatsat Demo")
 
-# Define your data models with Satya
+# Define models with Satya (30x faster than Pydantic)
 class Item(Model):
     name: str = Field()
-    description: Optional[str] = Field(required=False)
     price: float = Field(gt=0)
-    tax: Optional[float] = Field(required=False)
     tags: List[str] = Field(default=[])
+    description: Optional[str] = Field(required=False)
 
-# Create API endpoints with typed parameters
+# API with typed parameters - just like FastAPI
 @app.get("/")
 def read_root():
     return {"Hello": "World"}
@@ -101,9 +94,10 @@ def read_root():
 def read_item(item_id: int, q: Optional[str] = None):
     return {"item_id": item_id, "q": q}
 
-@app.post("/items/", response_model=Item)
+@app.post("/items/")
 def create_item(item: Item):
-    return item
+    return item.dict()
+```
 
 # Run the application with Uvicorn
 if __name__ == "__main__":
@@ -308,6 +302,12 @@ Tatsat combines the best of both worlds:
 4. **Production Ready**: Built with performance and reliability in mind
 5. **Feature Complete**: Everything FastAPI has, with superior performance
 6. **Future Proof**: Actively maintained and improved
+
+## 🎯 Why Tatsat Exists
+
+Tatsat was created to solve a fundamental limitation: FastAPI is tightly coupled with Pydantic, making it nearly impossible to replace Pydantic with a faster validation system. Even when implementing custom route handlers in FastAPI, Pydantic is still used under the hood for request/response processing, severely limiting performance optimization potential.
+
+**The solution?** Build a framework with FastAPI's elegant interface but powered by Satya, a validation library that delivers exceptional performance. This architectural decision allows Tatsat to maintain API compatibility while achieving dramatic performance improvements.
 
 ## 🔮 What's Next?
 
