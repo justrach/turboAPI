@@ -3,13 +3,13 @@ requires = ["setuptools>=61.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tatsat"
-version = "0.1.1"
+name = "turboapi"
+version = "0.1.2"
 description = "A high-performance web framework with elegant syntax and powerful validation using satya"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
-    { name = "Tatsat Team", email = "info@tatsat.com" }
+    { name = "TurboAPI Team", email = "info@turboapi.com" }
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -40,8 +40,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/tatsat"
-Issues = "https://github.com/yourusername/tatsat/issues"
+Homepage = "https://github.com/justrach/turboapi"
+Issues = "https://github.com/justrach/turboapi/issues"
 
 [tool.setuptools]
-packages = ["tatsat"]
+packages = ["turboapi"]

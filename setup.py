@@ -1,15 +1,15 @@
 """
-Setup file for tatsat package.
+Setup file for TurboAPI package.
 """
 
 from setuptools import setup, find_packages
 
 setup(
-    name="tatsat",
-    version="0.1.1",
+    name="turboapi",
+    version="0.1.0",
     description="A high-performance web framework with elegant syntax and powerful validation using satya",
-    author="Tatsat Team",
-    author_email="info@tatsat.com",
+    author="TurboAPI Team",
+    author_email="info@turboapi.com",
     packages=find_packages(),
     install_requires=[
         "starlette>=0.28.0",
@@ -37,6 +37,7 @@ setup(
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Framework :: TurboAPI",
     ],
     python_requires=">=3.8",
 )

@@ -1,3 +1,36 @@
+Metadata-Version: 2.2
+Name: turboapi
+Version: 0.1.2
+Summary: A high-performance web framework with elegant syntax and powerful validation using satya
+Author: TurboAPI Team
+Author-email: TurboAPI Team <info@turboapi.com>
+License: MIT
+Project-URL: Homepage, https://github.com/justrach/turboapi
+Project-URL: Issues, https://github.com/justrach/turboapi/issues
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: starlette>=0.28.0
+Requires-Dist: uvicorn>=0.23.0
+Provides-Extra: test
+Requires-Dist: pytest>=7.0.0; extra == "test"
+Requires-Dist: pytest-asyncio>=0.20.0; extra == "test"
+Requires-Dist: httpx>=0.24.0; extra == "test"
+Provides-Extra: dev
+Requires-Dist: black>=23.0.0; extra == "dev"
+Requires-Dist: isort>=5.12.0; extra == "dev"
+Requires-Dist: flake8>=6.0.0; extra == "dev"
+Dynamic: author
+Dynamic: requires-python
+
 <div align="center">
 
 <img src="benchmarks/social/logo.png" alt="TurboAPI Logo" width="300"/>

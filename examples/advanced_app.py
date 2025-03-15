@@ -1,7 +1,7 @@
 """
-Advanced Tatsat application example.
+Advanced TurboAPI application example.
 
-This example demonstrates more advanced features of Tatsat:
+This example demonstrates more advanced features of TurboAPI:
 - Complex model validation with nested satya models
 - API Routers for route organization
 - Middleware usage
@@ -19,18 +19,18 @@ from datetime import datetime
 # Add the parent directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Import tatsat
-from tatsat import (
-    Tatsat, APIRouter, Depends, HTTPException, 
+# Import TurboAPI
+from turboapi import (
+    TurboAPI, APIRouter, Depends, HTTPException, 
     JSONResponse, Response, Request,
     Body, Query, Path, Header, Cookie
 )
 from satya import Model, Field
 
-# Create a Tatsat application
-app = Tatsat(
-    title="Tatsat Advanced Example",
-    description="A more complex API showing advanced Tatsat features with satya validation",
+# Create a TurboAPI application
+app = TurboAPI(
+    title="TurboAPI Advanced Example",
+    description="A more complex API showing advanced TurboAPI features with satya validation",
     version="0.1.0",
 )
 
@@ -198,7 +198,7 @@ async def general_exception_handler(request, exc):
 @app.get("/")
 def read_root():
     """Return a welcome message."""
-    return {"message": "Welcome to Tatsat Advanced API Example"}
+    return {"message": "Welcome to TurboAPI Advanced API Example"}
 
 # Product routes
 @router.get("/products/", response_model=List[Product], tags=["products"])
