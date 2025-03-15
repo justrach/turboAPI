@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tatsat"
-version = "0.1.0"
+version = "0.1.1"
 description = "A high-performance web framework with elegant syntax and powerful validation using satya"
 readme = "README.md"
 license = { text = "MIT" }

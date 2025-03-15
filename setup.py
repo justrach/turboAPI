@@ -6,7 +6,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="tatsat",
-    version="0.1.0",
+    version="0.1.1",
     description="A high-performance web framework with elegant syntax and powerful validation using satya",
     author="Tatsat Team",
     author_email="info@tatsat.com",
@@ -14,8 +14,7 @@ setup(
     install_requires=[
         "starlette>=0.28.0",
         "uvicorn>=0.23.0",
-        # satya is a dependency, but it should be installed separately
-        # or included in the project directory
+        "satya>=0.2.5",  # Added Satya as a required dependency
     ],
     extras_require={
         "test": [
