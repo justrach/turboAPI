@@ -608,16 +608,38 @@ async def main():
     print(f"  Save Results: {SAVE_RESULTS}")
     print()
     
+    # Print selected frameworks
+    print(f"Selected frameworks: {', '.join(args.frameworks)}")
+    
+    # Filter out unavailable frameworks
+    selected_frameworks = args.frameworks
+    if "fastapi" in selected_frameworks and not HAS_FASTAPI:
+        print("Warning: FastAPI was selected but is not installed. Skipping FastAPI benchmarks.")
+        selected_frameworks.remove("fastapi")
+    
+    if "turboapi" not in selected_frameworks:
+        print("Warning: TurboAPI is not selected. Relative performance plots will be skipped.")
+    
+    if len(selected_frameworks) < 2:
+        print("Error: At least two frameworks need to be selected for meaningful comparison.")
+        return
+    
+    # Define port mapping
+    port_map = {
+        "starlette": BENCHMARK_PORT_STARLETTE,
+        "turboapi": BENCHMARK_PORT_TURBOAPI,
+        "fastapi": BENCHMARK_PORT_FASTAPI
+    }
+    
     # Run benchmarks
     all_results = []
     
-    # Benchmark Starlette
-    starlette_results = await run_benchmark("starlette", scenarios, operations, BENCHMARK_PORT_STARLETTE)
-    all_results.extend(starlette_results)
-    
-    # Benchmark TurboAPI
-    turboapi_results = await run_benchmark("turboapi", scenarios, operations, BENCHMARK_PORT_TURBOAPI)
-    all_results.extend(turboapi_results)
+    # Run benchmarks for each selected framework
+    for framework in selected_frameworks:
+        print(f"\nBenchmarking {framework}...")
+        framework_results = await run_benchmark(framework, scenarios, operations, port_map[framework])
+        all_results.extend(framework_results)
+        print(f"Completed {framework} benchmark")
     
     # Generate plots if requested
     if PLOT_RESULTS:
