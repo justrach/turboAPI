@@ -1,0 +1,10 @@
+{
+  "requests": 100,
+  "successful_requests": 100,
+  "errors": 0,
+  "total_time": 0.07186412811279297,
+  "rps": 1391.514829805587,
+  "avg_latency": 0.7160830497741699,
+  "min_latency": 0.5180835723876953,
+  "max_latency": 1.1799335479736328
+}
