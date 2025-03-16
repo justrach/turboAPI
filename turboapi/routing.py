@@ -12,10 +12,11 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Type, Uni
 from starlette.routing import Route, Router as StarletteRouter, Mount
 from starlette.responses import JSONResponse, Response
 from starlette.requests import Request
-from starlette.exceptions import HTTPException
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .dependencies import solve_dependencies
 from .params import Depends
+from .exceptions import HTTPException
 
 # Configure logging
 logger = logging.getLogger(__name__)

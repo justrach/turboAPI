@@ -5,11 +5,13 @@ This module provides functionality for running background tasks
 after the response has been sent to the client.
 """
 
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple, Dict
 import asyncio
 
+from starlette.background import BackgroundTask, BackgroundTasks as StarletteBackgroundTasks
 
-class BackgroundTasks:
+
+class BackgroundTasks(StarletteBackgroundTasks):
     """
     BackgroundTasks allows you to define tasks to run in the background
     after returning a response.
@@ -25,7 +27,7 @@ class BackgroundTasks:
 
     def __init__(self):
         """Initialize the background tasks list."""
-        self.tasks: List[Tuple[Callable, Tuple[Any, ...], Dict[str, Any]]] = []
+        super().__init__()
 
     def add_task(
         self,
@@ -41,19 +43,8 @@ class BackgroundTasks:
             *args: Positional arguments to pass to the function
             **kwargs: Keyword arguments to pass to the function
         """
-        self.tasks.append((func, args, kwargs))
+        super().add_task(func, *args, **kwargs)
 
     async def run_tasks(self) -> None:
         """Run all background tasks."""
-        for func, args, kwargs in self.tasks:
-            try:
-                if asyncio.iscoroutinefunction(func):
-                    await func(*args, **kwargs)
-                else:
-                    await asyncio.get_event_loop().run_in_executor(
-                        None, func, *args, **kwargs
-                    )
-            except Exception as e:
-                # Log the error but don't raise it to avoid affecting the response
-                import logging
-                logging.error(f"Error running background task {func.__name__}: {str(e)}") 
+        await super().__call__() 

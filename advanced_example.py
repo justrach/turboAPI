@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, UTC
 import asyncio
 import jwt
 import bcrypt
+import logging
+import uuid
 
 # Add the parent directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -32,6 +34,16 @@ from turboapi import (
     BackgroundTasks, WebSocket
 )
 from satya import Model, Field
+from starlette.applications import Starlette
+from starlette.authentication import requires
+from starlette.routing import WebSocketRoute
+from starlette.websockets import WebSocket, WebSocketDisconnect
+from jose import JWTError
+from passlib.context import CryptContext
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Create a TurboAPI application
 app = TurboAPI(
@@ -349,10 +361,6 @@ async def get_product(request: Request, product_id: int = Path(..., ge=1, descri
     """Get details about a specific product."""
     from starlette.exceptions import HTTPException as StarletteHTTPException
     
-    # Print the products_db for debugging
-    print(f"Products DB: {products_db}")
-    print(f"Looking for product ID: {product_id}, type: {type(product_id)}")
-    
     # Convert product_id to int if it's a string
     if isinstance(product_id, str):
         try:
@@ -424,10 +432,6 @@ async def update_product(
     """Update an existing product (admin only)."""
     from starlette.exceptions import HTTPException as StarletteHTTPException
     
-    # Debug information
-    print(f"Update product called with ID: {product_id}, type: {type(product_id)}")
-    print(f"Products DB keys: {list(products_db.keys())}")
-    
     # Convert product_id to int if it's a string
     if isinstance(product_id, str):
         try:
@@ -441,7 +445,6 @@ async def update_product(
     # Get the request body
     try:
         product_data = await request.json()
-        print(f"Update product data: {product_data}")
     except Exception as e:
         raise StarletteHTTPException(status_code=400, detail=f"Invalid JSON body: {str(e)}")
     
@@ -474,10 +477,6 @@ async def delete_product(
 ):
     """Delete a product (admin only)."""
     from starlette.exceptions import HTTPException as StarletteHTTPException
-    
-    # Debug information
-    print(f"Delete product called with ID: {product_id}, type: {type(product_id)}")
-    print(f"Products DB keys: {list(products_db.keys())}")
     
     # Convert product_id to int if it's a string
     if isinstance(product_id, str):

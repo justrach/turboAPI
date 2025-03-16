@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional, Union
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
-class HTTPException(Exception):
+class HTTPException(StarletteHTTPException):
     """Base class for HTTP exceptions."""
 
     def __init__(
@@ -22,7 +22,7 @@ class HTTPException(Exception):
         self.status_code = status_code
         self.detail = detail
         self.headers = headers or {}
-        super().__init__(str(detail))
+        super().__init__(status_code=status_code, detail=detail, headers=headers)
 
     def __repr__(self) -> str:
         """Return string representation of the exception."""
@@ -49,7 +49,7 @@ def http_exception_handler(request, exc):
     
     This handler converts HTTPException instances to JSONResponse objects.
     """
-    from .responses import JSONResponse
+    from starlette.responses import JSONResponse
     
     headers = getattr(exc, "headers", None)
     if headers:
@@ -71,7 +71,7 @@ def validation_exception_handler(request, exc):
     
     This handler converts ValidationError instances to JSONResponse objects.
     """
-    from .responses import JSONResponse
+    from starlette.responses import JSONResponse
     
     return JSONResponse(
         {"detail": exc.errors},
