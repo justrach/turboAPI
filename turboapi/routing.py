@@ -6,13 +6,19 @@ satya-based validation and parameter extraction.
 """
 
 import inspect
+import logging
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Type, Union
 
 from starlette.routing import Route, Router as StarletteRouter, Mount
 from starlette.responses import JSONResponse, Response
+from starlette.requests import Request
+from starlette.exceptions import HTTPException
 
 from .dependencies import solve_dependencies
 from .params import Depends
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 
 class APIRoute(Route):
@@ -88,15 +94,21 @@ class APIRoute(Route):
         - Apply response validation
         """
         async def validated_endpoint(request):
+            """Validate and process the request before calling the endpoint."""
             # Extract path parameters from the request
             path_params = request.path_params
 
             # Extract query parameters
             query_params = dict(request.query_params)
-            
+
             # Prepare kwargs for the endpoint
-            kwargs = {**path_params}
-            
+            kwargs = {}
+
+            # Add path parameters
+            for param_name, value in path_params.items():
+                if param_name in self.signature.parameters:
+                    kwargs[param_name] = value
+
             # Handle body parameters
             if request.method in ("POST", "PUT", "PATCH"):
                 try:
@@ -107,60 +119,46 @@ class APIRoute(Route):
                             if param_name not in kwargs and param_name != "request" and param_name != "body":
                                 if param_name in body:
                                     kwargs[param_name] = body[param_name]
-                            
+
                         # Add the entire body if there's a 'body' parameter
                         if "body" in self.signature.parameters:
                             kwargs["body"] = body
                 except Exception as e:
-                    return JSONResponse(
-                        status_code=400,
-                        content={"detail": f"Invalid JSON body: {str(e)}"}
-                    )
-            
+                    raise HTTPException(status_code=400, detail=f"Invalid JSON body: {str(e)}")
+
             # Add the query parameters
             for param_name, param in self.signature.parameters.items():
                 if param_name in query_params and param_name not in kwargs:
                     kwargs[param_name] = query_params[param_name]
-            
+
             # Add the request object if it's in the signature
             if "request" in self.signature.parameters:
                 kwargs["request"] = request
-            
+
             # Solve dependencies
             if self.dependencies:
-                try:
-                    dependency_values = await solve_dependencies(request, self.dependencies)
-                    kwargs.update(dependency_values)
-                except Exception as e:
-                    return JSONResponse(
-                        status_code=400,
-                        content={"detail": f"Dependency error: {str(e)}"}
-                    )
-            
+                dependency_values = await solve_dependencies(request, self.dependencies)
+                kwargs.update(dependency_values)
+
             # Call the endpoint
             response = await endpoint(**kwargs) if inspect.iscoroutinefunction(endpoint) else endpoint(**kwargs)
-            
-            # Process the response
+
+            # Convert response to Response object if needed
             if isinstance(response, Response):
                 return response
-            
-            # Apply response validation if a response model is specified
-            if self.response_model and response is not None:
-                try:
-                    # Validate response with satya
-                    from satya import Model
-                    if issubclass(self.response_model, Model):
-                        validated_data = self.response_model(**response).to_dict()
-                        return JSONResponse(content=validated_data, status_code=self.status_code)
-                except Exception as e:
-                    # Log error and return original response to avoid breaking
-                    # in production, but in debug mode we should raise
-                    import logging
-                    logging.error(f"Response validation error: {str(e)}")
-                    return JSONResponse(content=response, status_code=self.status_code)
-            
-            # Return standard JSON response
-            return JSONResponse(content=response, status_code=self.status_code)
+            elif isinstance(response, dict):
+                # Validate response if response_model is set
+                if self.response_model and response is not None:
+                    try:
+                        response_obj = self.response_model(**response)
+                        if hasattr(response_obj, "to_dict"):
+                            response = response_obj.to_dict()
+                    except Exception as e:
+                        logger.error(f"Response validation error: {str(e)}")
+                        raise HTTPException(status_code=500, detail="Internal server error")
+                return JSONResponse(content=response, status_code=self.status_code or 200)
+            else:
+                return JSONResponse(content=response, status_code=self.status_code or 200)
         
         return validated_endpoint
 

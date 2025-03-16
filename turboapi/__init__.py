@@ -13,3 +13,7 @@ from .responses import JSONResponse, HTMLResponse, PlainTextResponse, RedirectRe
 from starlette.requests import Request
 from .middleware import Middleware
 from .exceptions import HTTPException
+from .background import BackgroundTasks
+
+# For WebSocket support
+from starlette.websockets import WebSocket

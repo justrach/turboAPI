@@ -9,15 +9,9 @@ from typing import Any, Dict, Optional, Union
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
-class HTTPException(StarletteHTTPException):
-    """
-    HTTP exception class.
-    
-    This exception is used to return HTTP error responses from route handlers.
-    It extends Starlette's HTTPException with additional functionality like
-    support for structured error details.
-    """
-    
+class HTTPException(Exception):
+    """Base class for HTTP exceptions."""
+
     def __init__(
         self,
         status_code: int,
@@ -25,10 +19,15 @@ class HTTPException(StarletteHTTPException):
         headers: Optional[Dict[str, str]] = None,
     ):
         """Initialize the HTTP exception with the given parameters."""
-        super().__init__(status_code=status_code, detail=detail, headers=headers)
         self.status_code = status_code
         self.detail = detail
         self.headers = headers or {}
+        super().__init__(str(detail))
+
+    def __repr__(self) -> str:
+        """Return string representation of the exception."""
+        class_name = self.__class__.__name__
+        return f"{class_name}(status_code={self.status_code!r}, detail={self.detail!r})"
 
 
 class ValidationError(Exception):

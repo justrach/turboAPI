@@ -10,8 +10,9 @@ import inspect
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
-from starlette.routing import BaseRoute, Route
+from starlette.routing import BaseRoute, Route, WebSocketRoute
 from starlette.types import ASGIApp
+from starlette.websockets import WebSocket
 
 from .routing import APIRouter
 from .middleware import TurboAPIMiddleware
@@ -328,6 +329,14 @@ class TurboAPI:
         """Decorator for registering event handlers."""
         def decorator(func):
             self.app.on_event(event_type)(func)
+            return func
+        return decorator
+    
+    def websocket(self, path: str):
+        """Decorator for adding a WebSocket route handler."""
+        def decorator(func):
+            route = WebSocketRoute(path, func)
+            self.app.routes.append(route)
             return func
         return decorator
     
