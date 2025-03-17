@@ -8,6 +8,7 @@ direct Starlette imports to ensure maximum portability and compatibility.
 import asyncio
 import logging
 import time
+import json
 import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Union, Any
@@ -19,24 +20,13 @@ from satya import Model, Field
 from turboapi import (
     TurboAPI, APIRouter, Depends, HTTPException, 
     JSONResponse, Request, Response, WebSocket,
-    BackgroundTasks, Middleware
+    BackgroundTasks, Middleware, AuthenticationMiddleware,
+    BaseAuthentication, AuthCredentials, BaseUser
 )
-from turboapi.middleware import AuthenticationMiddleware
-from turboapi.authentication import AuthCredentials, BaseUser, BaseAuthentication
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Initialize API
-app = TurboAPI(
-    title="TurboAPI Advanced Example",
-    description="A more complex API showing advanced TurboAPI features without direct Starlette imports",
-    version="0.1.0",
-)
-
-# Initialize router
-router = APIRouter()
 
 # JWT Configuration
 SECRET_KEY = "your-secret-key-keep-it-secret"
@@ -103,7 +93,7 @@ class Product(Model):
             "created_by": self.created_by
         }
 
-class User(Model):
+class User(Model, BaseUser):
     """User model with validation."""
     username: str = Field(min_length=3, max_length=50)
     email: str = Field(min_length=5, max_length=100)
@@ -118,6 +108,16 @@ class User(Model):
             "full_name": self.full_name,
             "disabled": self.disabled
         }
+    
+    @property
+    def display_name(self) -> str:
+        """Return the display name for the user."""
+        return self.full_name or self.username
+    
+    @property
+    def identity(self) -> str:
+        """Return the unique identifier for the user."""
+        return self.username
 
 class Token(Model):
     """Token model for authentication."""
@@ -279,6 +279,32 @@ class TokenAuthBackend(BaseAuthentication):
         
         return AuthCredentials(), None
 
+
+# Define custom middleware
+async def add_process_time_header(request: Request, call_next):
+    """Middleware for timing the request processing time."""
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    response.headers["X-Process-Time"] = str(process_time)
+    return response
+
+# Define middleware list
+middleware = [
+    Middleware(AuthenticationMiddleware, backend=TokenAuthBackend()),
+    Middleware(None, dispatch=add_process_time_header)
+]
+
+# Initialize API with middleware
+app = TurboAPI(
+    title="TurboAPI Advanced Example",
+    description="A more complex API showing advanced TurboAPI features without direct Starlette imports",
+    version="0.1.0",
+    middleware=middleware
+)
+
+# Initialize router
+router = APIRouter()
 
 @router.get("/")
 async def read_root():
@@ -578,12 +604,6 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.error(f"WebSocket error: {str(e)}")
 
 
-# Apply middleware
-app.add_middleware(
-    AuthenticationMiddleware, backend=TokenAuthBackend()
-)
-
-
 # Custom exception handler for 404 errors
 @app.exception_handler(404)
 async def not_found_exception_handler(request, exc):
@@ -613,17 +633,6 @@ async def general_exception_handler(request, exc):
         status_code=500,
         content={"detail": "An unexpected error occurred"}
     )
-
-
-# Add custom middleware for timing requests
-@app.middleware("http")
-async def add_process_time_header(request: Request, call_next):
-    """Middleware for timing the request processing time."""
-    start_time = time.time()
-    response = await call_next(request)
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(process_time)
-    return response
 
 
 # Add WebSocket route

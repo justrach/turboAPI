@@ -11,9 +11,19 @@ from .routing import APIRouter
 from .params import Path, Query, Header, Cookie, Body, Depends, Security
 from .responses import JSONResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.requests import Request
-from .middleware import Middleware
+from .middleware import Middleware, AuthenticationMiddleware, JWTAuthMiddleware, BasicAuthMiddleware
 from .exceptions import HTTPException
 from .background import BackgroundTasks
+from .authentication import (
+    AuthCredentials, 
+    BaseUser, 
+    SimpleUser, 
+    UnauthenticatedUser,
+    BaseAuthentication,
+    JWTAuthentication,
+    OAuth2PasswordRequestForm,
+    OAuth2PasswordBearer
+)
 
 # For WebSocket support
 from starlette.websockets import WebSocket
