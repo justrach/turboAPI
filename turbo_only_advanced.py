@@ -24,6 +24,8 @@ from turboapi import (
     BaseAuthentication, AuthCredentials, BaseUser
 )
 
+from starlette.middleware.base import BaseHTTPMiddleware
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -281,18 +283,21 @@ class TokenAuthBackend(BaseAuthentication):
 
 
 # Define custom middleware
-async def add_process_time_header(request: Request, call_next):
-    """Middleware for timing the request processing time."""
-    start_time = time.time()
-    response = await call_next(request)
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(process_time)
-    return response
+class ProcessTimeMiddleware(BaseHTTPMiddleware):
+    """Middleware for adding process time header to responses."""
+    
+    async def dispatch(self, request, call_next):
+        """Add process time header to the response."""
+        start_time = time.time()
+        response = await call_next(request)
+        process_time = time.time() - start_time
+        response.headers["X-Process-Time"] = str(process_time)
+        return response
 
 # Define middleware list
 middleware = [
     Middleware(AuthenticationMiddleware, backend=TokenAuthBackend()),
-    Middleware(None, dispatch=add_process_time_header)
+    Middleware(ProcessTimeMiddleware)
 ]
 
 # Initialize API with middleware
@@ -583,6 +588,8 @@ class WebSocketMessage:
         })
 
 
+# Add WebSocket route
+@app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time updates."""
     await websocket.accept()
@@ -633,10 +640,6 @@ async def general_exception_handler(request, exc):
         status_code=500,
         content={"detail": "An unexpected error occurred"}
     )
-
-
-# Add WebSocket route
-app.add_route("/ws", websocket_endpoint, methods=["GET"])
 
 
 # Include the router
