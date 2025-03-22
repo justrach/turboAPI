@@ -119,6 +119,14 @@ router = APIRouter()
 MODEL = None
 TOKENIZER = None
 
+# Add a semaphore to prevent concurrent model access
+# MLX is not thread-safe for concurrent inference
+MODEL_LOCK = asyncio.Semaphore(1)
+
+# Create a queue system to handle concurrent requests
+REQUEST_QUEUE = asyncio.Queue()
+QUEUE_WORKER_RUNNING = False
+
 def initialize_model(model_name="mlx-community/QwQ-32B-4bit"):
     """Initialize the MLX model and tokenizer."""
     global MODEL, TOKENIZER
@@ -146,9 +154,76 @@ def clear_mlx_cache():
     except Exception as e:
         logger.warning(f"Could not clear MLX cache: {str(e)}")
 
-async def stream_response(chat_request: ChatCompletionRequest):
-    """Real-time streaming handler using MLX's built-in streaming"""
+# Add this function to process the queue
+async def process_request_queue():
+    """Worker to process requests from the queue"""
+    global QUEUE_WORKER_RUNNING
+    
+    QUEUE_WORKER_RUNNING = True
+    logger.info("Request queue worker started")
+    
     try:
+        while True:
+            # Get the next request, future pair from the queue
+            request_data, future = await REQUEST_QUEUE.get()
+            
+            try:
+                logger.info(f"Processing queued request {request_data.get('id', 'unknown')}")
+                
+                # Acquire the model lock (will block until available)
+                async with MODEL_LOCK:
+                    logger.info(f"Acquired model lock for queued request {request_data.get('id', 'unknown')}")
+                    
+                    # Process the request based on type
+                    if request_data.get('type') == 'streaming':
+                        # Handle streaming request
+                        chat_request = request_data.get('chat_request')
+                        request = request_data.get('request')
+                        
+                        # Process the streaming request
+                        result = await _process_stream_request(chat_request, request)
+                        future.set_result(result)
+                    else:
+                        # Handle non-streaming request
+                        chat_request = request_data.get('chat_request')
+                        
+                        # Process the non-streaming request
+                        result = await _process_completion_request(chat_request)
+                        future.set_result(result)
+                    
+                    logger.info(f"Completed queued request {request_data.get('id', 'unknown')}")
+            except Exception as e:
+                logger.error(f"Error processing queued request: {str(e)}")
+                future.set_exception(e)
+            finally:
+                # Mark the task as done
+                REQUEST_QUEUE.task_done()
+                
+    except asyncio.CancelledError:
+        logger.info("Request queue worker was cancelled")
+    except Exception as e:
+        logger.error(f"Unexpected error in queue worker: {str(e)}")
+    finally:
+        QUEUE_WORKER_RUNNING = False
+        logger.info("Request queue worker stopped")
+
+async def start_queue_worker():
+    """Ensure the queue worker is running"""
+    global QUEUE_WORKER_RUNNING
+    
+    if not QUEUE_WORKER_RUNNING:
+        # Start the queue worker task
+        asyncio.create_task(process_request_queue())
+
+# Actual implementation of streaming request processing
+async def _process_stream_request(chat_request, request):
+    """Process a streaming request with the model lock already acquired"""
+    try:
+        logger.info("Processing streaming request")
+        
+        # Clear cache before generation
+        clear_mlx_cache()
+        
         # Format conversation for the model
         conversation = [{"role": m.role, "content": m.content} for m in chat_request.messages]
         prompt = TOKENIZER.apply_chat_template(conversation, add_generation_prompt=True)
@@ -192,126 +267,59 @@ async def stream_response(chat_request: ChatCompletionRequest):
                 logger.info("Sending initial role message")
                 yield initial_message
                 
-                # Use true streaming with stream_generate
-                logger.info("Starting true token-by-token streaming with stream_generate")
+                # Use blocking generation since stream_generate is causing issues
+                # We'll simulate streaming by generating the full response and then streaming it back in small chunks
+                logger.info("Starting full response generation")
+                response = generate(
+                    MODEL,
+                    TOKENIZER,
+                    prompt=prompt,
+                    max_tokens=chat_request.max_tokens,
+                )
+                
+                # Process the response to handle thinking tags
                 in_thinking = False
-                thinking_buffer = ""
-                response_buffer = ""
+                clean_text = ""
                 
-                # Create worker to run stream_generate (which is blocking)
-                def run_stream_generate():
-                    try:
-                        logger.info("Starting stream_generate")
-                        for token_data in stream_generate(
-                            MODEL,
-                            TOKENIZER,
-                            prompt=prompt,
-                            max_tokens=chat_request.max_tokens,
-                        ):
-                            # Process token immediately
-                            try:
-                                # Extract the token from the GenerationResponse object
-                                token_id = None
-                                token = None
-                                
-                                # Check various possible attributes
-                                if hasattr(token_data, 'text'):
-                                    # If it already has decoded text, use that directly
-                                    token = token_data.text
-                                elif hasattr(token_data, 'token_id'):
-                                    token_id = token_data.token_id
-                                elif hasattr(token_data, 'token'):
-                                    token_id = token_data.token
-                                elif hasattr(token_data, 'id'):
-                                    token_id = token_data.id
-                                else:
-                                    # Try to use the object directly if it's an integer
-                                    if isinstance(token_data, int):
-                                        token_id = token_data
-                                    
-                                # Decode token_id if we have one and no direct text
-                                if token is None and token_id is not None:
-                                    token = TOKENIZER.decode([token_id])
-                                
-                                if token:
-                                    # Send this token to the queue
-                                    token_queue.put(token)
-                            except Exception as e:
-                                logger.error(f"Error processing token in generator: {str(e)}")
+                # Process the response line by line to handle thinking tags
+                for line in response.split('\n'):
+                    if "<think>" in line:
+                        in_thinking = True
+                        # Add text before the <think> tag
+                        before_think = line.split("<think>")[0]
+                        if before_think.strip():
+                            clean_text += before_think + "\n"
+                    elif "</think>" in line:
+                        in_thinking = False
+                        # Add text after the </think> tag
+                        after_think = line.split("</think>")[1]
+                        if after_think.strip():
+                            clean_text += after_think + "\n"
+                    elif not in_thinking:
+                        clean_text += line + "\n"
+                
+                # Stream the clean response in small chunks for a smoother effect
+                logger.info(f"Streaming clean response of length {len(clean_text)}")
+                chunk_size = 3  # Characters per chunk
+                for i in range(0, len(clean_text), chunk_size):
+                    chunk = clean_text[i:i+chunk_size]
+                    if chunk:
+                        data = {
+                            'id': completion_id,
+                            'object': 'chat.completion.chunk',
+                            'created': int(time.time()),
+                            'model': chat_request.model,
+                            'choices': [{
+                                'index': 0,
+                                'delta': {'content': chunk},
+                                'finish_reason': None
+                            }]
+                        }
+                        msg = f"data: {json.dumps(data)}\n\n".encode('utf-8')
+                        yield msg
                         
-                        # Signal end of generation
-                        token_queue.put(None)
-                        logger.info("stream_generate complete")
-                        return True
-                    except Exception as e:
-                        logger.error(f"Error in run_stream_generate: {str(e)}")
-                        token_queue.put(None)
-                        return False
-                
-                # Create a queue to communicate between threads
-                token_queue = queue.Queue()
-                
-                # Run the generation in a separate thread
-                thread = threading.Thread(target=run_stream_generate)
-                thread.daemon = True
-                thread.start()
-                
-                # Process tokens as they come through the queue
-                in_thinking = False
-                thinking_buffer = ""
-                response_buffer = ""
-                
-                while True:
-                    try:
-                        # Get the next token (with timeout to allow for asyncio cooperation)
-                        token = token_queue.get(timeout=0.1)
-                        
-                        # None signals end of generation
-                        if token is None:
-                            break
-                            
-                        # Add to our ongoing buffers for better think tag detection
-                        response_buffer += token
-                        
-                        # Check for thinking tags spanning multiple tokens
-                        if "<think>" in response_buffer and not in_thinking:
-                            in_thinking = True
-                            response_buffer = response_buffer.split("<think>")[0]
-                            
-                        if "</think>" in response_buffer and in_thinking:
-                            in_thinking = False
-                            response_buffer = response_buffer.split("</think>")[1]
-                        
-                        # Skip everything when in thinking mode
-                        if in_thinking:
-                            thinking_buffer += token
-                            continue
-                            
-                        # Stream this token if it has content
-                        if token.strip():
-                            data = {
-                                'id': completion_id,
-                                'object': 'chat.completion.chunk',
-                                'created': int(time.time()),
-                                'model': chat_request.model,
-                                'choices': [{
-                                    'index': 0,
-                                    'delta': {'content': token},
-                                    'finish_reason': None
-                                }]
-                            }
-                            msg = f"data: {json.dumps(data)}\n\n".encode('utf-8')
-                            yield msg
-                            
-                            # Add a tiny sleep to allow other tasks to run
-                            await asyncio.sleep(0.001)
-                            
-                    except queue.Empty:
-                        # No new tokens yet, allow asyncio to do other work
+                        # Add a small delay to simulate real streaming
                         await asyncio.sleep(0.01)
-                    except Exception as e:
-                        logger.error(f"Error processing token from queue: {str(e)}")
-                        break
                 
                 # Send final completion message
                 logger.info("Sending final completion message")
@@ -342,7 +350,7 @@ async def stream_response(chat_request: ChatCompletionRequest):
                 error_message = f"data: {{\"error\": \"Stream failed: {str(e)}\"}}\n\n".encode('utf-8')
                 yield error_message
         
-        # CRITICAL FIX: Use streaming response without Content-Length
+        # Create the streaming response
         headers = {
             "Cache-Control": "no-cache",
             "Connection": "keep-alive", 
@@ -362,143 +370,15 @@ async def stream_response(chat_request: ChatCompletionRequest):
         )
             
     except Exception as e:
-        logger.error(f"Error in stream_response: {str(e)}")
+        logger.error(f"Error in _process_stream_request: {str(e)}")
         logger.exception("Full traceback:")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-# Custom generator function to stream output as it's generated
-def stream_generation(model, tokenizer, prompt, max_tokens=2048):
-    """Custom generator function for streaming text as it's generated."""
-    # Create a queue to capture output
-    output_queue = queue.Queue()
-    complete_response = []
-    
-    # Create a custom stdout to capture prints from the generate function
-    class CustomStdout:
-        def __init__(self, queue):
-            self.queue = queue
-            self.buffer = ""
-            self.original_stdout = sys.stdout
-        
-        def write(self, text):
-            self.buffer += text
-            if '\n' in self.buffer or '\r' in self.buffer:
-                lines = self.buffer.splitlines(True)
-                self.buffer = lines.pop() if lines and not lines[-1].endswith(('\n', '\r')) else ""
-                for line in lines:
-                    self.queue.put(line.rstrip('\n\r'))
-                    # Also write to the original stdout for debugging
-                    self.original_stdout.write(line)
-            return len(text)
-        
-        def flush(self):
-            if self.buffer:
-                self.queue.put(self.buffer)
-                self.original_stdout.write(self.buffer)
-                self.original_stdout.flush()
-                self.buffer = ""
-    
-    # Function to run in a separate thread
-    def generate_in_thread():
-        # Redirect stdout to capture output
-        custom_stdout = CustomStdout(output_queue)
-        original_stdout = sys.stdout
-        sys.stdout = custom_stdout
-        
-        try:
-            # Generate with verbose output to see progress
-            response = generate(
-                model,
-                tokenizer,
-                prompt=prompt,
-                verbose=True,  # Enable verbose output to see progress
-                max_tokens=max_tokens,
-            )
-            
-            # Final complete output
-            complete_response.append(response)
-            
-            # Signal end of generation
-            output_queue.put(None)
-        except Exception as e:
-            logger.error(f"Error in generation thread: {str(e)}")
-            output_queue.put(None)
-        finally:
-            # Restore original stdout
-            sys.stdout = original_stdout
-    
-    # Start generation in a separate thread
-    thread = threading.Thread(target=generate_in_thread)
-    thread.daemon = True
-    thread.start()
-    
-    # Process output as it becomes available
-    in_thinking = False
-    thinking_buffer = []
-    output_buffer = []
-    
-    while True:
-        try:
-            line = output_queue.get(timeout=0.1)
-            if line is None:  # End of generation
-                break
-                
-            # Process the line
-            if "<think>" in line:
-                in_thinking = True
-                thinking_buffer.append(line.replace("<think>", "").strip())
-            elif "</think>" in line:
-                in_thinking = False
-                thinking_buffer.append(line.replace("</think>", "").strip())
-            elif in_thinking:
-                thinking_buffer.append(line.strip())
-            else:
-                output_buffer.append(line.strip())
-                # Yield the line for immediate display
-                yield {
-                    "text": line.strip(),
-                    "is_thinking": False
-                }
-        except queue.Empty:
-            # No new output, continue waiting
-            continue
-    
-    # Thread is done, get the final complete response
-    if complete_response:
-        return {
-            "thinking": "\n".join(thinking_buffer),
-            "output": "\n".join(output_buffer),
-            "complete": complete_response[0]
-        }
-    else:
-        return {
-            "thinking": "\n".join(thinking_buffer),
-            "output": "\n".join(output_buffer),
-            "complete": ""
-        }
-
-@router.post("/v1/chat/completions")
-async def chat_completions(request: Request):
-    """OpenAI-compatible chat completions endpoint."""
-    global MODEL, TOKENIZER
-    
-    if MODEL is None or TOKENIZER is None:
-        raise HTTPException(status_code=503, detail="Model not initialized")
-    
+# Implement non-streaming request processing
+async def _process_completion_request(chat_request):
+    """Process a non-streaming request with the model lock already acquired"""
     try:
-        body = await request.json()
-        
-        # Parse the request
-        chat_request = ChatCompletionRequest(
-            model=body.get("model", "local-mlx"),
-            messages=[ChatMessage(role=m["role"], content=m["content"]) for m in body.get("messages", [])],
-            max_tokens=body.get("max_tokens", 2048),
-            stream=body.get("stream", False)
-        )
-        
-        # Check if streaming is requested
-        if chat_request.stream:
-            return await stream_response(chat_request)
+        logger.info("Processing non-streaming request")
         
         # Clear cache before generation
         clear_mlx_cache()
@@ -585,7 +465,104 @@ async def chat_completions(request: Request):
         
         # Return the serialized response with thinking part if present
         return response_dict
+        
+    except Exception as e:
+        logger.error(f"Error in _process_completion_request: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+# Replace the stream_response function with this
+async def stream_response(chat_request: ChatCompletionRequest, request: Request):
+    """Queue the streaming request and return a streaming response"""
+    # Create a future to hold the result
+    result_future = asyncio.Future()
     
+    # Generate a unique request ID
+    request_id = f"request-{int(time.time() * 1000)}"
+    
+    # Create the request data
+    request_data = {
+        'id': request_id,
+        'type': 'streaming',
+        'chat_request': chat_request,
+        'request': request,
+        'queued_at': time.time()
+    }
+    
+    # Get the current queue size for logging
+    queue_size = REQUEST_QUEUE.qsize()
+    logger.info(f"Queueing streaming request {request_id}. Current queue size: {queue_size}")
+    
+    # Add to the queue
+    await REQUEST_QUEUE.put((request_data, result_future))
+    
+    # Ensure the queue worker is running
+    await start_queue_worker()
+    
+    # Wait for the result
+    try:
+        # Return the result when it's ready
+        return await result_future
+    except Exception as e:
+        logger.error(f"Error getting streaming result: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+# Replace the chat_completions function with this
+@router.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    """OpenAI-compatible chat completions endpoint with request queuing."""
+    global MODEL, TOKENIZER
+    
+    if MODEL is None or TOKENIZER is None:
+        raise HTTPException(status_code=503, detail="Model not initialized")
+    
+    try:
+        body = await request.json()
+        
+        # Parse the request
+        chat_request = ChatCompletionRequest(
+            model=body.get("model", "local-mlx"),
+            messages=[ChatMessage(role=m["role"], content=m["content"]) for m in body.get("messages", [])],
+            max_tokens=body.get("max_tokens", 2048),
+            stream=body.get("stream", False)
+        )
+        
+        # Check if streaming is requested
+        if chat_request.stream:
+            return await stream_response(chat_request, request)
+        
+        # For non-streaming, also use the queue
+        # Create a future to hold the result
+        result_future = asyncio.Future()
+        
+        # Generate a unique request ID
+        request_id = f"request-{int(time.time() * 1000)}"
+        
+        # Create the request data
+        request_data = {
+            'id': request_id,
+            'type': 'non-streaming',
+            'chat_request': chat_request,
+            'queued_at': time.time()
+        }
+        
+        # Get the current queue size for logging
+        queue_size = REQUEST_QUEUE.qsize()
+        logger.info(f"Queueing non-streaming request {request_id}. Current queue size: {queue_size}")
+        
+        # Add to the queue
+        await REQUEST_QUEUE.put((request_data, result_future))
+        
+        # Ensure the queue worker is running
+        await start_queue_worker()
+        
+        # Wait for the result
+        try:
+            # Return the result when it's ready
+            return await result_future
+        except Exception as e:
+            logger.error(f"Error getting non-streaming result: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        
     except Exception as e:
         logger.error(f"Error in chat completions: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
@@ -611,6 +588,10 @@ async def startup_event():
     logger.info("Initializing MLX model...")
     initialize_model()
     logger.info("Model initialization complete")
+    
+    # Start the queue worker
+    await start_queue_worker()
+    logger.info("Queue worker started")
 
 @app.on_event("shutdown")
 async def shutdown_event():
