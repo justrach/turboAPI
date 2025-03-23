@@ -1,24 +1,65 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# MLX Chat Frontend
+
+A modern chat interface for MLX models with a beautiful coral red theme, built with Next.js and shadcn/ui.
+
+## Features
+
+- 🎨 Modern UI using shadcn/ui components
+- 🌈 Coral red color theme
+- 🔄 Model selection from available MLX models
+- 📱 Mobile-friendly responsive design
+- 🌓 Light/dark mode with system preference detection
+- 🔄 Streaming responses for a more dynamic chat experience
+- 🛡️ Server-side API calls to avoid CORS issues
 
 ## Getting Started
 
-First, run the development server:
+### Prerequisites
+
+- Node.js 18+ and npm/yarn
+- MLX Server running (on default port 8000 or configured via .env)
+
+### Installation
+
+1. Clone the repository
+2. Install dependencies:
+   ```bash
+   cd frontend
+   npm install
+   ```
+3. Create a `.env.local` file based on `.env.example`:
+   ```bash
+   cp .env.example .env.local
+   ```
+4. Update the `MLX_API_URL` in `.env.local` to point to your running MLX server
+
+### Development
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The development server will start on http://localhost:3000
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Production Build
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run build
+npm start
+```
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| MLX_API_URL | URL of the MLX server | http://localhost:8000 |
+
+## Architecture
+
+- **Next.js App Router**: For routing and server components
+- **shadcn/ui**: For UI components with a coral red theme
+- **Server-side API Routes**: To proxy requests to the MLX server
+- **Streaming SSE**: For real-time streaming of model responses
 
 ## Learn More
 

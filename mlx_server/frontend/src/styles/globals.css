@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+ 
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 20 14.3% 4.1%;
+    
+    --card: 0 0% 100%;
+    --card-foreground: 20 14.3% 4.1%;
+ 
+    --popover: 0 0% 100%;
+    --popover-foreground: 20 14.3% 4.1%;
+ 
+    --primary: 16 100% 70%; /* Coral Red */
+    --primary-foreground: 60 9.1% 97.8%;
+ 
+    --secondary: 16 40% 90%; /* Light Coral */
+    --secondary-foreground: 24 9.8% 10%;
+ 
+    --muted: 60 4.8% 95.9%;
+    --muted-foreground: 25 5.3% 44.7%;
+ 
+    --accent: 16 40% 96%; /* Very Light Coral */
+    --accent-foreground: 24 9.8% 10%;
+ 
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 60 9.1% 97.8%;
+
+    --border: 20 5.9% 90%;
+    --input: 20 5.9% 90%;
+    --ring: 16 100% 70%; /* Coral Red */
+ 
+    --radius: 0.5rem;
+  }
+ 
+  .dark {
+    --background: 20 14.3% 4.1%;
+    --foreground: 60 9.1% 97.8%;
+ 
+    --card: 20 14.3% 4.1%;
+    --card-foreground: 60 9.1% 97.8%;
+ 
+    --popover: 20 14.3% 4.1%;
+    --popover-foreground: 60 9.1% 97.8%;
+ 
+    --primary: 16 100% 65%; /* Coral Red (darker for dark mode) */
+    --primary-foreground: 60 9.1% 97.8%;
+ 
+    --secondary: 16 40% 30%; /* Dark Coral */
+    --secondary-foreground: 60 9.1% 97.8%;
+ 
+    --muted: 12 6.5% 15.1%;
+    --muted-foreground: 24 5.4% 63.9%;
+ 
+    --accent: 12 6.5% 15.1%;
+    --accent-foreground: 60 9.1% 97.8%;
+ 
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 60 9.1% 97.8%;
+ 
+    --border: 12 6.5% 15.1%;
+    --input: 12 6.5% 15.1%;
+    --ring: 16 100% 65%; /* Coral Red */
+  }
+}
+ 
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+@keyframes floatUp {
+  0% {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message-animate {
+  animation: floatUp 0.3s ease-out forwards;
+} 
