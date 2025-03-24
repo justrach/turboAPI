@@ -71,7 +71,8 @@ export function ThinkingView({ thinkingContent, isVisible }: ThinkingViewProps) 
             </div>
           </AccordionTrigger>
           <AccordionContent>
-            <div className="mt-1 bg-muted/50 rounded-lg p-3 text-xs font-mono whitespace-pre-wrap overflow-auto max-h-[400px] text-muted-foreground">
+            <div className="mt-1 bg-muted/50 rounded-lg p-3 text-xs font-mono whitespace-pre-wrap overflow-auto max-h-[400px] text-muted-foreground
+              scrollbar-thin scrollbar-thumb-primary/40 scrollbar-track-transparent hover:scrollbar-thumb-primary/60">
               {thinking}
             </div>
           </AccordionContent>

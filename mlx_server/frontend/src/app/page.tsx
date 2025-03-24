@@ -97,7 +97,7 @@ export default function Home() {
         body: JSON.stringify({
           model: selectedModel,
           messages: [...messages, userMessage].map(({ role, content }) => ({ role, content })),
-          max_tokens: 2048,
+          max_tokens: 8192,
           stream: true, // Enable streaming
         }),
       });
@@ -221,81 +221,85 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Chat area */}
-      <div className="flex-1 overflow-y-auto p-4 container max-w-4xl mx-auto">
-        <div className="space-y-4 pb-20">
-          {messages.length === 0 && !streamingContent ? (
-            <div className="flex flex-col items-center justify-center h-[70vh] text-center space-y-4">
-              <div className="flex flex-col items-center space-y-2">
-                <div className="rounded-full bg-primary/10 p-4">
-                  <MessageSquare className="h-6 w-6 text-primary" />
+      {/* Chat area - restructured for edge-to-edge scrollbar */}
+      <div className="flex-1 overflow-hidden">
+        <div className="h-full overflow-y-auto scrollbar-thin scrollbar-thumb-primary/20 scrollbar-track-transparent hover:scrollbar-thumb-primary/40">
+          <div className="container max-w-4xl mx-auto p-4">
+            <div className="space-y-4 pb-20">
+              {messages.length === 0 && !streamingContent ? (
+                <div className="flex flex-col items-center justify-center h-[70vh] text-center space-y-4">
+                  <div className="flex flex-col items-center space-y-2">
+                    <div className="rounded-full bg-primary/10 p-4">
+                      <MessageSquare className="h-6 w-6 text-primary" />
+                    </div>
+                    <h2 className="text-xl font-bold">Start a conversation</h2>
+                  </div>
+                  <p className="text-muted-foreground max-w-md">
+                    Send a message to start chatting with the selected MLX model.
+                  </p>
                 </div>
-                <h2 className="text-xl font-bold">Start a conversation</h2>
-              </div>
-              <p className="text-muted-foreground max-w-md">
-                Send a message to start chatting with the selected MLX model.
-              </p>
-            </div>
-          ) : (
-            <>
-              {messages.map((message) => (
-                <div
-                  key={message.id}
-                  className={`flex flex-col ${
-                    message.role === "user" ? "items-end" : "items-start"
-                  }`}
-                >
-                  {/* Message bubble - only shown for user messages or non-qwq model responses */}
-                  {(message.role === "user" || (message.role === "assistant" && !isQwqModel)) && (
+              ) : (
+                <>
+                  {messages.map((message) => (
                     <div
-                      className={`max-w-[80%] rounded-xl p-4 message-animate ${
-                        message.role === "user"
-                          ? "bg-primary text-primary-foreground"
-                          : "bg-muted"
+                      key={message.id}
+                      className={`flex flex-col ${
+                        message.role === "user" ? "items-end" : "items-start"
                       }`}
                     >
-                      <p className="whitespace-pre-wrap">{message.content}</p>
+                      {/* Message bubble - only shown for user messages or non-qwq model responses */}
+                      {(message.role === "user" || (message.role === "assistant" && !isQwqModel)) && (
+                        <div
+                          className={`max-w-[80%] rounded-xl p-4 message-animate ${
+                            message.role === "user"
+                              ? "bg-primary text-primary-foreground"
+                              : "bg-muted"
+                          }`}
+                        >
+                          <p className="whitespace-pre-wrap">{message.content}</p>
+                        </div>
+                      )}
+                      
+                      {/* Thinking UI for QWQ model responses */}
+                      {message.role === "assistant" && isQwqModel && (
+                        <div className="max-w-[80%]">
+                          <ThinkingView 
+                            thinkingContent={message.content} 
+                            isVisible={true} 
+                          />
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  
+                  {/* Streaming message - only shown for non-qwq models */}
+                  {streamingContent && !isQwqModel && (
+                    <div className="flex justify-start">
+                      <div className="max-w-[80%] rounded-xl p-4 bg-muted message-animate">
+                        <p className="whitespace-pre-wrap">
+                          {streamingContent}
+                          <span className="inline-block w-2 h-4 ml-1 bg-primary animate-pulse"></span>
+                        </p>
+                      </div>
                     </div>
                   )}
                   
-                  {/* Thinking UI for QWQ model responses */}
-                  {message.role === "assistant" && isQwqModel && (
-                    <div className="max-w-[80%]">
-                      <ThinkingView 
-                        thinkingContent={message.content} 
-                        isVisible={true} 
-                      />
+                  {/* QWQ model streaming - show thinking UI */}
+                  {rawResponse && isQwqModel && (
+                    <div className="flex justify-start">
+                      <div className="max-w-[80%]">
+                        <ThinkingView 
+                          thinkingContent={rawResponse} 
+                          isVisible={true} 
+                        />
+                      </div>
                     </div>
                   )}
-                </div>
-              ))}
-              
-              {/* Streaming message - only shown for non-qwq models */}
-              {streamingContent && !isQwqModel && (
-                <div className="flex justify-start">
-                  <div className="max-w-[80%] rounded-xl p-4 bg-muted message-animate">
-                    <p className="whitespace-pre-wrap">
-                      {streamingContent}
-                      <span className="inline-block w-2 h-4 ml-1 bg-primary animate-pulse"></span>
-                    </p>
-                  </div>
-                </div>
+                </>
               )}
-              
-              {/* QWQ model streaming - show thinking UI */}
-              {rawResponse && isQwqModel && (
-                <div className="flex justify-start">
-                  <div className="max-w-[80%]">
-                    <ThinkingView 
-                      thinkingContent={rawResponse} 
-                      isVisible={true} 
-                    />
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-          <div ref={messagesEndRef} />
+              <div ref={messagesEndRef} />
+            </div>
+          </div>
         </div>
       </div>
 
