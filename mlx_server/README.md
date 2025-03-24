@@ -1,5 +1,7 @@
 # Multi-Model MLX Server
 
+![Demo Video](video/recording.mp4)
+
 A flexible OpenAI-compatible API server for running multiple local LLM inference with MLX on Mac.
 
 ## Features
