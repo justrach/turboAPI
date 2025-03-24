@@ -20,6 +20,7 @@ from typing import List, Dict, Any, Tuple, Optional, Union, Callable
 from enum import Enum
 from mlx_lm import load, generate, stream_generate
 import gc
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -45,7 +46,8 @@ class ModelManager:
             "system_prompt": "You are a helpful assistant.",
             "requires_special_chat_template": False,
             "allowed_roles": ["system", "user", "assistant"],
-            "description": "QwQ model with thinking support"
+            "description": "QwQ model with thinking support",
+            "strict_role_alternation": False
         },
         # Mistral model (instruct format)
         "mlx-community/Mistral-7B-Instruct-v0.3-4bit": {
@@ -55,10 +57,14 @@ class ModelManager:
             "system_prompt": "",  # System prompt part of template
             "requires_special_chat_template": True, 
             "allowed_roles": ["user", "assistant"],  # Strict alternation
-            "description": "Mistral-7B instruction tuned model"
+            "description": "Mistral-7B instruction tuned model",
+            "strict_role_alternation": True
         },
         # Add more models here as needed
     }
+    
+    # Add a conversation log for debugging
+    CONVERSATION_LOG = {}
     
     @classmethod
     def get_model_config(cls, model_name: str) -> Dict[str, Any]:
@@ -76,7 +82,8 @@ class ModelManager:
             "system_prompt": "",
             "requires_special_chat_template": False,
             "allowed_roles": ["user", "assistant"],
-            "description": "Unknown model - using default configuration"
+            "description": "Unknown model - using default configuration",
+            "strict_role_alternation": False
         }
     
     @classmethod
@@ -93,19 +100,55 @@ class ModelManager:
         config = cls.get_model_config(model_name)
         allowed_roles = config["allowed_roles"]
         
+        # Log conversation for debugging
+        conversation_id = f"{model_name}_{int(time.time())}"
+        cls.CONVERSATION_LOG[conversation_id] = {
+            "model": model_name,
+            "messages": messages.copy(),
+            "timestamp": time.time()
+        }
+        
+        # Log detailed message validation for debugging
+        logger.info(f"Validating conversation for model {model_name}:")
+        for i, msg in enumerate(messages):
+            logger.info(f"  Message {i}: role={msg['role']}, content={msg['content'][:30]}...")
+        
         # Check message roles
         for i, message in enumerate(messages):
             if message["role"] not in allowed_roles:
-                return False, f"Invalid role '{message['role']}' at message {i}. Allowed roles: {allowed_roles}"
+                error_msg = f"Invalid role '{message['role']}' at message {i}. Allowed roles: {allowed_roles}"
+                logger.error(error_msg)
+                return False, error_msg
         
-        # For models that need strict alternation
-        if config["requires_special_chat_template"] and len(messages) > 1:
+        # For models with strict role alternation (like Mistral)
+        if config.get("strict_role_alternation", False) and len(messages) > 1:
+            # For Mistral, always ensure conversation starts with user
+            if messages[0]["role"] != "user":
+                error_msg = f"Conversation must start with a user message, got {messages[0]['role']}"
+                logger.error(error_msg)
+                return False, error_msg
+                
+            # Check alternating pattern
             for i in range(1, len(messages)):
-                # For models requiring user/assistant alternation
-                if (messages[i-1]["role"] == "user" and messages[i]["role"] != "assistant") or \
-                   (messages[i-1]["role"] == "assistant" and messages[i]["role"] != "user"):
-                    return False, "Conversation roles must alternate user/assistant/user/assistant/..."
+                curr_role = messages[i]["role"]
+                prev_role = messages[i-1]["role"]
+                
+                if curr_role == prev_role:
+                    error_msg = f"Found consecutive '{curr_role}' messages at positions {i-1} and {i}. Roles must alternate."
+                    logger.error(error_msg)
+                    return False, error_msg
+                
+                if prev_role == "user" and curr_role != "assistant":
+                    error_msg = f"User message at position {i-1} must be followed by assistant message, got {curr_role}"
+                    logger.error(error_msg)
+                    return False, error_msg
+                
+                if prev_role == "assistant" and curr_role != "user":
+                    error_msg = f"Assistant message at position {i-1} must be followed by user message, got {curr_role}"
+                    logger.error(error_msg)
+                    return False, error_msg
         
+        logger.info(f"Conversation validation successful for {model_name}")
         return True, "Conversation is valid"
     
     @classmethod
@@ -117,24 +160,43 @@ class ModelManager:
         # First validate the conversation format
         is_valid, error_msg = cls.validate_conversation(model_name, messages)
         if not is_valid:
+            logger.error(f"Invalid conversation format: {error_msg}")
+            logger.error(f"Messages: {json.dumps(messages, indent=2)}")
             raise ValueError(f"Invalid conversation format: {error_msg}")
+        
+        # For Mistral and other models with strict alternation, fix the conversation if needed
+        if config.get("strict_role_alternation", False) and len(messages) > 0:
+            fixed_messages = cls.fix_conversation_for_strict_models(messages, config["allowed_roles"])
+            if fixed_messages != messages:
+                logger.warning(f"Fixed conversation for {model_name} strict alternation:")
+                for i, msg in enumerate(fixed_messages):
+                    logger.warning(f"  Message {i}: role={msg['role']}, content_start={msg['content'][:30]}...")
+                messages = fixed_messages
         
         # For thinking models, use normal chat template
         if model_type == ModelType.THINKING:
-            return tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+            prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+            logger.info(f"Formatted prompt for thinking model {model_name}: {prompt[:100]}...")
+            return prompt
         
         # For instruct models with special chat template
         elif model_type == ModelType.INSTRUCT and config["requires_special_chat_template"]:
             # Format specifically for Mistral-7B-Instruct
             if "Mistral-7B-Instruct" in model_name:
-                return cls.format_mistral_prompt(messages, tokenizer)
+                prompt = cls.format_mistral_prompt(messages, tokenizer)
+                logger.info(f"Formatted Mistral prompt: {prompt[:100]}...")
+                return prompt
             # Use default template for other instruct models
             else:
-                return tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+                prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+                logger.info(f"Formatted generic instruct prompt: {prompt[:100]}...")
+                return prompt
                 
         # For chat models
         elif model_type == ModelType.CHAT:
-            return tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+            prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+            logger.info(f"Formatted chat prompt: {prompt[:100]}...")
+            return prompt
             
         # For completion models
         elif model_type == ModelType.COMPLETION:
@@ -143,17 +205,76 @@ class ModelManager:
             for msg in messages:
                 formatted_text += f"\n\n{msg['role'].upper()}: {msg['content']}"
             formatted_text += "\n\nASSISTANT: "
+            logger.info(f"Formatted completion prompt: {formatted_text[:100]}...")
             return formatted_text
         
         # Default fallback
-        return tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+        prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+        logger.info(f"Using default template formatting: {prompt[:100]}...")
+        return prompt
+    
+    @classmethod
+    def fix_conversation_for_strict_models(cls, messages: List[Dict[str, str]], allowed_roles: List[str]) -> List[Dict[str, str]]:
+        """Fix conversation to ensure it follows strict alternation pattern."""
+        if not messages:
+            return []
+            
+        # For Mistral-like models, ensure conversation starts with user and alternates properly
+        fixed_messages = []
+        
+        # If first message is not from user, convert it or prepend a user message
+        if messages[0]["role"] != "user":
+            if messages[0]["role"] == "system":
+                # Convert system message to user message
+                fixed_messages.append({
+                    "role": "user",
+                    "content": f"System instruction: {messages[0]['content']}"
+                })
+            else:
+                # Prepend a dummy user message and keep the original
+                fixed_messages.append({
+                    "role": "user",
+                    "content": "I need your assistance."
+                })
+                fixed_messages.append(messages[0])
+        else:
+            fixed_messages.append(messages[0])
+        
+        # Process remaining messages to ensure alternation
+        for i in range(1, len(messages)):
+            curr_msg = messages[i]
+            last_role = fixed_messages[-1]["role"]
+            
+            # If roles would repeat, insert a transitional message
+            if curr_msg["role"] == last_role:
+                if last_role == "user":
+                    # Insert assistant message before another user message
+                    fixed_messages.append({
+                        "role": "assistant",
+                        "content": "I understand. Please continue."
+                    })
+                else:  # last_role == "assistant"
+                    # Insert user message before another assistant message
+                    fixed_messages.append({
+                        "role": "user",
+                        "content": "Please continue."
+                    })
+            
+            # Add the current message
+            fixed_messages.append(curr_msg)
+        
+        return fixed_messages
     
     @classmethod
     def format_mistral_prompt(cls, messages: List[Dict[str, str]], tokenizer: Any) -> str:
         """Format prompt specifically for Mistral-7B-Instruct."""
+        # Log the conversation before formatting
+        logger.info(f"Formatting Mistral prompt with {len(messages)} messages")
+        
         # Ensure we have proper alternating user/assistant messages
         if any(msg["role"] not in ["user", "assistant"] for msg in messages):
             # Filter to just user/assistant messages
+            logger.warning("Filtering out non-user/assistant messages for Mistral")
             messages = [msg for msg in messages if msg["role"] in ["user", "assistant"]]
         
         # Ensure messages alternate correctly
@@ -166,10 +287,12 @@ class ModelManager:
                 current_role = msg["role"]
             else:
                 # If same role appears consecutively, combine the content
+                logger.warning(f"Combining consecutive {current_role} messages")
                 cleaned_messages[-1]["content"] += "\n" + msg["content"]
         
         # Ensure conversation starts with user
         if not cleaned_messages or cleaned_messages[0]["role"] != "user":
+            logger.error("Mistral conversations must start with a user message")
             raise ValueError("Mistral conversations must start with a user message")
         
         # Format as Mistral expects
@@ -184,6 +307,9 @@ class ModelManager:
         if cleaned_messages[-1]["role"] == "user":
             formatted_text += " "
             
+        # Log the formatted prompt for debugging
+        logger.info(f"Final Mistral formatted prompt: {formatted_text[:100]}...")
+        
         return formatted_text
     
     @classmethod

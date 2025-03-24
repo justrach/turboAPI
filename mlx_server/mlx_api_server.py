@@ -387,17 +387,49 @@ async def process_completion_request(chat_request, model_key):
         if model is None or tokenizer is None:
             raise HTTPException(status_code=404, detail=f"Model {model_key} not found")
         
-        # Get the actual model name from the registry
-        model_name = model_key  # In this simple version, key = name
-        
         # Validate and prepare messages
         messages = [{"role": m.role, "content": m.content} for m in chat_request.messages]
         
+        # Log full conversation for debugging
+        logger.info(f"Processing completion request for model {model_key}")
+        for i, msg in enumerate(messages):
+            logger.info(f"  Message {i} ({msg['role']}): {msg['content'][:50]}...")
+        
         # Format prompt for this specific model
         try:
-            prompt = ModelManager.format_prompt(model_name, messages, tokenizer)
+            # This will validate and potentially fix the conversation before formatting
+            prompt = ModelManager.format_prompt(model_key, messages, tokenizer)
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            error_msg = str(e)
+            logger.error(f"Error formatting prompt: {error_msg}")
+            
+            # Try to fix common issues before giving up
+            if "must start with a user message" in error_msg and len(messages) > 0:
+                logger.info("Attempting to fix: inserting user message at start")
+                fixed_messages = [{"role": "user", "content": "I need your help."}]
+                fixed_messages.extend(messages)
+                try:
+                    prompt = ModelManager.format_prompt(model_key, fixed_messages, tokenizer)
+                    logger.info("Successfully fixed conversation by adding initial user message")
+                except ValueError as e2:
+                    logger.error(f"Still couldn't fix: {str(e2)}")
+                    raise HTTPException(status_code=400, detail=f"Invalid conversation format: {error_msg}. Attempted to fix but failed.")
+            elif "Conversation roles must alternate" in error_msg:
+                # Try to fix with the strict model fixer
+                config = ModelManager.get_model_config(model_key)
+                logger.info("Attempting to fix conversation alternation issue")
+                fixed_messages = ModelManager.fix_conversation_for_strict_models(
+                    messages, 
+                    config.get("allowed_roles", ["user", "assistant"])
+                )
+                try:
+                    prompt = ModelManager.format_prompt(model_key, fixed_messages, tokenizer)
+                    logger.info("Successfully fixed conversation alternation")
+                except ValueError as e2:
+                    logger.error(f"Still couldn't fix: {str(e2)}")
+                    raise HTTPException(status_code=400, detail=f"Invalid conversation format: {error_msg}. Attempted to fix but failed.")
+            else:
+                raise HTTPException(status_code=400, detail=error_msg)
         
         # Clear cache before generation
         clear_mlx_cache()
@@ -409,6 +441,7 @@ async def process_completion_request(chat_request, model_key):
         start_time = time.time()
         
         # Generate the response
+        logger.info(f"Generating completion with {model_key} (max_tokens={chat_request.max_tokens})")
         response = generate(
             model,
             tokenizer,
@@ -421,7 +454,7 @@ async def process_completion_request(chat_request, model_key):
         generation_time = end_time - start_time
         
         # Process the response
-        processed_response = ModelManager.postprocess_response(model_name, response)
+        processed_response = ModelManager.postprocess_response(model_key, response)
         clean_response = processed_response["content"]
         thinking_part = processed_response["thinking"]
         
@@ -471,6 +504,7 @@ async def process_completion_request(chat_request, model_key):
         
     except Exception as e:
         logger.error(f"Error in process_completion_request: {str(e)}")
+        logger.exception("Full traceback:")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 async def queue_worker():
@@ -597,6 +631,31 @@ async def chat_completions(request: Request):
             stream=body.get("stream", False)
         )
         
+        # Get the model_name (for validation)
+        model_key = chat_request.model
+        
+        # Log the incoming request
+        logger.info(f"Chat completion request for model {model_key}")
+        logger.info(f"Message count: {len(chat_request.messages)}")
+        logger.info(f"Stream mode: {chat_request.stream}")
+        logger.info(f"Max tokens: {chat_request.max_tokens}")
+        
+        # For debugging, log the full message history
+        for i, msg in enumerate(chat_request.messages):
+            logger.info(f"  Message {i} ({msg.role}): {msg.content[:50]}...")
+        
+        # Validate that all messages have a role and content
+        messages_list = []
+        for i, msg in enumerate(chat_request.messages):
+            if not hasattr(msg, 'role') or not msg.role:
+                logger.error(f"Message {i} missing role")
+                raise HTTPException(status_code=400, detail=f"Message {i} missing role field")
+            if not hasattr(msg, 'content') or not msg.content:
+                logger.error(f"Message {i} ({msg.role}) missing content")
+                raise HTTPException(status_code=400, detail=f"Message {i} missing content field")
+            
+            messages_list.append({"role": msg.role, "content": msg.content})
+        
         # If no parallel processing, handle directly
         if not PARALLEL_REQUESTS:
             model_key = chat_request.model
@@ -613,19 +672,59 @@ async def chat_completions(request: Request):
                         model_key = available_models[0]["id"]
                         logger.warning(f"Using first available model: {model_key}")
                     else:
+                        logger.error("No models available")
                         raise HTTPException(status_code=503, detail="No models available")
             
-            # Handle streaming or non-streaming directly
-            if chat_request.stream:
-                return await process_stream_request(chat_request, model_key)
-            else:
-                return await process_completion_request(chat_request, model_key)
+            try:
+                # Pre-validate conversation
+                model, tokenizer = ModelRegistry.get_model(model_key)
+                if model is None or tokenizer is None:
+                    logger.error(f"Model {model_key} not found in registry")
+                    raise HTTPException(status_code=404, detail=f"Model {model_key} not found")
+                    
+                # Try to validate conversation structure
+                # This will log details and fix common issues
+                is_valid, error = ModelManager.validate_conversation(model_key, messages_list)
+                if not is_valid:
+                    logger.error(f"Invalid conversation structure: {error}")
+                    # Try to fix the conversation
+                    config = ModelManager.get_model_config(model_key)
+                    if config.get("strict_role_alternation", False):
+                        logger.info("Attempting to fix conversation for strict model...")
+                        messages_list = ModelManager.fix_conversation_for_strict_models(
+                            messages_list, 
+                            config.get("allowed_roles", ["user", "assistant"])
+                        )
+                        # Validate again after fixing
+                        is_valid, error = ModelManager.validate_conversation(model_key, messages_list)
+                        if not is_valid:
+                            logger.error(f"Still invalid after fixing: {error}")
+                            raise HTTPException(status_code=400, detail=f"Invalid conversation: {error}")
+                        else:
+                            logger.info("Conversation successfully fixed")
+                    else:
+                        raise HTTPException(status_code=400, detail=f"Invalid conversation: {error}")
+            
+                # Handle streaming or non-streaming directly
+                if chat_request.stream:
+                    return await process_stream_request(chat_request, model_key)
+                else:
+                    return await process_completion_request(chat_request, model_key)
+                    
+            except ValueError as e:
+                # Handle validation errors specifically
+                logger.error(f"Validation error: {str(e)}")
+                raise HTTPException(status_code=400, detail=str(e))
         
         # Queue for parallel processing
         return await queue_request(chat_request, chat_request.stream)
         
+    except json.JSONDecodeError:
+        logger.error("Invalid JSON in request body")
+        raise HTTPException(status_code=400, detail="Invalid JSON in request body")
     except Exception as e:
         logger.error(f"Error in chat completions: {str(e)}")
+        logger.exception("Full traceback:")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @router.get("/v1/models")
