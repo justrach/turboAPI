@@ -2,10 +2,13 @@ LICENSE
 README.md
 pyproject.toml
 setup.py
+tests/test_advanced.py
 tests/test_basic.py
 tests/test_turboapi_basic.py
 turboapi/__init__.py
 turboapi/applications.py
+turboapi/authentication.py
+turboapi/background.py
 turboapi/dependencies.py
 turboapi/exceptions.py
 turboapi/middleware.py

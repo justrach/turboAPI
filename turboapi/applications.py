@@ -10,7 +10,7 @@ import inspect
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
-from starlette.routing import BaseRoute, Route, WebSocketRoute
+from starlette.routing import BaseRoute, Route, WebSocketRoute, Mount
 from starlette.types import ASGIApp
 from starlette.websockets import WebSocket
 
@@ -339,6 +339,19 @@ class TurboAPI:
             self.app.routes.append(route)
             return func
         return decorator
+    
+    def mount(self, path: str, app: ASGIApp, name: Optional[str] = None) -> None:
+        """
+        Mounts a sub-application (ASGI application) at a specific path prefix.
+
+        Args:
+            path: The path prefix where the sub-application will be mounted.
+            app: The ASGI application instance to mount.
+            name: An optional name for the mount point.
+        """
+        mount_route = Mount(path, app=app, name=name)
+        # Add the mount directly to the underlying Starlette app's routes
+        self.app.routes.append(mount_route)
     
     # ASGI interface
     async def __call__(self, scope, receive, send):
