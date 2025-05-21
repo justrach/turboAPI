@@ -113,18 +113,39 @@ class APIRoute(Route):
             # Handle body parameters
             if request.method in ("POST", "PUT", "PATCH"):
                 try:
+                    # Load JSON body
                     body = await request.json()
-                    if isinstance(body, dict):
-                        # Find any parameters that need to be extracted from the body
-                        for param_name, param in self.signature.parameters.items():
-                            if param_name not in kwargs and param_name != "request" and param_name != "body":
-                                if param_name in body:
-                                    kwargs[param_name] = body[param_name]
-
-                        # Add the entire body if there's a 'body' parameter
-                        if "body" in self.signature.parameters:
-                            kwargs["body"] = body
+                    
+                    # Process each parameter in the function signature
+                    for param_name, param in self.signature.parameters.items():
+                        # Skip parameters that are already set or special params
+                        if param_name in kwargs or param_name == "request":
+                            continue
+                            
+                        # Check if this parameter has a type annotation
+                        param_type = param.annotation if param.annotation != inspect.Parameter.empty else None
+                        
+                        # Handle satya models (direct model parameters)
+                        if param_type and hasattr(param_type, '__bases__') and any(base.__name__ == 'Model' for base in param_type.__bases__):
+                            try:
+                                # Create a model instance from the body
+                                model_instance = param_type(**body)
+                                kwargs[param_name] = model_instance
+                                # Log for debugging
+                                logger.debug(f"Created model instance of type {param_type.__name__} for parameter {param_name}")
+                            except Exception as e:
+                                logger.error(f"Error creating model: {str(e)}")
+                                raise HTTPException(status_code=422, detail=f"Could not validate request body: {str(e)}")
+                        # Handle primitive parameters that match body keys
+                        elif isinstance(body, dict) and param_name in body:
+                            kwargs[param_name] = body[param_name]
+                    
+                    # Add the entire body if there's a 'body' parameter
+                    if "body" in self.signature.parameters:
+                        kwargs["body"] = body
+                        
                 except Exception as e:
+                    logger.error(f"Request body handling error: {str(e)}")
                     raise HTTPException(status_code=400, detail=f"Invalid JSON body: {str(e)}")
 
             # Add the query parameters
@@ -141,6 +162,9 @@ class APIRoute(Route):
                 dependency_values = await solve_dependencies(request, self.dependencies)
                 kwargs.update(dependency_values)
 
+            # Debug log before calling the endpoint
+            logger.debug(f"Calling endpoint {endpoint.__name__} with kwargs: {list(kwargs.keys())}")
+            
             # Call the endpoint
             response = await endpoint(**kwargs) if inspect.iscoroutinefunction(endpoint) else endpoint(**kwargs)
 
@@ -152,8 +176,12 @@ class APIRoute(Route):
                 if self.response_model and response is not None:
                     try:
                         response_obj = self.response_model(**response)
+                        # Try various methods to convert model to dict
                         if hasattr(response_obj, "to_dict"):
                             response = response_obj.to_dict()
+                        else:
+                            # Use vars() as a fallback
+                            response = vars(response_obj)
                     except Exception as e:
                         logger.error(f"Response validation error: {str(e)}")
                         raise HTTPException(status_code=500, detail="Internal server error")

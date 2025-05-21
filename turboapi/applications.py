@@ -144,11 +144,24 @@ class TurboAPI:
     
     def _update_routes(self):
         """Update the application's routes with routes from the router."""
-        # Prevent duplicate routes
-        existing_paths = {route.path for route in self.app.routes if hasattr(route, 'path')}
-        new_routes = [route for route in self.router.routes if not hasattr(route, 'path') or route.path not in existing_paths]
-        if new_routes:
-            self.app.routes.extend(new_routes)
+        # Check for duplicates based on path AND methods
+        existing_routes = {}
+        for route in self.app.routes:
+            if hasattr(route, 'path') and hasattr(route, 'methods'):
+                for method in route.methods:
+                    existing_routes[(route.path, method)] = route
+        
+        # Add routes that don't exist yet (checking path and method)
+        for route in self.router.routes:
+            if hasattr(route, 'path') and hasattr(route, 'methods'):
+                for method in route.methods:
+                    if (route.path, method) not in existing_routes:
+                        self.app.routes.append(route)
+                        break
+            else:
+                # For non-API routes (like mounts), just add them
+                if route not in self.app.routes:
+                    self.app.routes.append(route)
     
     def get(self, path: str, *, response_model=None, status_code: int = 200, 
             tags: List[str] = None, summary: str = None, description: str = None, 
