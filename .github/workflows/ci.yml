@@ -103,10 +103,10 @@ jobs:
     - name: Build wheels
       uses: PyO3/maturin-action@v1
       with:
-        args: --release --out dist --interpreter python3.13 --manifest-path python/pyproject.toml
+        args: --release --out ../dist --interpreter python3.13
         sccache: 'true'
         manylinux: auto
-        working-directory: .
+        working-directory: python
     
     - name: Upload wheels
       uses: actions/upload-artifact@v4
