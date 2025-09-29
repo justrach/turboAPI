@@ -86,7 +86,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 🔧 Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
 
