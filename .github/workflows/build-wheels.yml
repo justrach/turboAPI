@@ -37,7 +37,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: x86_64
-          args: --release --out ../dist --strip
+          args: --release --out ../dist --strip --interpreter python3.13
           sccache: 'true'
           manylinux: ${{ matrix.manylinux }}
           working-directory: python
@@ -121,7 +121,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out ../dist --strip
+          args: --release --out ../dist --strip --interpreter python3.13
           sccache: 'true'
           working-directory: python
       - name: Upload wheels
@@ -146,7 +146,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out ../dist --strip
+          args: --release --out ../dist --strip --interpreter python3.13
           sccache: 'true'
           working-directory: python
       - name: Upload wheels

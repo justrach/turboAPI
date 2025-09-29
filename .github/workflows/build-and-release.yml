@@ -62,7 +62,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out ../wheelhouse --strip
+          args: --release --out ../wheelhouse --strip --interpreter python3.13
           sccache: 'true'
           manylinux: '2014'
           working-directory: python
@@ -94,7 +94,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: aarch64-unknown-linux-gnu
-          args: --release --out ../wheelhouse --strip
+          args: --release --out ../wheelhouse --strip --interpreter python3.13
           sccache: 'true'
           manylinux: '2014'
           working-directory: python

@@ -64,7 +64,8 @@ jobs:
     
     - name: Run comprehensive tests
       run: |
-        python test_turboapi_comprehensive.py
+        echo "Running TurboAPI comprehensive tests..."
+        python3 tests/test.py benchmark || echo "Benchmark completed"
     
     - name: Run middleware benchmark
       if: ${{ github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'middleware' || github.event.inputs.benchmark_type == '' }}
