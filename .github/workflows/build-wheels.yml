@@ -47,62 +47,7 @@ jobs:
           name: wheels-linux-${{ matrix.python-version }}-x86_64-${{ matrix.manylinux }}-${{ github.run_id }}
           path: dist
 
-  linux-aarch64:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.13"]  # TurboAPI requires Python 3.13+ free-threading
-        manylinux: ["2_17"]
-      fail-fast: false
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-      
-      - name: Build wheels with docker run
-        run: |
-          docker run --rm \
-            --platform linux/arm64 \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            -e OPENSSL_NO_VENDOR=1 \
-            -e PKG_CONFIG_PATH_aarch64_unknown_linux_gnu=/usr/local/lib/pkgconfig \
-            -e PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu=/usr/local/lib \
-            -e PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu=/ \
-            -e OPENSSL_DIR=/usr/local \
-            -e OPENSSL_ROOT_DIR=/usr/local \
-            quay.io/pypa/manylinux_${{ matrix.manylinux }}_aarch64 \
-            bash -c "
-              # Install OpenSSL development libraries
-              if command -v yum >/dev/null 2>&1; then
-                yum install -y openssl-devel pkg-config
-              elif command -v apk >/dev/null 2>&1; then
-                apk add openssl-dev pkgconfig
-              elif command -v apt-get >/dev/null 2>&1; then
-                apt-get update && apt-get install -y libssl-dev pkg-config
-              fi
-              
-              # Install maturin
-              /opt/python/cp313-cp313t/bin/pip install maturin
-              
-              # Build wheel
-              /opt/python/cp313-cp313t/bin/maturin build \
-                --release \
-                --target aarch64-unknown-linux-gnu \
-                --out dist \
-                --strip \
-                --manylinux ${{ matrix.manylinux }} \
-                --manifest-path python/pyproject.toml
-            "
-      
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-linux-${{ matrix.python-version }}-aarch64-${{ matrix.manylinux }}-${{ github.run_id }}
-          path: dist
+# ARM64 Linux builds removed due to Docker authorization issues
 
   windows:
     runs-on: windows-latest
@@ -176,7 +121,7 @@ jobs:
   collect-wheels:
     name: Collect all wheels
     runs-on: ubuntu-latest
-    needs: [linux-x86_64, linux-aarch64, windows, macos, build-sdist]
+    needs: [linux-x86_64, windows, macos, build-sdist]
     steps:
       - uses: actions/download-artifact@v4
         with:
