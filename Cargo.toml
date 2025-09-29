@@ -1,0 +1,36 @@
+[package]
+name = "turbonet"
+version = "0.3.0"
+edition = "2021"
+
+[lib]
+name = "turbonet"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.26.0", features = ["extension-module"] }
+tokio = { version = "1.0", features = ["full"] }
+hyper = { version = "1.7.0", features = ["full", "http2"] }
+hyper-util = { version = "0.1.10", features = ["full", "http2"] }
+http-body-util = "0.1.2"
+pin-project-lite = "0.2.15"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1.0"
+bytes = "1.0"
+futures = "0.3"
+rayon = "1.8"
+crossbeam = "0.8"
+num_cpus = "1.16"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio-test = "0.4"
+
+[[bench]]
+name = "performance_bench"
+harness = false

@@ -1,0 +1,60 @@
+{
+  "timestamp": "2025-09-29T02:55:26.118359",
+  "benchmark_type": "TurboAPI vs FastAPI Performance Comparison",
+  "python_version": "3.13.1 experimental free-threading build (main, Dec  6 2024, 20:34:21) [Clang 18.1.8 ]",
+  "platform": {
+    "sysname": "Darwin",
+    "nodename": "Mac",
+    "release": "25.0.0",
+    "version": "Darwin Kernel Version 25.0.0: Mon Aug 25 21:17:54 PDT 2025; root:xnu-12377.1.9~3/RELEASE_ARM64_T6041",
+    "machine": "arm64"
+  },
+  "results": {
+    "TurboAPI": {
+      "Light Load": {
+        "latency_p50": "227.00us",
+        "latency_p90": "312.00us",
+        "latency_p99": "0.97ms",
+        "rps": 179227.26,
+        "transfer_rate": "38.16MB"
+      },
+      "Medium Load": {
+        "latency_p50": "429.00us",
+        "latency_p90": "0.92ms",
+        "latency_p99": "15.56ms",
+        "rps": 166907.24,
+        "transfer_rate": "35.56MB"
+      },
+      "Heavy Load": {
+        "latency_p50": "825.00us",
+        "latency_p90": "3.49ms",
+        "latency_p99": "19.80ms",
+        "rps": 167104.29,
+        "transfer_rate": "35.59MB"
+      }
+    },
+    "FastAPI": {
+      "Light Load": {
+        "latency_p50": "7.01ms",
+        "latency_p90": "7.39ms",
+        "latency_p99": "7.99ms",
+        "rps": 6783.07,
+        "transfer_rate": "1.68MB"
+      },
+      "Medium Load": {
+        "latency_p50": "13.78ms",
+        "latency_p90": "17.00ms",
+        "latency_p99": "20.21ms",
+        "rps": 6684.65,
+        "transfer_rate": "1.66MB"
+      },
+      "Heavy Load": {
+        "latency_p50": "28.89ms",
+        "latency_p90": "31.37ms",
+        "latency_p99": "37.57ms",
+        "rps": 6544.67,
+        "transfer_rate": "1.62MB"
+      }
+    }
+  }
+}

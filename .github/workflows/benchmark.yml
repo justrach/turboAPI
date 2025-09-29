@@ -1,0 +1,164 @@
+name: TurboAPI Performance Benchmarks
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run benchmarks daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      benchmark_type:
+        description: 'Type of benchmark to run'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - middleware
+          - websocket
+          - http2
+          - zerocopy
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        python-version: ['3.13']
+        
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+    
+    - name: Install Python 3.13 (free-threading)
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.13'
+    
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+    
+    - name: Create virtual environment
+      run: |
+        uv venv turbo-env --python 3.13
+        echo "VIRTUAL_ENV=$PWD/turbo-env" >> $GITHUB_ENV
+        echo "$PWD/turbo-env/bin" >> $GITHUB_PATH
+    
+    - name: Install Python dependencies
+      run: |
+        uv pip install maturin fastapi uvicorn aiohttp requests
+    
+    - name: Build TurboAPI
+      run: |
+        maturin develop --release
+    
+    - name: Run comprehensive tests
+      run: |
+        python test_turboapi_comprehensive.py
+    
+    - name: Run middleware benchmark
+      if: ${{ github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'middleware' || github.event.inputs.benchmark_type == '' }}
+      run: |
+        timeout 300s python benchmarks/middleware_vs_fastapi_benchmark.py || echo "Benchmark completed or timed out"
+    
+    - name: Run WebSocket benchmark
+      if: ${{ github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'websocket' || github.event.inputs.benchmark_type == '' }}
+      run: |
+        timeout 300s python benchmarks/simple_websocket_benchmark.py || echo "WebSocket benchmark completed or timed out"
+    
+    - name: Run zero-copy tests
+      if: ${{ github.event.inputs.benchmark_type == 'all' || github.event.inputs.benchmark_type == 'zerocopy' || github.event.inputs.benchmark_type == '' }}
+      run: |
+        python test_zerocopy.py
+    
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: benchmark-results-${{ matrix.python-version }}
+        path: |
+          test_report.json
+          benchmark_results.json
+        retention-days: 30
+    
+    - name: Performance regression check
+      run: |
+        python .github/scripts/check_performance_regression.py
+    
+    - name: Comment PR with results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          
+          try {
+            const testReport = JSON.parse(fs.readFileSync('test_report.json', 'utf8'));
+            
+            const comment = `## 🚀 TurboAPI Performance Report
+            
+            **Test Summary:**
+            - ✅ Tests Passed: ${testReport.passed_tests}/${testReport.total_tests}
+            - ⏱️ Total Duration: ${testReport.total_duration.toFixed(2)}s
+            - 📊 Success Rate: ${testReport.success_rate.toFixed(1)}%
+            
+            **Key Results:**
+            ${Object.entries(testReport.tests).map(([name, result]) => 
+              `- ${result.passed ? '✅' : '❌'} ${name}: ${result.duration.toFixed(2)}s`
+            ).join('\n')}
+            
+            ${testReport.success_rate === 100 ? 
+              '🎉 **All tests passed!** TurboAPI is performing optimally.' : 
+              '⚠️ **Some tests failed.** Please review the results.'}
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+          } catch (error) {
+            console.log('Could not read test report:', error.message);
+          }
+
+  performance-comparison:
+    runs-on: ubuntu-latest
+    needs: benchmark
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch full history for comparison
+    
+    - name: Download benchmark results
+      uses: actions/download-artifact@v3
+      with:
+        name: benchmark-results-3.13
+    
+    - name: Compare with previous results
+      run: |
+        python .github/scripts/compare_benchmarks.py
+    
+    - name: Update performance dashboard
+      run: |
+        python .github/scripts/update_dashboard.py
+    
+    - name: Commit performance data
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add performance_history.json || true
+        git commit -m "Update performance history [skip ci]" || true
+        git push || true

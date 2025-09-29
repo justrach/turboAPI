@@ -1,0 +1,53 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0", "setuptools>=45", "wheel"]
+build-backend = "maturin"
+
+[project]
+name = "turboapi"
+version = "0.3.0"
+description = "Revolutionary Python web framework with FastAPI syntax and 5-10x performance (Python 3.13+ free-threading required)"
+readme = "../README.md"
+requires-python = ">=3.13"
+license = {text = "MIT"}
+authors = [
+    {name = "Rach Pradhan", email = "rach@turboapi.dev"}
+]
+dependencies = [
+    "satya>=0.3.7",
+]
+keywords = ["web", "framework", "http", "server", "rust", "performance", "free-threading", "no-gil", "fastapi-compatible"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14", 
+    "Programming Language :: Rust",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Environment :: No Threads (Free-Threading)",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+]
+benchmark = [
+    "httpx>=0.24.0",
+    "uvloop>=0.17.0",
+    "matplotlib>=3.5.0",
+    "seaborn>=0.11.0",
+    "pandas>=1.3.0",
+    "requests>=2.25.0",
+]
+
+[tool.maturin]
+python-source = "."
+module-name = "turbonet"
+manifest-path = "../Cargo.toml"
+include = ["turboapi/**/*.py"]

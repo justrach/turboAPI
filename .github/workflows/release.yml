@@ -1,0 +1,169 @@
+name: Release Process
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: 'choice'
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  prepare_release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump_version.outputs.new_version }}
+      tag_name: ${{ steps.create_tag.outputs.tag_name }}
+      release_created: ${{ steps.create_release.outputs.release_created }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install bump2version tomli tomli-w pytest pytest-cov
+          
+          # Create virtual environment for any potential testing
+          python -m venv .venv
+          source .venv/bin/activate
+          python -m pip install maturin
+      
+      - name: Configure Git
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+      
+      - name: Bump version
+        id: bump_version
+        run: |
+          # Install bump2version if not available
+          pip install bump2version
+          
+          # Extract current version from python/pyproject.toml
+          CURRENT_VERSION=$(grep -Po '(?<=version = ")[^"]*' python/pyproject.toml)
+          echo "Current version: $CURRENT_VERSION"
+          
+          # Create .bumpversion.cfg for coordinated version bumping
+          cat > .bumpversion.cfg << EOF
+          [bumpversion]
+          current_version = $CURRENT_VERSION
+          commit = False
+          tag = False
+          
+          [bumpversion:file:python/pyproject.toml]
+          search = version = "{current_version}"
+          replace = version = "{new_version}"
+          
+          [bumpversion:file:Cargo.toml]
+          search = version = "{current_version}"
+          replace = version = "{new_version}"
+          EOF
+          
+          # Bump version in both python/pyproject.toml and Cargo.toml
+          bump2version ${{ github.event.inputs.version_bump }} --allow-dirty
+          
+          # Get new version
+          NEW_VERSION=$(grep -Po '(?<=version = ")[^"]*' python/pyproject.toml)
+          echo "New version: $NEW_VERSION"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+      
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get latest tag
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
+          
+          if [[ "$LATEST_TAG" == "none" ]]; then
+            # No tags yet, use all commits
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --reverse)
+          else
+            # Get commits since last tag
+            CHANGELOG=$(git log ${LATEST_TAG}..HEAD --pretty=format:"- %s (%h)" --reverse)
+          fi
+          
+          # Write changelog to file
+          echo "# Changes in v${{ steps.bump_version.outputs.new_version }}" > CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "$CHANGELOG" >> CHANGELOG.md
+          
+          # Escape changelog for GitHub Actions
+          CHANGELOG="${CHANGELOG//'%'/'%25'}"
+          CHANGELOG="${CHANGELOG//$'\n'/'%0A'}"
+          CHANGELOG="${CHANGELOG//$'\r'/'%0D'}"
+          echo "changelog=$CHANGELOG" >> $GITHUB_OUTPUT
+      
+      - name: Commit version bump and create tag
+        id: create_tag
+        run: |
+          git add python/pyproject.toml Cargo.toml CHANGELOG.md .bumpversion.cfg
+          git commit -m "Bump version to v${{ steps.bump_version.outputs.new_version }}"
+          git tag -a "v${{ steps.bump_version.outputs.new_version }}" -m "Release v${{ steps.bump_version.outputs.new_version }}"
+          git push && git push --tags
+          
+          # Output the tag name for later use
+          echo "tag_name=v${{ steps.bump_version.outputs.new_version }}" >> $GITHUB_OUTPUT
+      
+      - name: Set release created output
+        id: create_release
+        run: echo "release_created=true" >> $GITHUB_OUTPUT
+
+  # Trigger wheel building workflow
+  trigger_wheel_build:
+    needs: prepare_release
+    if: needs.prepare_release.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger build-wheels workflow
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: build-wheels.yml
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ needs.prepare_release.outputs.tag_name }}
+      
+      - name: Wait for wheel building
+        run: |
+          echo "Triggered wheel building workflow"
+          echo "Wheel building will publish directly to PyPI upon completion"
+          echo "Monitor the workflow at: https://github.com/${{ github.repository }}/actions/workflows/build-wheels.yml"
+
+  update_docs:
+    needs: [prepare_release, trigger_wheel_build]
+    if: needs.prepare_release.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      
+      - name: Update documentation version references
+        run: |
+          VERSION="${{ needs.prepare_release.outputs.version }}"
+          
+          # Update version references in README
+          sed -i "s/v[0-9]\+\.[0-9]\+\.[0-9]\+/v$VERSION/g" README.md || true
+          sed -i "s/turboapi==[0-9]\+\.[0-9]\+\.[0-9]\+/turboapi==$VERSION/g" README.md || true
+          
+          # Commit changes
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add README.md
+          git commit -m "Update documentation for v$VERSION" || echo "No changes to commit"
+          git push origin main || echo "No changes to push"

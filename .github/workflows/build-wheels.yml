@@ -1,0 +1,338 @@
+name: Build and publish wheels
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build wheels (manual trigger only)'
+        type: boolean
+        default: false
+
+# Add permissions needed for creating releases
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.13"]  # TurboAPI requires Python 3.13+ free-threading
+        manylinux: ["2_17"]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          args: --release --out dist --strip --manifest-path python/pyproject.toml
+          sccache: 'true'
+          manylinux: ${{ matrix.manylinux }}
+          working-directory: .
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.python-version }}-x86_64-${{ matrix.manylinux }}-${{ github.run_id }}
+          path: dist
+
+  linux-aarch64:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.13"]  # TurboAPI requires Python 3.13+ free-threading
+        manylinux: ["2_17"]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      
+      - name: Build wheels with docker run
+        run: |
+          docker run --rm \
+            --platform linux/arm64 \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            -e OPENSSL_NO_VENDOR=1 \
+            -e PKG_CONFIG_PATH_aarch64_unknown_linux_gnu=/usr/local/lib/pkgconfig \
+            -e PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu=/usr/local/lib \
+            -e PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu=/ \
+            -e OPENSSL_DIR=/usr/local \
+            -e OPENSSL_ROOT_DIR=/usr/local \
+            quay.io/pypa/manylinux_${{ matrix.manylinux }}_aarch64 \
+            bash -c "
+              # Install OpenSSL development libraries
+              if command -v yum >/dev/null 2>&1; then
+                yum install -y openssl-devel pkg-config
+              elif command -v apk >/dev/null 2>&1; then
+                apk add openssl-dev pkgconfig
+              elif command -v apt-get >/dev/null 2>&1; then
+                apt-get update && apt-get install -y libssl-dev pkg-config
+              fi
+              
+              # Install maturin
+              /opt/python/cp313-cp313t/bin/pip install maturin
+              
+              # Build wheel
+              /opt/python/cp313-cp313t/bin/maturin build \
+                --release \
+                --target aarch64-unknown-linux-gnu \
+                --out dist \
+                --strip \
+                --manylinux ${{ matrix.manylinux }} \
+                --manifest-path python/pyproject.toml
+            "
+      
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.python-version }}-aarch64-${{ matrix.manylinux }}-${{ github.run_id }}
+          path: dist
+
+  windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ["3.13"]  # TurboAPI requires Python 3.13+ free-threading
+        target: [x64]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: ${{ matrix.target }}
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --strip --manifest-path python/pyproject.toml
+          sccache: 'true'
+          working-directory: .
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.python-version }}-${{ matrix.target }}-${{ github.run_id }}
+          path: dist
+
+  macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        python-version: ["3.13"]  # TurboAPI requires Python 3.13+ free-threading
+        target: [x86_64, aarch64]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --strip --manifest-path python/pyproject.toml
+          sccache: 'true'
+          working-directory: .
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.python-version }}-${{ matrix.target }}-${{ github.run_id }}
+          path: dist
+
+  # Build source distribution
+  build-sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist --manifest-path python/pyproject.toml
+          working-directory: .
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist-${{ github.run_id }}
+          path: dist
+
+  collect-wheels:
+    name: Collect all wheels
+    runs-on: ubuntu-latest
+    needs: [linux-x86_64, linux-aarch64, windows, macos, build-sdist]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*${{ github.run_id }}
+          path: all-wheels
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist-${{ github.run_id }}
+          path: all-wheels
+      - name: Upload combined wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-wheels-${{ github.run_id }}
+          path: all-wheels
+
+  # Test installation from wheels
+  test-wheels:
+    name: Test wheel installation
+    needs: [collect-wheels]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.13']  # TurboAPI requires Python 3.13+ free-threading
+      fail-fast: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: all-wheels-${{ github.run_id }}
+          path: wheelhouse
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install and test wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          # List available wheels for debugging
+          echo "Available wheels:"
+          ls -la wheelhouse/
+          
+          # Find and install compatible wheel directly
+          python -c "
+          import os, sys, platform
+          version = f'{sys.version_info.major}{sys.version_info.minor}'
+          
+          # Get platform info
+          if sys.platform.startswith('win'):
+              plat_name = 'win_amd64' if platform.machine().endswith('64') else 'win32'
+          elif sys.platform.startswith('darwin'):
+              plat_name = 'macosx'
+          else:
+              plat_name = 'linux'
+          
+          # Find compatible wheel
+          wheels = [f for f in os.listdir('wheelhouse') if f.endswith('.whl')]
+          compatible_wheel = None
+          
+          for wheel in wheels:
+              if f'cp{version}' in wheel and plat_name in wheel:
+                  compatible_wheel = wheel
+                  break
+          
+          if not compatible_wheel:
+              # Fallback: just pick the first wheel
+              compatible_wheel = wheels[0] if wheels else None
+          
+          if compatible_wheel:
+              print(f'Installing: {compatible_wheel}')
+              os.system(f'pip install wheelhouse/{compatible_wheel}')
+          else:
+              print('No compatible wheel found')
+              exit(1)
+          "
+          
+          # Test the installation
+          python -c "
+          try:
+              import turboapi
+              print('✅ TurboAPI imported successfully')
+              # Test basic functionality
+              from turboapi import TurboAPI
+              app = TurboAPI(title='Test', version='1.0.0')
+              print('✅ TurboAPI app created successfully')
+              print('✅ All tests passed!')
+          except Exception as e:
+              print(f'❌ Test failed: {e}')
+              exit(1)
+          "
+
+  release:
+    name: Release to PyPI
+    runs-on: ubuntu-latest
+    needs: [collect-wheels, test-wheels]
+    # This conditional allows manual triggering without requiring the tag push
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: all-wheels-${{ github.run_id }}
+          path: dist
+      - name: List wheels
+        run: ls -la dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip_existing: true
+          
+      # Create GitHub Release for tagged versions
+      - name: Extract version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      
+      - name: Generate Release Notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          git log --pretty=format:"* %s (%h)" $(git describe --tags --abbrev=0 HEAD^)..HEAD > release_notes.md || echo "* Initial release" > release_notes.md
+          echo "## TurboAPI v${{ steps.get_version.outputs.VERSION }}" | cat - release_notes.md > temp && mv temp release_notes.md
+          echo "" >> release_notes.md
+          echo "## 🚀 Revolutionary Python Web Framework" >> release_notes.md
+          echo "FastAPI-compatible syntax with 5-10x performance boost!" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "## Artifacts" >> release_notes.md
+          echo "This release includes wheels for:" >> release_notes.md
+          echo "- Linux (x86_64, aarch64) - manylinux 2.17" >> release_notes.md
+          echo "- macOS (x86_64, arm64)" >> release_notes.md
+          echo "- Windows (x64)" >> release_notes.md
+          echo "- **Python 3.13+ free-threading required**" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### Installation" >> release_notes.md
+          echo '```bash' >> release_notes.md
+          echo "pip install turboapi==${{ steps.get_version.outputs.VERSION }}" >> release_notes.md
+          echo '```' >> release_notes.md
+          echo "" >> release_notes.md
+          echo "**No Rust compiler required!** 🎊" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### Performance" >> release_notes.md
+          echo "- 🚀 5-10x faster than FastAPI" >> release_notes.md
+          echo "- 🧵 True parallelism with Python 3.13 free-threading" >> release_notes.md
+          echo "- ⚡ Zero Python middleware overhead" >> release_notes.md
+          echo "- 🦀 Rust-powered HTTP core" >> release_notes.md
+      
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/*
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
