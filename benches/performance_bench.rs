@@ -108,6 +108,7 @@ fn bench_concurrent_requests(c: &mut Criterion) {
     group.finish();
 }
 
+#[allow(dead_code)]
 fn bench_memory_allocation(c: &mut Criterion) {
     c.bench_function("route_key_creation", |b| {
         b.iter(|| {
