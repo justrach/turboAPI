@@ -126,10 +126,10 @@ jobs:
     if: needs.prepare_release.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger build-wheels workflow
+      - name: Trigger build-and-release workflow
         uses: benc-uk/workflow-dispatch@v1
         with:
-          workflow: build-wheels.yml
+          workflow: build-and-release.yml
           token: ${{ secrets.GITHUB_TOKEN }}
           ref: ${{ needs.prepare_release.outputs.tag_name }}
       
@@ -137,7 +137,7 @@ jobs:
         run: |
           echo "Triggered wheel building workflow"
           echo "Wheel building will publish directly to PyPI upon completion"
-          echo "Monitor the workflow at: https://github.com/${{ github.repository }}/actions/workflows/build-wheels.yml"
+          echo "Monitor the workflow at: https://github.com/${{ github.repository }}/actions/workflows/build-and-release.yml"
 
   update_docs:
     needs: [prepare_release, trigger_wheel_build]
