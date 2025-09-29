@@ -1,0 +1,49 @@
+# Rust build artifacts
+target/
+Cargo.lock
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+turbo-freethreaded/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Benchmark and test outputs
+benchmark_graphs/
+*.json
+*.png
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Documentation build
+docs/_build/
+
+# PyO3/maturin build artifacts
+*.whl
+target/wheels/
