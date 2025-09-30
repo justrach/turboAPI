@@ -165,39 +165,9 @@ jobs:
           echo "Available wheels:"
           ls -la wheelhouse/
           
-          # Find and install compatible wheel directly
-          python -c "
-          import os, sys, platform
-          version = f'{sys.version_info.major}{sys.version_info.minor}'
-          
-          # Get platform info
-          if sys.platform.startswith('win'):
-              plat_name = 'win_amd64' if platform.machine().endswith('64') else 'win32'
-          elif sys.platform.startswith('darwin'):
-              plat_name = 'macosx'
-          else:
-              plat_name = 'linux'
-          
-          # Find compatible wheel
-          wheels = [f for f in os.listdir('wheelhouse') if f.endswith('.whl')]
-          compatible_wheel = None
-          
-          for wheel in wheels:
-              if f'cp{version}' in wheel and plat_name in wheel:
-                  compatible_wheel = wheel
-                  break
-          
-          if not compatible_wheel:
-              # Fallback: just pick the first wheel
-              compatible_wheel = wheels[0] if wheels else None
-          
-          if compatible_wheel:
-              print(f'Installing: {compatible_wheel}')
-              os.system(f'pip install wheelhouse/{compatible_wheel}')
-          else:
-              print('No compatible wheel found')
-              exit(1)
-          "
+          # Let pip automatically select the correct wheel
+          echo "Installing TurboAPI from wheelhouse..."
+          pip install --no-index --find-links wheelhouse/ turboapi
           
           # Test the installation
           python -c "
