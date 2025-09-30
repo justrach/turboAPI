@@ -310,7 +310,7 @@ class TurboHTTPServer:
                 if param_name in sig.parameters:
                     # Convert to correct type
                     param_def = next((p for p in route.path_params if p.name == param_name), None)
-                    if param_def and param_def.type != str:
+                    if param_def and param_def.type is not str:
                         try:
                             param_value = param_def.type(param_value)
                         except (ValueError, TypeError):
@@ -329,11 +329,11 @@ class TurboHTTPServer:
                     # Convert to correct type
                     if param.annotation != inspect.Parameter.empty:
                         try:
-                            if param.annotation == int:
+                            if param.annotation is int:
                                 param_value = int(param_value)
-                            elif param.annotation == float:
+                            elif param.annotation is float:
                                 param_value = float(param_value)
-                            elif param.annotation == bool:
+                            elif param.annotation is bool:
                                 param_value = param_value.lower() in ('true', '1', 'yes', 'on')
                         except (ValueError, TypeError):
                             return {
@@ -346,7 +346,7 @@ class TurboHTTPServer:
 
             # Add request body parameters
             if request_adapter.json_data:
-                for param_name, param in sig.parameters.items():
+                for param_name, _param in sig.parameters.items():
                     if param_name not in call_args and param_name in request_adapter.json_data:
                         call_args[param_name] = request_adapter.json_data[param_name]
 

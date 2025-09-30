@@ -157,7 +157,7 @@ class TurboAPI(Router):
                 if param_name in sig.parameters:
                     # Convert to correct type
                     param_def = next((p for p in route.path_params if p.name == param_name), None)
-                    if param_def and param_def.type != str:
+                    if param_def and param_def.type is not str:
                         try:
                             param_value = param_def.type(param_value)
                         except (ValueError, TypeError):
@@ -169,7 +169,7 @@ class TurboAPI(Router):
                     call_args[param_name] = param_value
 
             # Add query parameters and request body
-            for param_name, param in sig.parameters.items():
+            for param_name, _param in sig.parameters.items():
                 if param_name not in call_args and param_name in kwargs:
                     call_args[param_name] = kwargs[param_name]
 
@@ -210,7 +210,7 @@ class TurboAPI(Router):
         self.print_routes()
 
         print("\n[CONFIG] Middleware Stack:")
-        for middleware_class, middleware_kwargs in self.middleware_stack:
+        for middleware_class, _middleware_kwargs in self.middleware_stack:
             print(f"   - {middleware_class.__name__}")
 
         print("\n[PERF] Performance Features:")

@@ -55,7 +55,7 @@ class RustIntegratedTurboAPI(TurboAPI):
 
     def configure_rate_limiting(self, enabled: bool = False, requests_per_minute: int = 1000000):
         """Configure rate limiting for the server.
-        
+
         Args:
             enabled: Whether to enable rate limiting (default: False for benchmarking)
             requests_per_minute: Maximum requests per minute per IP (default: 1,000,000)
@@ -129,7 +129,6 @@ class RustIntegratedTurboAPI(TurboAPI):
                         """Rust-callable handler that calls Python function."""
                         try:
                             # Extract request data from Rust
-                            method = rust_request.method
                             path = rust_request.path
                             headers = rust_request.get_headers() if hasattr(rust_request, 'get_headers') and callable(rust_request.get_headers) else {}
                             query_string = rust_request.query_string
@@ -155,7 +154,7 @@ class RustIntegratedTurboAPI(TurboAPI):
                             for param_name, param_value in path_params.items():
                                 if param_name in sig.parameters:
                                     param_def = next((p for p in route_def.path_params if p.name == param_name), None)
-                                    if param_def and param_def.type != str:
+                                    if param_def and param_def.type is not str:
                                         try:
                                             param_value = param_def.type(param_value)
                                         except (ValueError, TypeError):
@@ -176,11 +175,11 @@ class RustIntegratedTurboAPI(TurboAPI):
                                     # Convert to correct type
                                     if param.annotation != inspect.Parameter.empty:
                                         try:
-                                            if param.annotation == int:
+                                            if param.annotation is int:
                                                 param_value = int(param_value)
-                                            elif param.annotation == float:
+                                            elif param.annotation is float:
                                                 param_value = float(param_value)
-                                            elif param.annotation == bool:
+                                            elif param.annotation is bool:
                                                 param_value = param_value.lower() in ('true', '1', 'yes', 'on')
                                         except (ValueError, TypeError):
                                             # Return 400 error for invalid query params
@@ -199,7 +198,7 @@ class RustIntegratedTurboAPI(TurboAPI):
                                     json_data = json.loads(body.decode('utf-8'))
 
                                     # Add JSON fields as parameters
-                                    for param_name, param in sig.parameters.items():
+                                    for param_name, _param in sig.parameters.items():
                                         if param_name not in call_args and param_name in json_data:
                                             call_args[param_name] = json_data[param_name]
 
@@ -243,7 +242,8 @@ class RustIntegratedTurboAPI(TurboAPI):
                     return rust_handler
 
                 # Create and register the handler
-                rust_handler = create_rust_handler(route.handler, route)
+                handler_func = create_rust_handler(route.handler, route)
+                rust_handler = handler_func
 
                 # Register with Rust server
                 self.rust_server.add_route(

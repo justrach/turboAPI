@@ -58,18 +58,6 @@ def check_free_threading_support():
     """
 
     # Check Python version first
-    if sys.version_info < (3, 13):
-        raise ImportError(
-            f"{CROSS_MARK} TurboAPI requires Python 3.13+ for free-threading support.\n"
-            f"   Current version: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n"
-            f"   Please install Python 3.13+ free-threading build:\n"
-            f"     • pyenv install 3.13-dev\n"
-            f"     • pyenv install 3.14-dev\n"
-            f"     • Or build from source with --disable-gil flag\n"
-            f"   \n"
-            f"   {ROCKET} TurboAPI's revolutionary performance requires true parallelism!\n"
-            f"   {BOOK} See: PYTHON_FREE_THREADING_GUIDE.md for setup instructions"
-        )
 
     # Check for free-threading build (multiple detection methods)
     is_free_threading = _detect_free_threading()
@@ -110,14 +98,14 @@ def _detect_free_threading():
         # In free-threading builds, some GIL-related functions are removed/modified
         if not hasattr(sys, '_current_frames'):
             return True
-    except:
+    except Exception:
         pass
 
     # Method 2: Check sys.flags for free-threading flag
     try:
         if hasattr(sys, 'flags') and hasattr(sys.flags, 'nogil'):
             return sys.flags.nogil
-    except:
+    except Exception:
         pass
 
     # Method 3: Check threading module behavior
@@ -128,7 +116,7 @@ def _detect_free_threading():
         if hasattr(threading, '_thread') and hasattr(threading._thread, 'get_native_id'):
             # Free-threading builds often have enhanced native thread support
             return True
-    except:
+    except Exception:
         pass
 
     # Method 4: Check interpreter flags in sys
@@ -137,7 +125,7 @@ def _detect_free_threading():
             # Check if implementation has free-threading indicators
             if 'free' in sys.implementation.name.lower() or 'nogil' in str(sys.implementation):
                 return True
-    except:
+    except Exception:
         pass
 
     # Method 5: Check version string for free-threading indicators
@@ -145,7 +133,7 @@ def _detect_free_threading():
         version_str = sys.version.lower()
         if 'free-threading' in version_str or 'nogil' in version_str or '+free' in version_str:
             return True
-    except:
+    except Exception:
         pass
 
     # Method 6: Check for experimental free-threading modules
@@ -154,13 +142,13 @@ def _detect_free_threading():
         import _thread
         if hasattr(_thread, 'get_native_id') and not hasattr(sys, '_current_frames'):
             return True
-    except:
+    except Exception:
         pass
 
     # Method 7: Runtime test - try true parallel execution
     try:
         return _test_parallel_execution()
-    except:
+    except Exception:
         pass
 
     # Default: assume GIL is present

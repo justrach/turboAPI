@@ -2,31 +2,34 @@
 Main TurboAPI application class with Satya integration.
 """
 
+from collections.abc import Callable
+from typing import get_type_hints
+
 import turbonet
-from typing import Callable, Dict, Any, Optional, Type, get_type_hints
-from .models import TurboRequest, TurboResponse
 from satya import Model
+
+from .models import TurboRequest, TurboResponse
 
 
 class TurboAPI:
     """Main TurboAPI application class."""
-    
-    def run(self, host: Optional[str] = None, port: Optional[int] = None) -> None:
+
+    def run(self, host: str | None = None, port: int | None = None) -> None:
         """Run the TurboAPI server with Phase 2+ optimizations."""
         actual_host = host or self.host
         actual_port = port or self.port
-    
-    def add_route(self, method: str, path: str, handler: Callable, 
-                  request_model: Optional[Type[Model]] = None,
-                  response_model: Optional[Type[Model]] = None) -> None:
+
+    def add_route(self, method: str, path: str, handler: Callable,
+                  request_model: type[Model] | None = None,
+                  response_model: type[Model] | None = None) -> None:
         """Add a route handler with optional Satya model validation."""
         route_key = f"{method.upper()} {path}"
         self._routes[route_key] = handler
-        
+
         # Analyze handler signature for automatic validation
         sig = inspect.signature(handler)
         type_hints = get_type_hints(handler)
-        
+
         # Store metadata for this route
         self._route_metadata[route_key] = {
             'request_model': request_model,
@@ -34,7 +37,7 @@ class TurboAPI:
             'signature': sig,
             'type_hints': type_hints
         }
-        
+
         # PHASE 2: Ultra-optimized handler wrapper with pre-compiled paths
         def wrapped_handler(rust_request):
             # Fast request data extraction with minimal attribute lookups
@@ -56,16 +59,16 @@ class TurboAPI:
                     'headers': getattr(rust_request, 'get_headers', lambda: {})(),
                     'body': getattr(rust_request, 'get_body', lambda: None)()
                 }
-            
+
             # Create TurboRequest using Satya validation
             request = TurboRequest(**request_data)
-            
+
             # PHASE 2: Pre-analyze handler signature for ultra-fast execution
             param_count = len([p for p in sig.parameters.values() if p.name != 'self'])
             if param_count == 1:
                 param_name = next(iter([p.name for p in sig.parameters.values() if p.name != 'self']))
                 param_type = type_hints.get(param_name)
-                
+
                 if param_type and issubclass(param_type, Model) and param_type != TurboRequest:
                     # Fast validation path
                     try:
@@ -85,7 +88,7 @@ class TurboAPI:
                     result = handler(request)
             else:
                 result = handler(request)
-            
+
             # PHASE 2+: Intelligent response optimization with caching
             # Check cache for static responses (GET requests only)
             cache_key = None
@@ -93,7 +96,7 @@ class TurboAPI:
                 cache_key = f"{request_data['path']}?{request_data.get('query_string', '')}"
                 if cache_key in self._response_cache:
                     return self._response_cache[cache_key]
-            
+
             # Process response with type optimization
             if isinstance(result, dict) and len(result) < 10:
                 # Small dict: direct return for speed
@@ -107,21 +110,21 @@ class TurboAPI:
             else:
                 # Fallback: return as-is
                 final_result = result
-            
+
             # Cache static responses if appropriate
             if cache_key and isinstance(final_result, (dict, str, int, float, bool)):
                 if len(self._response_cache) < self._cache_max_size:
                     self._response_cache[cache_key] = final_result
-            
+
             return final_result
-        
+
         # OPTIMIZED: Single handler registration only
         try:
             # Only register the wrapped handler (eliminates dual registration bottleneck)
             self._server.add_route(method, path, wrapped_handler)
         except Exception as e:
             raise RuntimeError(f"Handler registration failed for {method} {path}: {e}")
-    
+
     def _convert_to_rust_response(self, result) -> turbonet.ResponseView:
         """Convert Python response to Rust ResponseView."""
         if isinstance(result, TurboResponse):
@@ -135,22 +138,22 @@ class TurboAPI:
             rust_response.text(str(result))
             return rust_response
 
-    def run(self, host: Optional[str] = None, port: Optional[int] = None) -> None:
+    def run(self, host: str | None = None, port: int | None = None) -> None:
         """Run the TurboAPI server with Phase 2+ optimizations."""
         actual_host = host or self.host
         actual_port = port or self.port
-        
+
         print("🚀 TurboAPI PRODUCTION v2.0+ Starting...")
         print(f"   📍 Address: http://{actual_host}:{actual_port}")
-        print(f"   ⚡ Optimizations: All Phase 2+ features active")
-        print(f"   🛡️  Security: Rate limiting + Enhanced error handling") 
+        print("   ⚡ Optimizations: All Phase 2+ features active")
+        print("   🛡️  Security: Rate limiting + Enhanced error handling")
         print(f"   💾 Caching: Response cache (max {self._cache_max_size} items)")
         print(f"   📊 Routes registered: {len(self._routes)}")
         print("   🎯 Status: Production Ready!")
         print("-" * 50)
-        
+
         self._server.run()
-    
+
     def get_optimization_status(self) -> dict:
         """Get current optimization status for monitoring."""
         return {
@@ -169,8 +172,3 @@ class TurboAPI:
             },
             "production_ready": True
         }
-        elif isinstance(result, Model):
-            # Satya model response - serialize to JSON
-            import json
-            rust_response = turbonet.ResponseView(200)
-            # Use Satya's model serialization
