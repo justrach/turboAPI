@@ -165,34 +165,42 @@ jobs:
           echo "Available wheels:"
           ls -la wheelhouse/
           
-          # Detect platform and select correct wheel
-          echo "Detecting platform and selecting correct wheel..."
-          if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-            WHEEL_PATTERN="*manylinux*.whl"
-          elif [[ "$OSTYPE" == "darwin"* ]]; then
-            # Detect macOS architecture
-            if [[ $(uname -m) == "arm64" ]]; then
-              WHEEL_PATTERN="*macosx*arm64.whl"
-            else
-              WHEEL_PATTERN="*macosx*x86_64.whl"
-            fi
-          elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "win32" ]]; then
-            WHEEL_PATTERN="*win_amd64.whl"
-          else
-            echo "Unknown platform: $OSTYPE"
-            WHEEL_PATTERN="*.whl"
-          fi
-          
-          echo "Looking for wheel matching: $WHEEL_PATTERN"
-          WHEEL_FILE=$(ls wheelhouse/$WHEEL_PATTERN 2>/dev/null | head -n 1)
-          
-          if [ -z "$WHEEL_FILE" ]; then
-            echo "No matching wheel found, trying pip auto-selection..."
-            pip install --no-index --find-links wheelhouse/ turboapi
-          else
-            echo "Installing: $WHEEL_FILE"
-            pip install "$WHEEL_FILE"
-          fi
+          # Use Python to detect platform and select correct wheel
+          python -c "
+import sys
+import platform
+import os
+import glob
+
+# Detect platform
+if sys.platform.startswith('linux'):
+    pattern = 'wheelhouse/*manylinux*.whl'
+elif sys.platform == 'darwin':
+    arch = platform.machine()
+    if arch == 'arm64':
+        pattern = 'wheelhouse/*macosx*arm64.whl'
+    else:
+        pattern = 'wheelhouse/*macosx*x86_64.whl'
+elif sys.platform == 'win32':
+    pattern = 'wheelhouse/*win_amd64.whl'
+else:
+    pattern = 'wheelhouse/*.whl'
+
+print(f'Platform: {sys.platform}, Architecture: {platform.machine()}')
+print(f'Looking for wheel pattern: {pattern}')
+
+# Find matching wheel
+wheels = glob.glob(pattern)
+if wheels:
+    wheel = wheels[0]
+    print(f'Installing: {wheel}')
+    exit_code = os.system(f'pip install {wheel}')
+    sys.exit(exit_code >> 8)
+else:
+    print('No matching wheel found, trying pip auto-selection...')
+    exit_code = os.system('pip install --no-index --find-links wheelhouse/ turboapi')
+    sys.exit(exit_code >> 8)
+          "
           
           # Test the installation
           python -c "
