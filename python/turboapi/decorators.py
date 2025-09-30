@@ -4,7 +4,7 @@ Standalone decorators for TurboAPI routes.
 
 from collections.abc import Callable
 
-from .app import TurboAPI
+from .rust_integration import TurboAPI
 
 # Global app instance for standalone decorators
 _global_app: TurboAPI = None

@@ -10,9 +10,15 @@ from .rust_integration import TurboAPI
 from .version_check import check_free_threading_support
 
 __version__ = "2.0.0"
-__all__ = ["TurboAPI", "APIRouter", "Router", "TurboRequest", "TurboResponse"]
+__all__ = [
+    "TurboAPI",
+    "APIRouter",
+    "Router",
+    "TurboRequest",
+    "TurboResponse",
+    "check_free_threading_support",
+    "get_python_threading_info",
+]
 
 # Additional exports for free-threading diagnostics
 from .version_check import get_python_threading_info
-
-__all__.extend(["get_python_threading_info"])

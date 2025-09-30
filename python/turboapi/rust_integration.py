@@ -239,7 +239,7 @@ class RustIntegratedTurboAPI(TurboAPI):
                                 "status_code": 500
                             }
 
-                    return rust_handler
+                    return rust_handler  # noqa: B023
 
                 # Create and register the handler
                 handler_func = create_rust_handler(route.handler, route)
