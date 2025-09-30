@@ -5,9 +5,12 @@ FastAPI-compatible decorators with revolutionary performance
 
 import inspect
 import re
-from typing import Any, Callable, Dict, List, Optional, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 from dataclasses import dataclass
 from enum import Enum
+import re
+import inspect
+from .version_check import CHECK_MARK
 
 class HTTPMethod(Enum):
     """HTTP methods supported by TurboAPI."""
@@ -56,7 +59,7 @@ class RouteRegistry:
         pattern = self._compile_path_pattern(route.path)
         self.path_patterns[route.path] = pattern
         
-        print(f"✅ Registered route: {route.method.value} {route.path}")
+        print(f"{CHECK_MARK} Registered route: {route.method.value} {route.path}")
     
     def _compile_path_pattern(self, path: str) -> re.Pattern:
         """Compile path with parameters into regex pattern."""

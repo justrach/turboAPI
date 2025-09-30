@@ -8,6 +8,7 @@ import asyncio
 import json
 import inspect
 from .routing import Router, RouteDefinition, HTTPMethod
+from .version_check import CHECK_MARK, ROCKET
 
 class TurboAPI(Router):
     """Main TurboAPI application class with FastAPI-compatible API."""
@@ -27,22 +28,22 @@ class TurboAPI(Router):
         self.startup_handlers = []
         self.shutdown_handlers = []
         
-        print(f"🚀 TurboAPI application created: {title} v{version}")
+        print(f"{ROCKET} TurboAPI application created: {title} v{version}")
     
     def add_middleware(self, middleware_class, **kwargs):
         """Add middleware to the application."""
         self.middleware_stack.append((middleware_class, kwargs))
-        print(f"🔧 Added middleware: {middleware_class.__name__}")
+        print(f"[CONFIG] Added middleware: {middleware_class.__name__}")
     
     def on_event(self, event_type: str):
         """Register event handlers (startup/shutdown)."""
         def decorator(func: Callable):
             if event_type == "startup":
                 self.startup_handlers.append(func)
-                print(f"📅 Registered startup handler: {func.__name__}")
+                print(f"[EVENT] Registered startup handler: {func.__name__}")
             elif event_type == "shutdown":
                 self.shutdown_handlers.append(func)
-                print(f"📅 Registered shutdown handler: {func.__name__}")
+                print(f"[EVENT] Registered shutdown handler: {func.__name__}")
             return func
         return decorator
     
@@ -55,14 +56,14 @@ class TurboAPI(Router):
     ):
         """Include a router with all its routes."""
         super().include_router(router, prefix, tags)
-        print(f"📁 Included router with prefix: {prefix}")
+        print(f"[ROUTER] Included router with prefix: {prefix}")
     
     # FastAPI-like decorators for better developer experience (inherits from Router)
     # The decorators are already available from the Router base class
     
     async def _run_startup_handlers(self):
         """Run all startup event handlers."""
-        print("🎬 Running startup handlers...")
+        print("[START] Running startup handlers...")
         for handler in self.startup_handlers:
             if asyncio.iscoroutinefunction(handler):
                 await handler()
@@ -71,7 +72,7 @@ class TurboAPI(Router):
     
     async def _run_shutdown_handlers(self):
         """Run all shutdown event handlers."""
-        print("🛑 Running shutdown handlers...")
+        print("[STOP] Running shutdown handlers...")
         for handler in self.shutdown_handlers:
             if asyncio.iscoroutinefunction(handler):
                 await handler()
@@ -109,7 +110,7 @@ class TurboAPI(Router):
     
     def print_routes(self):
         """Print all registered routes in a nice format."""
-        print(f"\n📋 {self.title} - Registered Routes:")
+        print(f"\n[ROUTES] {self.title} - Registered Routes:")
         print("=" * 50)
         
         routes_by_method = {}
@@ -198,7 +199,7 @@ class TurboAPI(Router):
         **kwargs
     ):
         """Run the TurboAPI application."""
-        print(f"\n🚀 Starting TurboAPI server...")
+        print(f"\n{ROCKET} Starting TurboAPI server...")
         print(f"   Host: {host}:{port}")
         print(f"   Workers: {workers}")
         print(f"   Title: {self.title} v{self.version}")
@@ -206,11 +207,11 @@ class TurboAPI(Router):
         # Print route information
         self.print_routes()
         
-        print(f"\n🔧 Middleware Stack:")
+        print(f"\n[CONFIG] Middleware Stack:")
         for middleware_class, middleware_kwargs in self.middleware_stack:
             print(f"   - {middleware_class.__name__}")
         
-        print(f"\n⚡ Performance Features:")
+        print(f"\n[PERF] Performance Features:")
         print(f"   - 7.5x FastAPI middleware performance")
         print(f"   - Python 3.13 free-threading support")
         print(f"   - Zero-copy optimizations")
@@ -220,14 +221,14 @@ class TurboAPI(Router):
         if self.startup_handlers:
             asyncio.run(self._run_startup_handlers())
         
-        print(f"\n✅ TurboAPI server ready!")
+        print(f"\n{CHECK_MARK} TurboAPI server ready!")
         print(f"   Visit: http://{host}:{port}")
         print(f"   Docs: http://{host}:{port}/docs (coming soon)")
         
         try:
             # This would start the actual Rust HTTP server
             # For now, we'll simulate it
-            print("\n🎯 Server running (Phase 6 integration in progress)")
+            print("\n[SERVER] Server running (Phase 6 integration in progress)")
             print("Press Ctrl+C to stop")
             
             # Simulate server running
@@ -236,10 +237,10 @@ class TurboAPI(Router):
                 time.sleep(1)
                 
         except KeyboardInterrupt:
-            print(f"\n🛑 Shutting down TurboAPI server...")
+            print(f"\n[STOP] Shutting down TurboAPI server...")
             
             # Run shutdown handlers
             if self.shutdown_handlers:
                 asyncio.run(self._run_shutdown_handlers())
             
-            print("👋 Server stopped")
+            print("[BYE] Server stopped")

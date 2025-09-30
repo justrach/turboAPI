@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 TurboAPI Free-Threading Version Check
 Ensures TurboAPI only runs on Python 3.13+ free-threading builds
@@ -7,6 +8,49 @@ Ensures TurboAPI only runs on Python 3.13+ free-threading builds
 import sys
 import threading
 import warnings
+import io
+
+# Configure stdout to use UTF-8 encoding on Windows
+if sys.platform == 'win32':
+    # Ensure UTF-8 encoding for print() on Windows
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    elif not isinstance(sys.stdout, io.TextIOWrapper):
+        # Fallback for older Python or special stdout
+        import codecs
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+
+# Define symbols that work across all platforms
+CHECK_MARK = "[OK]"
+CROSS_MARK = "[X]"
+ROCKET = "[ROCKET]"
+THREAD = "[THREAD]"
+BULB = "[INFO]"
+TARGET = "[TARGET]"
+BOOK = "[DOCS]"
+MAG = "[CHECK]"
+PARTY = "[SUCCESS]"
+
+# Try to use Unicode emojis if the terminal supports it
+try:
+    # Test if we can encode/print emojis
+    test_str = "✅"
+    if sys.platform == 'win32':
+        # On Windows, test if console can display the emoji
+        test_str.encode(sys.stdout.encoding or 'utf-8')
+    # If we get here, emojis work
+    CHECK_MARK = "✅"
+    CROSS_MARK = "❌"
+    ROCKET = "🚀"
+    THREAD = "🧵"
+    BULB = "💡"
+    TARGET = "🎯"
+    BOOK = "📚"
+    MAG = "🔍"
+    PARTY = "🎉"
+except (UnicodeEncodeError, LookupError, AttributeError):
+    # Fallback to ASCII symbols already set above
+    pass
 
 
 def check_free_threading_support():
@@ -18,15 +62,15 @@ def check_free_threading_support():
     # Check Python version first
     if sys.version_info < (3, 13):
         raise ImportError(
-            f"❌ TurboAPI requires Python 3.13+ for free-threading support.\n"
+            f"{CROSS_MARK} TurboAPI requires Python 3.13+ for free-threading support.\n"
             f"   Current version: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n"
             f"   Please install Python 3.13+ free-threading build:\n"
             f"     • pyenv install 3.13-dev\n"
             f"     • pyenv install 3.14-dev\n" 
             f"     • Or build from source with --disable-gil flag\n"
             f"   \n"
-            f"   🚀 TurboAPI's revolutionary performance requires true parallelism!\n"
-            f"   📚 See: PYTHON_FREE_THREADING_GUIDE.md for setup instructions"
+            f"   {ROCKET} TurboAPI's revolutionary performance requires true parallelism!\n"
+            f"   {BOOK} See: PYTHON_FREE_THREADING_GUIDE.md for setup instructions"
         )
     
     # Check for free-threading build (multiple detection methods)
@@ -34,27 +78,27 @@ def check_free_threading_support():
     
     if not is_free_threading:
         raise ImportError(
-            f"❌ TurboAPI requires Python free-threading build (no-GIL).\n"
+            f"{CROSS_MARK} TurboAPI requires Python free-threading build (no-GIL).\n"
             f"   Current: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} with GIL enabled\n"
             f"   \n"
-            f"   🧵 Free-threading required for:\n"
+            f"   {THREAD} Free-threading required for:\n"
             f"     • 5-10x performance improvements\n"
             f"     • True multi-threading parallelism\n"
             f"     • Zero Python middleware overhead\n"
             f"     • Rust-native concurrency\n"
             f"   \n"
-            f"   📥 Install free-threading Python:\n"
+            f"   Install free-threading Python:\n"
             f"     • python3.13t (if available)\n"
             f"     • pyenv install 3.13t-dev\n"
             f"     • Build from source: ./configure --disable-gil\n"
             f"   \n"
-            f"   🚀 Experience revolutionary performance with free-threading!\n"
-            f"   📚 See: PYTHON_FREE_THREADING_GUIDE.md"
+            f"   {ROCKET} Experience revolutionary performance with free-threading!\n"
+            f"   {BOOK} See: PYTHON_FREE_THREADING_GUIDE.md"
         )
     
     # Success! Print confirmation
-    print(f"✅ TurboAPI: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} free-threading detected!")
-    print(f"🧵 True parallelism enabled - ready for 5-10x performance!")
+    print(f"{CHECK_MARK} TurboAPI: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} free-threading detected!")
+    print(f"{THREAD} True parallelism enabled - ready for 5-10x performance!")
 
 
 def _detect_free_threading():
@@ -197,31 +241,31 @@ if __name__ != "__main__":
         # Re-raise with additional context
         raise ImportError(
             f"{e}\n\n"
-            f"💡 TurboAPI is designed exclusively for free-threading Python builds.\n"
+            f"{BULB} TurboAPI is designed exclusively for free-threading Python builds.\n"
             f"   This ensures maximum performance and true parallelism.\n"
             f"   \n"
-            f"   🎯 Why free-threading only?\n"
+            f"   {TARGET} Why free-threading only?\n"
             f"     • 5-10x performance gains over FastAPI\n"
             f"     • True multi-threading without GIL bottlenecks\n"
             f"     • Rust-native concurrency integration\n"
             f"     • Future-proof architecture\n"
             f"   \n"
-            f"   📖 Setup Guide: PYTHON_FREE_THREADING_GUIDE.md\n"
+            f"   {BOOK} Setup Guide: PYTHON_FREE_THREADING_GUIDE.md\n"
         ) from e
 
 
 if __name__ == "__main__":
     # Direct execution - show diagnostic information
-    print("🔍 TurboAPI Python Free-Threading Compatibility Check")
+    print(f"{MAG} TurboAPI Python Free-Threading Compatibility Check")
     print("=" * 60)
     
     info = get_python_threading_info()
     
     print(f"Python Version: {info['python_version']}")
     print(f"Implementation: {info['implementation']}")
-    print(f"Free-Threading: {'✅ YES' if info['free_threading'] else '❌ NO'}")
-    print(f"GIL Enabled: {'❌ YES' if info['gil_enabled'] else '✅ NO'}")
-    print(f"Native Thread ID: {'✅ YES' if info['threading_native_id'] else '❌ NO'}")
+    print(f"Free-Threading: {CHECK_MARK + ' YES' if info['free_threading'] else CROSS_MARK + ' NO'}")
+    print(f"GIL Enabled: {CROSS_MARK + ' YES' if info['gil_enabled'] else CHECK_MARK + ' NO'}")
+    print(f"Native Thread ID: {CHECK_MARK + ' YES' if info['threading_native_id'] else CROSS_MARK + ' NO'}")
     print()
     print(f"Expected Performance: {info['performance_multiplier']}")
     print(f"Concurrency Model: {info['concurrency']}")
@@ -231,8 +275,8 @@ if __name__ == "__main__":
     
     try:
         check_free_threading_support()
-        print("🎉 TurboAPI compatibility: PASSED")
-        print("🚀 Ready for revolutionary performance!")
+        print(f"{PARTY} TurboAPI compatibility: PASSED")
+        print(f"{ROCKET} Ready for revolutionary performance!")
     except ImportError as e:
-        print("❌ TurboAPI compatibility: FAILED")
+        print(f"{CROSS_MARK} TurboAPI compatibility: FAILED")
         print(f"   {e}")

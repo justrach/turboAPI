@@ -8,13 +8,14 @@ import json
 from typing import Any, Dict, List, Optional, Callable
 from .routing import Router, RouteDefinition, HTTPMethod
 from .main_app import TurboAPI
+from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
 
 try:
     import turbonet
     RUST_CORE_AVAILABLE = True
 except ImportError:
     RUST_CORE_AVAILABLE = False
-    print("⚠️ Rust core not available - running in simulation mode")
+    print("[WARN] Rust core not available - running in simulation mode")
 
 class RustIntegratedTurboAPI(TurboAPI):
     """TurboAPI with direct Rust HTTP server integration - zero Python middleware overhead."""
@@ -23,13 +24,13 @@ class RustIntegratedTurboAPI(TurboAPI):
         super().__init__(*args, **kwargs)
         self.rust_server = None
         self.route_handlers = {}  # Store Python handlers by route key
-        print(f"🚀 RustIntegratedTurboAPI created - direct Rust integration")
+        print(f"{ROCKET} RustIntegratedTurboAPI created - direct Rust integration")
         
         # Check environment variable to disable rate limiting for benchmarking
         import os
         if os.getenv("TURBO_DISABLE_RATE_LIMITING") == "1":
             self.configure_rate_limiting(enabled=False)
-            print("🔧 Rate limiting disabled via environment variable")
+            print("[CONFIG] Rate limiting disabled via environment variable")
     
     # FastAPI-like decorators for better developer experience
     def get(self, path: str, **kwargs):
@@ -63,16 +64,16 @@ class RustIntegratedTurboAPI(TurboAPI):
             try:
                 turbonet.configure_rate_limiting(enabled, requests_per_minute)
                 status = "enabled" if enabled else "disabled"
-                print(f"⚙️  Rate limiting {status} ({requests_per_minute:,} req/min)")
+                print(f"[CONFIG] Rate limiting {status} ({requests_per_minute:,} req/min)")
             except Exception as e:
-                print(f"⚠️  Failed to configure rate limiting: {e}")
+                print(f"[WARN] Failed to configure rate limiting: {e}")
         else:
-            print("⚠️  Rate limiting configuration requires Rust core")
+            print("[WARN] Rate limiting configuration requires Rust core")
     
     def _initialize_rust_server(self, host: str = "127.0.0.1", port: int = 8000):
         """Initialize the Rust HTTP server with direct integration."""
         if not RUST_CORE_AVAILABLE:
-            print("⚠️ Rust core not available - cannot initialize server")
+            print("[WARN] Rust core not available - cannot initialize server")
             return False
         
         try:
@@ -91,25 +92,25 @@ class RustIntegratedTurboAPI(TurboAPI):
                         kwargs.get("max_age", 3600)
                     )
                     self.rust_server.add_middleware(cors_middleware)
-                    print(f"✅ Added CORS middleware to Rust server")
+                    print(f"{CHECK_MARK} Added CORS middleware to Rust server")
                 
                 elif middleware_name == "RateLimitMiddleware":
                     rate_limit = turbonet.RateLimitMiddleware(
                         kwargs.get("requests_per_minute", 1000)
                     )
                     self.rust_server.add_middleware(rate_limit)
-                    print(f"✅ Added Rate Limiting middleware to Rust server")
+                    print(f"{CHECK_MARK} Added Rate Limiting middleware to Rust server")
                 
                 # Add more middleware types as needed
             
             # Register all routes with Rust server
             self._register_routes_with_rust()
             
-            print(f"✅ Rust server initialized with {len(self.registry.get_routes())} routes")
+            print(f"{CHECK_MARK} Rust server initialized with {len(self.registry.get_routes())} routes")
             return True
             
         except Exception as e:
-            print(f"❌ Rust server initialization failed: {e}")
+            print(f"{CROSS_MARK} Rust server initialization failed: {e}")
             return False
     
     def _register_routes_with_rust(self):
@@ -251,10 +252,10 @@ class RustIntegratedTurboAPI(TurboAPI):
                     rust_handler
                 )
                 
-                print(f"✅ Registered {route.method.value} {route.path} with Rust server")
+                print(f"{CHECK_MARK} Registered {route.method.value} {route.path} with Rust server")
                 
             except Exception as e:
-                print(f"❌ Failed to register route {route.method.value} {route.path}: {e}")
+                print(f"{CROSS_MARK} Failed to register route {route.method.value} {route.path}: {e}")
     
     def _extract_path_params(self, route_path: str, actual_path: str) -> Dict[str, str]:
         """Extract path parameters from actual path using route pattern."""
@@ -313,26 +314,26 @@ class RustIntegratedTurboAPI(TurboAPI):
     
     def run(self, host: str = "127.0.0.1", port: int = 8000, **kwargs):
         """Run with direct Rust server integration."""
-        print(f"\n🚀 Starting TurboAPI with Direct Rust Integration...")
+        print(f"\n{ROCKET} Starting TurboAPI with Direct Rust Integration...")
         print(f"   Host: {host}:{port}")
         print(f"   Title: {self.title} v{self.version}")
         
         # Initialize Rust server
         if not self._initialize_rust_server(host, port):
-            print("❌ Failed to initialize Rust server")
+            print(f"{CROSS_MARK} Failed to initialize Rust server")
             return
         
         # Print integration info
-        print(f"\n🔧 Direct Rust Integration:")
-        print(f"   Rust HTTP Server: ✅ Active")
-        print(f"   Middleware Pipeline: ✅ Rust-native (zero Python overhead)")
-        print(f"   Route Handlers: ✅ {len(self.route_handlers)} Python functions registered")
-        print(f"   Performance: ✅ 5-10x FastAPI target (no Python middleware overhead)")
+        print(f"\n[CONFIG] Direct Rust Integration:")
+        print(f"   Rust HTTP Server: {CHECK_MARK} Active")
+        print(f"   Middleware Pipeline: {CHECK_MARK} Rust-native (zero Python overhead)")
+        print(f"   Route Handlers: {CHECK_MARK} {len(self.route_handlers)} Python functions registered")
+        print(f"   Performance: {CHECK_MARK} 5-10x FastAPI target (no Python middleware overhead)")
         
         # Print route information
         self.print_routes()
         
-        print(f"\n⚡ Zero-Overhead Architecture:")
+        print(f"\n[PERF] Zero-Overhead Architecture:")
         print(f"   HTTP Request → Rust Middleware → Python Handler → Rust Response")
         print(f"   No Python middleware overhead!")
         print(f"   Direct Rust-to-Python calls only for route handlers")
@@ -342,30 +343,30 @@ class RustIntegratedTurboAPI(TurboAPI):
             import asyncio
             asyncio.run(self._run_startup_handlers())
         
-        print(f"\n✅ TurboAPI Direct Rust Integration ready!")
+        print(f"\n{CHECK_MARK} TurboAPI Direct Rust Integration ready!")
         print(f"   Visit: http://{host}:{port}")
         
         try:
             if RUST_CORE_AVAILABLE:
                 # Start the actual Rust server
-                print("\n🎯 Starting Rust HTTP server with zero Python overhead...")
+                print("\n[SERVER] Starting Rust HTTP server with zero Python overhead...")
                 self.rust_server.run()
             else:
-                print("\n⚠️ Rust core not available - simulation mode")
+                print("\n[WARN] Rust core not available - simulation mode")
                 print("Press Ctrl+C to stop")
                 import time
                 while True:
                     time.sleep(1)
                     
         except KeyboardInterrupt:
-            print(f"\n🛑 Shutting down TurboAPI server...")
+            print(f"\n[STOP] Shutting down TurboAPI server...")
             
             # Run shutdown handlers
             if self.shutdown_handlers:
                 import asyncio
                 asyncio.run(self._run_shutdown_handlers())
             
-            print("👋 Server stopped")
+            print("[BYE] Server stopped")
 
 # Export the correct integration class
 TurboAPI = RustIntegratedTurboAPI

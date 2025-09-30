@@ -10,13 +10,14 @@ import traceback
 from typing import Any, Dict, List, Optional, Union, Callable
 from .routing import Router, RouteDefinition, HTTPMethod
 from .main_app import TurboAPI
+from .version_check import CHECK_MARK, ROCKET
 
 try:
     import turbonet
     RUST_CORE_AVAILABLE = True
 except ImportError:
     RUST_CORE_AVAILABLE = False
-    print("⚠️ Rust core not available - running in simulation mode")
+    print("[WARN] Rust core not available - running in simulation mode")
 
 class RequestContextAdapter:
     """Adapter to convert HTTP requests to middleware RequestContext."""
@@ -370,13 +371,13 @@ class IntegratedTurboAPI(TurboAPI):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.http_server = None
-        print(f"🚀 IntegratedTurboAPI created with HTTP server integration")
+        print(f"{ROCKET} IntegratedTurboAPI created with HTTP server integration")
     
     def _initialize_server(self):
         """Initialize the HTTP server integration."""
         if not self.http_server:
             self.http_server = TurboHTTPServer(self)
-            print(f"🔧 HTTP server integration initialized")
+            print(f"[CONFIG] HTTP server integration initialized")
     
     async def handle_http_request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
         """Handle HTTP request through integrated server."""
@@ -389,20 +390,20 @@ class IntegratedTurboAPI(TurboAPI):
         """Run with integrated HTTP server."""
         self._initialize_server()
         
-        print(f"\n🚀 Starting TurboAPI with HTTP Server Integration...")
+        print(f"\n{ROCKET} Starting TurboAPI with HTTP Server Integration...")
         print(f"   Host: {host}:{port}")
         print(f"   Title: {self.title} v{self.version}")
         
         # Print integration info
-        print(f"\n🔧 Integration Status:")
-        print(f"   Rust Core: {'✅ Available' if RUST_CORE_AVAILABLE else '⚠️ Simulation Mode'}")
-        print(f"   Middleware Pipeline: {'✅ Active' if self.http_server.middleware_pipeline else '⚠️ Simulated'}")
-        print(f"   Route Registration: ✅ {len(self.registry.get_routes())} routes")
+        print(f"\n[CONFIG] Integration Status:")
+        print(f"   Rust Core: {CHECK_MARK + ' Available' if RUST_CORE_AVAILABLE else '[WARN] Simulation Mode'}")
+        print(f"   Middleware Pipeline: {CHECK_MARK + ' Active' if self.http_server.middleware_pipeline else '[WARN] Simulated'}")
+        print(f"   Route Registration: {CHECK_MARK} {len(self.registry.get_routes())} routes")
         
         # Print route information
         self.print_routes()
         
-        print(f"\n⚡ Performance Pipeline:")
+        print(f"\n[PERF] Performance Pipeline:")
         print(f"   HTTP Request → Middleware Pipeline → Route Handler")
         print(f"   Route Handler → Middleware Pipeline → HTTP Response")
         print(f"   Expected: 5-10x FastAPI overall performance")
@@ -411,12 +412,12 @@ class IntegratedTurboAPI(TurboAPI):
         if self.startup_handlers:
             asyncio.run(self._run_startup_handlers())
         
-        print(f"\n✅ TurboAPI HTTP Server Integration ready!")
+        print(f"\n{CHECK_MARK} TurboAPI HTTP Server Integration ready!")
         print(f"   Visit: http://{host}:{port}")
         
         try:
             # This would start the actual Rust HTTP server
-            print("\n🎯 HTTP Server Integration active (Phase 6.2)")
+            print("\n[SERVER] HTTP Server Integration active (Phase 6.2)")
             print("Press Ctrl+C to stop")
             
             # Simulate server running
@@ -425,10 +426,10 @@ class IntegratedTurboAPI(TurboAPI):
                 time.sleep(1)
                 
         except KeyboardInterrupt:
-            print(f"\n🛑 Shutting down TurboAPI HTTP server...")
+            print(f"\n[STOP] Shutting down TurboAPI HTTP server...")
             
             # Run shutdown handlers
             if self.shutdown_handlers:
                 asyncio.run(self._run_shutdown_handlers())
             
-            print("👋 Server stopped")
+            print("[BYE] Server stopped")
