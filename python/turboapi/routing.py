@@ -5,11 +5,9 @@ FastAPI-compatible decorators with revolutionary performance
 
 import inspect
 import re
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Type, Union
 from dataclasses import dataclass
 from enum import Enum
-import re
-import inspect
 from .version_check import CHECK_MARK
 
 class HTTPMethod(Enum):
