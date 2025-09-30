@@ -166,49 +166,76 @@ jobs:
           ls -la wheelhouse/
           
           # Use Python to detect platform and select correct wheel
-          python -c "
+          python << 'PYTHON_SCRIPT'
 import sys
 import platform
 import os
 import glob
 
-print(f'Platform: {sys.platform}, Architecture: {platform.machine()}')
+print('='*60)
+print('WHEEL SELECTION DEBUG')
+print('='*60)
+print(f'Platform: {sys.platform}')
+print(f'Architecture: {platform.machine()}')
 print(f'Python version: {sys.version_info.major}.{sys.version_info.minor}')
+print()
 
 # List all available wheels
 all_wheels = glob.glob('wheelhouse/*.whl')
-print(f'Available wheels: {all_wheels}')
+print(f'All wheels in wheelhouse: {len(all_wheels)}')
+for w in all_wheels:
+    print(f'  - {w}')
+print()
 
-# Detect platform and build wheel pattern
+# Detect platform
 py_ver = f'cp{sys.version_info.major}{sys.version_info.minor}'
 
 if sys.platform.startswith('linux'):
     platform_tag = 'manylinux'
+    wrong_tags = ['macosx', 'win']
 elif sys.platform == 'darwin':
     arch = platform.machine()
-    platform_tag = f'macosx*{arch}'
+    platform_tag = f'macosx_{arch}' if arch == 'arm64' else 'macosx'
+    wrong_tags = ['manylinux', 'win']
 elif sys.platform == 'win32':
     platform_tag = 'win_amd64'
+    wrong_tags = ['manylinux', 'macosx']
 else:
-    platform_tag = '*'
+    print(f'ERROR: Unknown platform {sys.platform}')
+    sys.exit(1)
 
-# Build pattern: turboapi-VERSION-PYVER-PYVER-PLATFORM.whl
-pattern = f'wheelhouse/turboapi-*-{py_ver}-{py_ver}-*{platform_tag}*.whl'
-print(f'Wheel pattern: {pattern}')
+print(f'Looking for platform: {platform_tag}')
+print(f'Rejecting platforms: {wrong_tags}')
+print()
 
-# Find matching wheel
-wheels = glob.glob(pattern)
-print(f'Matching wheels: {wheels}')
+# Find matching wheel - be very explicit
+matching_wheels = []
+for wheel in all_wheels:
+    # Must match Python version
+    if py_ver not in wheel:
+        continue
+    # Must match platform
+    if platform_tag not in wheel:
+        continue
+    # Must NOT match wrong platforms
+    if any(wrong in wheel for wrong in wrong_tags):
+        continue
+    matching_wheels.append(wheel)
 
-if wheels:
-    wheel = wheels[0]
+print(f'Matching wheels: {matching_wheels}')
+print()
+
+if matching_wheels:
+    wheel = matching_wheels[0]
     print(f'Installing: {wheel}')
-    exit_code = os.system(f'pip install \"{wheel}\"')
+    print('='*60)
+    exit_code = os.system(f'pip install "{wheel}"')
     sys.exit(exit_code >> 8)
 else:
-    print('ERROR: No matching wheel found!')
+    print('ERROR: No compatible wheel found!')
+    print('='*60)
     sys.exit(1)
-          "
+PYTHON_SCRIPT
           
           # Test the installation
           python -c "
