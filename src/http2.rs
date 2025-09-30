@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
-use hyper::{body::Incoming as IncomingBody, Request, Response, Method};
+use hyper::{body::Incoming as IncomingBody, Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use http_body_util::Full;

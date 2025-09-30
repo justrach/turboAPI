@@ -4,12 +4,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::{
-    accept_async, tungstenite::protocol::Message, WebSocketStream,
+    accept_async, tungstenite::protocol::Message,
 };
 use tokio::net::{TcpListener, TcpStream};
 use futures_util::{SinkExt, StreamExt};
-use bytes::Bytes;
-use serde_json;
 
 type ConnectionId = u64;
 type WebSocketSender = tokio::sync::mpsc::UnboundedSender<Message>;

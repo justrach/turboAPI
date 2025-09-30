@@ -1,10 +1,8 @@
 use pyo3::prelude::*;
 use std::sync::Arc;
-use bytes::{Bytes, BytesMut, Buf, BufMut};
-use std::collections::{VecDeque, HashMap};
+use bytes::{Bytes, BytesMut, BufMut};
+use std::collections::VecDeque;
 use tokio::sync::Mutex;
-use std::ptr;
-use std::slice;
 use std::sync::OnceLock;
 
 // Singleton runtime for zerocopy operations

@@ -1,6 +1,5 @@
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use pyo3::prelude::*;
 use pyo3::types::PyAnyMethods;

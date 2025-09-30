@@ -2,6 +2,15 @@
 name = "turbonet"
 version = "0.3.1"
 edition = "2021"
+authors = ["Rach Pradhan <rach@turboapi.dev>"]
+description = "High-performance Python web framework core - Rust-powered HTTP server with Python 3.13 free-threading support"
+license = "MIT"
+repository = "https://github.com/justrach/turboAPI"
+homepage = "https://github.com/justrach/turboAPI"
+documentation = "https://github.com/justrach/turboAPI#readme"
+keywords = ["web", "http", "server", "python", "performance"]
+categories = ["web-programming::http-server", "api-bindings"]
+readme = "README.md"
 
 [lib]
 name = "turbonet"

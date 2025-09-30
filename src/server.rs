@@ -14,7 +14,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use crate::router::RadixRouter;
 use std::sync::OnceLock;
-use serde_json;
 use std::collections::HashMap as StdHashMap;
 use crate::zerocopy::ZeroCopyBufferPool;
 use std::time::{Duration, Instant};
