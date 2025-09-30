@@ -172,34 +172,42 @@ import platform
 import os
 import glob
 
-# Detect platform
+print(f'Platform: {sys.platform}, Architecture: {platform.machine()}')
+print(f'Python version: {sys.version_info.major}.{sys.version_info.minor}')
+
+# List all available wheels
+all_wheels = glob.glob('wheelhouse/*.whl')
+print(f'Available wheels: {all_wheels}')
+
+# Detect platform and build wheel pattern
+py_ver = f'cp{sys.version_info.major}{sys.version_info.minor}'
+
 if sys.platform.startswith('linux'):
-    pattern = 'wheelhouse/*manylinux*.whl'
+    platform_tag = 'manylinux'
 elif sys.platform == 'darwin':
     arch = platform.machine()
-    if arch == 'arm64':
-        pattern = 'wheelhouse/*macosx*arm64.whl'
-    else:
-        pattern = 'wheelhouse/*macosx*x86_64.whl'
+    platform_tag = f'macosx*{arch}'
 elif sys.platform == 'win32':
-    pattern = 'wheelhouse/*win_amd64.whl'
+    platform_tag = 'win_amd64'
 else:
-    pattern = 'wheelhouse/*.whl'
+    platform_tag = '*'
 
-print(f'Platform: {sys.platform}, Architecture: {platform.machine()}')
-print(f'Looking for wheel pattern: {pattern}')
+# Build pattern: turboapi-VERSION-PYVER-PYVER-PLATFORM.whl
+pattern = f'wheelhouse/turboapi-*-{py_ver}-{py_ver}-*{platform_tag}*.whl'
+print(f'Wheel pattern: {pattern}')
 
 # Find matching wheel
 wheels = glob.glob(pattern)
+print(f'Matching wheels: {wheels}')
+
 if wheels:
     wheel = wheels[0]
     print(f'Installing: {wheel}')
-    exit_code = os.system(f'pip install {wheel}')
+    exit_code = os.system(f'pip install \"{wheel}\"')
     sys.exit(exit_code >> 8)
 else:
-    print('No matching wheel found, trying pip auto-selection...')
-    exit_code = os.system('pip install --no-index --find-links wheelhouse/ turboapi')
-    sys.exit(exit_code >> 8)
+    print('ERROR: No matching wheel found!')
+    sys.exit(1)
           "
           
           # Test the installation
