@@ -2,7 +2,8 @@
 Standalone decorators for TurboAPI routes.
 """
 
-from typing import Callable
+from collections.abc import Callable
+
 from .app import TurboAPI
 
 # Global app instance for standalone decorators

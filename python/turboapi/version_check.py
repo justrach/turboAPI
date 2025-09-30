@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 TurboAPI Free-Threading Version Check
 Ensures TurboAPI only runs on Python 3.13+ free-threading builds
 """
 
+import io
 import sys
 import threading
-import warnings
-import io
 
 # Configure stdout to use UTF-8 encoding on Windows
 if sys.platform == 'win32':
@@ -58,7 +56,7 @@ def check_free_threading_support():
     Check if Python is running with free-threading (no-GIL) enabled.
     Raises ImportError if not compatible.
     """
-    
+
     # Check Python version first
     if sys.version_info < (3, 13):
         raise ImportError(
@@ -66,16 +64,16 @@ def check_free_threading_support():
             f"   Current version: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n"
             f"   Please install Python 3.13+ free-threading build:\n"
             f"     • pyenv install 3.13-dev\n"
-            f"     • pyenv install 3.14-dev\n" 
+            f"     • pyenv install 3.14-dev\n"
             f"     • Or build from source with --disable-gil flag\n"
             f"   \n"
             f"   {ROCKET} TurboAPI's revolutionary performance requires true parallelism!\n"
             f"   {BOOK} See: PYTHON_FREE_THREADING_GUIDE.md for setup instructions"
         )
-    
+
     # Check for free-threading build (multiple detection methods)
     is_free_threading = _detect_free_threading()
-    
+
     if not is_free_threading:
         raise ImportError(
             f"{CROSS_MARK} TurboAPI requires Python free-threading build (no-GIL).\n"
@@ -95,7 +93,7 @@ def check_free_threading_support():
             f"   {ROCKET} Experience revolutionary performance with free-threading!\n"
             f"   {BOOK} See: PYTHON_FREE_THREADING_GUIDE.md"
         )
-    
+
     # Success! Print confirmation
     print(f"{CHECK_MARK} TurboAPI: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} free-threading detected!")
     print(f"{THREAD} True parallelism enabled - ready for 5-10x performance!")
@@ -106,7 +104,7 @@ def _detect_free_threading():
     Detect if Python is running in free-threading mode.
     Uses multiple detection methods for reliability.
     """
-    
+
     # Method 1: Check for GIL-related functions (most reliable)
     try:
         # In free-threading builds, some GIL-related functions are removed/modified
@@ -114,14 +112,14 @@ def _detect_free_threading():
             return True
     except:
         pass
-    
+
     # Method 2: Check sys.flags for free-threading flag
     try:
         if hasattr(sys, 'flags') and hasattr(sys.flags, 'nogil'):
             return sys.flags.nogil
     except:
         pass
-    
+
     # Method 3: Check threading module behavior
     try:
         # In free-threading, threading.get_ident() behavior changes
@@ -132,7 +130,7 @@ def _detect_free_threading():
             return True
     except:
         pass
-    
+
     # Method 4: Check interpreter flags in sys
     try:
         if hasattr(sys, 'implementation') and hasattr(sys.implementation, 'name'):
@@ -141,7 +139,7 @@ def _detect_free_threading():
                 return True
     except:
         pass
-    
+
     # Method 5: Check version string for free-threading indicators
     try:
         version_str = sys.version.lower()
@@ -149,7 +147,7 @@ def _detect_free_threading():
             return True
     except:
         pass
-    
+
     # Method 6: Check for experimental free-threading modules
     try:
         # Free-threading builds may have special modules
@@ -158,13 +156,13 @@ def _detect_free_threading():
             return True
     except:
         pass
-    
+
     # Method 7: Runtime test - try true parallel execution
     try:
         return _test_parallel_execution()
     except:
         pass
-    
+
     # Default: assume GIL is present
     return False
 
@@ -176,29 +174,29 @@ def _test_parallel_execution():
     """
     import threading
     import time
-    
+
     # Quick parallel execution test
     results = []
     start_times = []
-    
+
     def worker():
         start_times.append(time.time())
         # CPU work that would be blocked by GIL
         total = sum(i * i for i in range(10000))
         results.append(total)
-    
+
     # Start threads simultaneously
     threads = [threading.Thread(target=worker) for _ in range(2)]
-    
+
     overall_start = time.time()
     for t in threads:
         t.start()
-    
+
     for t in threads:
         t.join()
-    
+
     overall_time = time.time() - overall_start
-    
+
     # If threads started within 1ms of each other and completed quickly,
     # it's likely true parallelism (no GIL blocking)
     if len(start_times) >= 2:
@@ -206,7 +204,7 @@ def _test_parallel_execution():
         # True parallelism: threads start nearly simultaneously and complete fast
         if start_spread < 0.01 and overall_time < 0.05:  # 10ms start spread, 50ms total
             return True
-    
+
     return False
 
 
@@ -219,7 +217,7 @@ def get_python_threading_info():
         'threading_native_id': hasattr(threading._thread, 'get_native_id') if hasattr(threading, '_thread') else False,
         'implementation': sys.implementation.name if hasattr(sys, 'implementation') else 'unknown',
     }
-    
+
     # Add performance prediction
     if info['free_threading']:
         info['performance_multiplier'] = '5-10x FastAPI'
@@ -229,7 +227,7 @@ def get_python_threading_info():
         info['performance_multiplier'] = 'Limited by GIL'
         info['concurrency'] = 'Serialized threads'
         info['gil_overhead'] = 'High (Python bottleneck)'
-    
+
     return info
 
 
@@ -258,9 +256,9 @@ if __name__ == "__main__":
     # Direct execution - show diagnostic information
     print(f"{MAG} TurboAPI Python Free-Threading Compatibility Check")
     print("=" * 60)
-    
+
     info = get_python_threading_info()
-    
+
     print(f"Python Version: {info['python_version']}")
     print(f"Implementation: {info['implementation']}")
     print(f"Free-Threading: {CHECK_MARK + ' YES' if info['free_threading'] else CROSS_MARK + ' NO'}")
@@ -270,9 +268,9 @@ if __name__ == "__main__":
     print(f"Expected Performance: {info['performance_multiplier']}")
     print(f"Concurrency Model: {info['concurrency']}")
     print(f"GIL Overhead: {info['gil_overhead']}")
-    
+
     print("\n" + "=" * 60)
-    
+
     try:
         check_free_threading_support()
         print(f"{PARTY} TurboAPI compatibility: PASSED")
