@@ -201,8 +201,11 @@ def adaptive_rate_test(base_url="http://127.0.0.1:8080", endpoint="/benchmark/si
     return None
 
 def run_server_thread():
-    """Run server in a separate thread"""
-    app.run(host="127.0.0.1", port=8080)
+    """Run server in a separate thread with maximum workers for multithreading"""
+    import os
+    workers = os.cpu_count() or 4  # Use all available CPU cores
+    print(f"🧵 Starting TurboAPI with {workers} workers for true multithreading")
+    app.run(host="127.0.0.1", port=8080, workers=workers)
 
 def run_benchmark_suite():
     """Run comprehensive benchmark suite"""
@@ -235,8 +238,12 @@ def run_benchmark_suite():
 
 if __name__ == "__main__":
     import sys
+    import os
     
     if len(sys.argv) > 1 and sys.argv[1] == "benchmark":
         run_benchmark_suite()
     else:
-        app.run(host="127.0.0.1", port=8080)
+        # Run with all CPU cores for maximum performance
+        workers = os.cpu_count() or 4
+        print(f"🚀 Starting TurboAPI with {workers} workers (Python 3.13 free-threading)")
+        app.run(host="127.0.0.1", port=8080, workers=workers)

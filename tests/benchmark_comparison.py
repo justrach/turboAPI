@@ -79,8 +79,8 @@ def adaptive_rate_test_comparison(base_url, endpoint="/benchmark/simple", framew
     """Adaptive rate testing optimized for comparison"""
     print(f"🧪 {framework_name} Adaptive Rate Test: {endpoint}")
     
-    # Progressive rate testing - find the breaking point
-    test_rates = [100, 500, 1000, 2000, 5000, 10000, 20000, 50000]
+    # Progressive rate testing - find the breaking point  
+    test_rates = [100, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000]
     
     max_sustainable_rate = 0
     
