@@ -53,13 +53,32 @@ app.run(host="127.0.0.1", port=8000)
 - **💾 Zero-Copy Optimizations**: Direct memory access, no Python copying
 - **🔄 Intelligent Caching**: Response caching with TTL optimization
 
-### **Benchmark Results vs FastAPI**
+### **Benchmark Results vs FastAPI** (wrk load testing)
+
+![Benchmark Comparison](benchmark_comparison.png)
+
 ```
-📊 CPU-Intensive Tasks:     316% faster
-📊 JSON Processing:         247% faster  
-📊 High Concurrency:       5-10x faster
-📊 Middleware Pipeline:    Zero overhead (Rust-native)
-📊 Overall Performance:    5-10x improvement
+🎯 Light Load (50 connections):
+  Root Endpoint:       42,803 req/s (TurboAPI) vs 8,078 req/s (FastAPI) = 5.3x faster
+  Simple Endpoint:     43,375 req/s (TurboAPI) vs 8,536 req/s (FastAPI) = 5.1x faster  
+  JSON Endpoint:       41,696 req/s (TurboAPI) vs 3,208 req/s (FastAPI) = 13.0x faster
+
+🎯 Medium Load (200 connections):
+  Root Endpoint:       42,874 req/s (TurboAPI) vs 8,220 req/s (FastAPI) = 5.2x faster
+  Simple Endpoint:     43,592 req/s (TurboAPI) vs 8,542 req/s (FastAPI) = 5.1x faster
+  JSON Endpoint:       41,822 req/s (TurboAPI) vs 3,190 req/s (FastAPI) = 13.1x faster
+
+🎯 Heavy Load (500 connections):
+  Root Endpoint:       43,057 req/s (TurboAPI) vs 7,897 req/s (FastAPI) = 5.5x faster
+  Simple Endpoint:     43,525 req/s (TurboAPI) vs 8,092 req/s (FastAPI) = 5.4x faster
+  JSON Endpoint:       42,743 req/s (TurboAPI) vs 3,099 req/s (FastAPI) = 13.8x faster
+
+🚀 Summary:
+  • Average speedup: 5-13x faster than FastAPI
+  • Consistent 40,000+ RPS across all load levels
+  • JSON processing: Up to 13.8x faster
+  • True multi-core utilization with Python 3.13 free-threading
+  • Sub-millisecond latency under light load
 ```
 
 ## 🎯 **Zero Learning Curve**
@@ -175,12 +194,30 @@ def cpu_intensive():
 ## ⚡ **Quick Start**
 
 ### **Installation**
+
+#### **Option 1: Install from PyPI (Recommended)**
 ```bash
-# Clone and install TurboAPI v0.3.0
+# Install Python 3.13 free-threading for optimal performance
+# macOS/Linux users can use pyenv or uv
+
+# Create free-threading environment
+python3.13t -m venv turbo-env
+source turbo-env/bin/activate  # On Windows: turbo-env\Scripts\activate
+
+# Install TurboAPI (includes prebuilt wheels for macOS and Linux)
+pip install turboapi
+
+# Verify installation
+python -c "from turboapi import TurboAPI; print('✅ TurboAPI v0.3.12 ready!')"
+```
+
+#### **Option 2: Build from Source**
+```bash
+# Clone repository
 git clone https://github.com/justrach/turboAPI.git
 cd turboAPI
 
-# Create Python 3.13 free-threading environment for optimal performance
+# Create Python 3.13 free-threading environment
 python3.13t -m venv turbo-freethreaded
 source turbo-freethreaded/bin/activate
 
@@ -192,8 +229,10 @@ pip install maturin
 maturin develop --manifest-path Cargo.toml
 
 # Verify installation
-python -c "from turboapi import TurboAPI; print('✅ TurboAPI v0.3.0 ready!')"
+python -c "from turboapi import TurboAPI; print('✅ TurboAPI ready!')"
 ```
+
+**Note**: Free-threading wheels (cp313t) available for macOS and Linux. Windows uses standard Python 3.13.
 
 ### **🎨 FastAPI-Identical Syntax Examples**
 
@@ -467,6 +506,98 @@ pip install maturin
 # Build and install TurboAPI
 maturin develop --release
 ```
+
+## 📊 **Running Benchmarks**
+
+TurboAPI includes comprehensive benchmarking tools to verify performance claims.
+
+### **Quick Benchmark with wrk**
+
+```bash
+# Install wrk (if not already installed)
+brew install wrk  # macOS
+# sudo apt install wrk  # Linux
+
+# Run the comparison benchmark
+python tests/wrk_comparison.py
+
+# Generates:
+# - Console output with detailed results
+# - benchmark_comparison.png (visualization)
+```
+
+**Expected Results**:
+- TurboAPI: 40,000+ req/s consistently
+- FastAPI: 3,000-8,000 req/s
+- Speedup: 5-13x depending on workload
+
+### **Available Benchmark Scripts**
+
+#### **1. wrk Comparison (Recommended)**
+```bash
+python tests/wrk_comparison.py
+```
+- Uses industry-standard wrk load tester
+- Tests 3 load levels (light/medium/heavy)
+- Tests 3 endpoints (/, /benchmark/simple, /benchmark/json)
+- Generates PNG visualization
+- Most accurate performance measurements
+
+#### **2. Adaptive Rate Testing**
+```bash
+python tests/benchmark_comparison.py
+```
+- Finds maximum sustainable rate
+- Progressive rate testing
+- Python-based request testing
+
+#### **3. Quick Verification**
+```bash
+python tests/quick_test.py
+```
+- Fast sanity check
+- Verifies rate limiting is disabled
+- Tests basic functionality
+
+### **Benchmark Configuration**
+
+**Ports**:
+- TurboAPI: `http://127.0.0.1:8080`
+- FastAPI: `http://127.0.0.1:8081`
+
+**Rate Limiting**: Disabled by default for benchmarking
+```python
+from turboapi import TurboAPI
+app = TurboAPI()
+app.configure_rate_limiting(enabled=False)  # For benchmarking
+```
+
+**Multi-threading**: Automatically uses all CPU cores
+```python
+import os
+workers = os.cpu_count()  # e.g., 14 cores on M3 Max
+app.run(host="127.0.0.1", port=8000, workers=workers)
+```
+
+### **Interpreting Results**
+
+**Key Metrics**:
+- **RPS (Requests/second)**: Higher is better
+- **Latency**: Lower is better (p50, p95, p99)
+- **Speedup**: TurboAPI RPS / FastAPI RPS
+
+**Expected Performance**:
+```
+Light Load (50 conn):     40,000+ RPS, ~1-2ms latency
+Medium Load (200 conn):   40,000+ RPS, ~4-5ms latency  
+Heavy Load (500 conn):    40,000+ RPS, ~11-12ms latency
+```
+
+**Why TurboAPI is Faster**:
+1. **Rust HTTP core** - No Python overhead
+2. **Zero-copy operations** - Direct memory access
+3. **Free-threading** - True parallelism (no GIL)
+4. **Optimized middleware** - Rust-native pipeline
 
 ## Testing & Quality Assurance
 

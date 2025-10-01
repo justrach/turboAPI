@@ -102,6 +102,79 @@ def kill_port(port):
     except:
         pass
 
+def generate_visualization(results):
+    """Generate a beautiful PNG visualization of benchmark results."""
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        
+        # Prepare data
+        configs = list(results['turboapi'].keys())
+        endpoints = ['Root', 'Simple', 'JSON']
+        
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        fig.suptitle('TurboAPI vs FastAPI Performance Comparison', 
+                     fontsize=16, fontweight='bold')
+        
+        x = np.arange(len(configs))
+        width = 0.35
+        
+        colors_turbo = '#FF6B35'  # Orange for TurboAPI
+        colors_fast = '#4ECDC4'   # Teal for FastAPI
+        
+        for idx, endpoint in enumerate(endpoints):
+            ax = axes[idx]
+            
+            turbo_rps = [results['turboapi'][config][endpoint].get('rps', 0) 
+                        for config in configs]
+            fast_rps = [results['fastapi'][config][endpoint].get('rps', 0) 
+                       for config in configs]
+            
+            bars1 = ax.bar(x - width/2, turbo_rps, width, label='TurboAPI',
+                          color=colors_turbo, alpha=0.8)
+            bars2 = ax.bar(x + width/2, fast_rps, width, label='FastAPI',
+                          color=colors_fast, alpha=0.8)
+            
+            # Add value labels on bars
+            for bars in [bars1, bars2]:
+                for bar in bars:
+                    height = bar.get_height()
+                    ax.text(bar.get_x() + bar.get_width()/2., height,
+                           f'{int(height):,}',
+                           ha='center', va='bottom', fontsize=9)
+            
+            # Add speedup annotations
+            for i, (t, f) in enumerate(zip(turbo_rps, fast_rps)):
+                if f > 0:
+                    speedup = t / f
+                    ax.text(i, max(t, f) * 1.15, f'{speedup:.1f}x',
+                           ha='center', va='bottom', fontsize=11, 
+                           fontweight='bold', color='#2C3E50')
+            
+            ax.set_xlabel('Load Configuration', fontweight='bold')
+            ax.set_ylabel('Requests/second', fontweight='bold')
+            ax.set_title(f'{endpoint} Endpoint', fontweight='bold')
+            ax.set_xticks(x)
+            ax.set_xticklabels(configs)
+            ax.legend()
+            ax.grid(axis='y', alpha=0.3, linestyle='--')
+            
+            # Format y-axis with comma separator
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{int(x):,}'))
+        
+        plt.tight_layout()
+        
+        # Save to file
+        filename = 'benchmark_comparison.png'
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        print(f"\n🖼️  Visualization saved to: {filename}")
+        
+        plt.close()
+        
+    except ImportError:
+        print("\n⚠️  matplotlib not available - skipping visualization")
+        print("💡 Install with: pip install matplotlib")
+
 def main():
     print("🥊 TurboAPI vs FastAPI Benchmark (wrk)")
     print("=" * 60)
@@ -197,6 +270,9 @@ def main():
                 print(f"    TurboAPI: {turbo['rps']:>10,.0f} req/s")
                 print(f"    FastAPI:  {fast['rps']:>10,.0f} req/s")
                 print(f"    Speedup:  {improvement:>10.1f}x")
+    
+    # Generate visualization
+    generate_visualization(results)
     
     # Cleanup
     kill_port(8080)
