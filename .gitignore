@@ -34,7 +34,6 @@ turbo-freethreaded/
 # Benchmark and test outputs
 benchmark_graphs/
 *.json
-*.png
 
 # Temporary files
 *.tmp
@@ -47,3 +46,4 @@ docs/_build/
 # PyO3/maturin build artifacts
 *.whl
 target/wheels/
+benchmark_graphs/
