@@ -11,6 +11,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import statistics
 import json
+import sys
 
 def wait_for_server(url, max_wait=30, check_interval=0.5):
     """Wait for server to be ready"""
@@ -121,10 +122,10 @@ def run_benchmark_suite(framework, port, script_name):
     
     # Start the server
     if framework == "TurboAPI":
-        process = subprocess.Popen(['python3', 'tests/test.py'], 
+        process = subprocess.Popen([sys.executable, 'tests/test.py'], 
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     else:  # FastAPI
-        process = subprocess.Popen(['python3', 'tests/fastapi_equivalent.py'], 
+        process = subprocess.Popen([sys.executable, 'tests/fastapi_equivalent.py'], 
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     
     # Wait for server to be ready
