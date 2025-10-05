@@ -1,2 +1,8 @@
 include turboapi/*.py
 recursive-include turboapi *.py
+include ../README.md
+include ../LICENSE
+include ../Cargo.toml
+include ../Cargo.lock
+recursive-include ../src *.rs
+recursive-include ../benches *.rs
