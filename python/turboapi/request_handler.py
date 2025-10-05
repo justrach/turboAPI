@@ -196,8 +196,14 @@ def create_enhanced_handler(original_handler, route_definition):
             
             # Call original handler
             if inspect.iscoroutinefunction(original_handler):
-                # For async handlers (future support)
-                result = original_handler(**filtered_kwargs)
+                # Async handler - need to await it
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                result = loop.run_until_complete(original_handler(**filtered_kwargs))
             else:
                 result = original_handler(**filtered_kwargs)
             

@@ -299,19 +299,40 @@ async fn handle_request(
     drop(router_guard);
     
     if let Some(route_match) = route_match {
-        let params = route_match.params;
+        // Found a parameterized route - get the handler using the pattern key
+        let pattern_key = route_match.handler_key;
         
-        // Found a parameterized route handler!
-        let params_json = format!("{:?}", params);
-        let success_json = format!(
-            r#"{{"message": "Parameterized route found", "method": "{}", "path": "{}", "status": "success", "route_key": "{}", "params": "{}"}}"#,
-            method_str, path, route_key, params_json
-        );
-        return Ok(Response::builder()
-            .status(200)
-            .header("content-type", "application/json")
-            .body(Full::new(Bytes::from(success_json)))
-            .unwrap());
+        // Look up handler with the pattern key (e.g., "GET /users/{id}")
+        let handlers_guard = handlers.read().await;
+        let handler = handlers_guard.get(&pattern_key).cloned();
+        drop(handlers_guard);
+        
+        if let Some(handler) = handler {
+            // Call the Python handler with the matched route
+            let response_result = call_python_handler_fast(handler, method_str, path, query_string, &body_bytes);
+            
+            match response_result {
+                Ok(response_str) => {
+                    return Ok(Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(Full::new(Bytes::from(response_str)))
+                        .unwrap());
+                }
+                Err(e) => {
+                    eprintln!("Handler error for {} {}: {}", method_str, path, e);
+                    let error_json = format!(
+                        r#"{{"error": "InternalServerError", "message": "Request failed: {}", "method": "{}", "path": "{}"}}"#,
+                        e.to_string().chars().take(200).collect::<String>(), method_str, path
+                    );
+                    return Ok(Response::builder()
+                        .status(500)
+                        .header("content-type", "application/json")
+                        .body(Full::new(Bytes::from(error_json)))
+                        .unwrap());
+                }
+            }
+        }
     }
     
     // No registered handler found, return 404

@@ -175,7 +175,6 @@ class RustIntegratedTurboAPI(TurboAPI):
                             
                             # Add query parameters
                             call_args.update(query_params)
-                            
                             # Always add body and headers for enhanced handler
                             call_args['body'] = body if body else b''
                             call_args['headers'] = headers
@@ -187,7 +186,7 @@ class RustIntegratedTurboAPI(TurboAPI):
                             # {"content": ..., "status_code": ..., "content_type": ...}
                             # But Rust expects a plain dict that it will JSON serialize
                             # So just return the content directly
-                            if isinstance(result, dict) and 'content' in result and 'status_code' in result:
+                            if isinstance(result, dict) and 'content' in result:
                                 # Return just the content - Rust will handle status codes later
                                 # For now, just return the content as a dict
                                 return result['content']
