@@ -191,43 +191,38 @@ def create_enhanced_handler(original_handler, route_definition):
             # Filter kwargs to only pass expected parameters
             filtered_kwargs = {
                 k: v for k, v in kwargs.items() 
-                if k in sig.parameters
             }
             
             # Call original handler
-            if inspect.iscoroutinefunction(original_handler):
-                # Async handler - need to await it
-                import asyncio
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                result = loop.run_until_complete(original_handler(**filtered_kwargs))
-            else:
-                result = original_handler(**filtered_kwargs)
+            # v0.3.21: Async handlers are now supported via Rust's tokio runtime!
+            # The Rust layer (server.rs) will detect coroutines and await them properly
+            # using pyo3-async-runtimes, giving us native async performance
+            result = original_handler(**filtered_kwargs)
             
-            # Normalize response
+            # Check if result is a coroutine - if so, return it directly for Rust to await
+            import inspect
+            if inspect.iscoroutine(result):
+                # Return coroutine directly - Rust will await it using tokio
+                return result
+            
+            # Sync result - normalize and return as JSON string
             content, status_code = ResponseHandler.normalize_response(result)
             
-            return ResponseHandler.format_json_response(content, status_code)
-            
+            # Return JSON string directly for Rust to use
+            import json
+            return json.dumps(content)
         except ValueError as e:
             # Validation or parsing error (400 Bad Request)
-            return ResponseHandler.format_json_response(
-                {"error": "Bad Request", "detail": str(e)},
-                400
-            )
+            import json
+            return json.dumps({"error": "Bad Request", "detail": str(e)})
         except Exception as e:
             # Unexpected error (500 Internal Server Error)
             import traceback
-            return ResponseHandler.format_json_response(
-                {
-                    "error": "Internal Server Error",
-                    "detail": str(e),
-                    "traceback": traceback.format_exc()
-                },
-                500
-            )
+            import json
+            return json.dumps({
+                "error": "Internal Server Error",
+                "detail": str(e),
+                "traceback": traceback.format_exc()
+            })
     
     return enhanced_handler

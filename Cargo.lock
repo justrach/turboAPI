@@ -913,6 +913,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pyo3-async-runtimes"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6ee6d4cb3e8d5b925f5cdb38da183e0ff18122eb2048d4041c9e7034d026e23"
+dependencies = [
+ "futures",
+ "once_cell",
+ "pin-project-lite",
+ "pyo3",
+ "tokio",
+]
+
+[[package]]
 name = "pyo3-build-config"
 version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1426,7 +1439,7 @@ dependencies = [
 
 [[package]]
 name = "turbonet"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1440,6 +1453,7 @@ dependencies = [
  "num_cpus",
  "pin-project-lite",
  "pyo3",
+ "pyo3-async-runtimes",
  "rayon",
  "serde",
  "serde_json",

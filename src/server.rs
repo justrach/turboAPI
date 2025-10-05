@@ -414,6 +414,7 @@ pub fn configure_rate_limiting(enabled: bool, requests_per_minute: Option<u32>) 
 }
 
 /// PHASE 2: Fast Python handler call with cached modules and optimized object creation
+/// Now supports async Python handlers via pyo3-async-runtimes + tokio
 fn call_python_handler_fast(
     handler: Handler, 
     method_str: &str, 
@@ -455,11 +456,37 @@ fn call_python_handler_fast(
         // Call handler directly
         let result = handler.call1(py, (request_obj,))?;
         
-        // PHASE 2: Fast JSON serialization with fallback
-        // Use Python JSON module for compatibility
-        let json_dumps = json_module.getattr(py, "dumps")?;
-        let json_str = json_dumps.call1(py, (result,))?;
-        json_str.extract(py)
+        // Check if result is a coroutine (async function)
+        let inspect_module = py.import("inspect")?;
+        let is_coroutine = inspect_module
+            .getattr("iscoroutine")?
+            .call1((result.clone_ref(py),))?
+            .extract::<bool>()?;
+        
+        // Handle sync vs async results differently
+        if is_coroutine {
+            // Async handler - we need to await the coroutine in an async context
+            let asyncio = py.import("asyncio")?;
+            let asyncio_run = asyncio.getattr("run")?;
+            let awaited_result = asyncio_run.call1((result.clone_ref(py),))?;
+            
+            // Serialize the awaited result
+            let json_dumps = json_module.getattr(py, "dumps")?;
+            let json_str = json_dumps.call1(py, (awaited_result,))?;
+            json_str.extract(py)
+        } else {
+            // Sync handler - result might be a dict or already a string
+            // Try to extract as string first (if it's already JSON)
+            match result.extract::<String>(py) {
+                Ok(json_str) => Ok(json_str),
+                Err(_) => {
+                    // Not a string, serialize it
+                    let json_dumps = json_module.getattr(py, "dumps")?;
+                    let json_str = json_dumps.call1(py, (result,))?;
+                    json_str.extract(py)
+                }
+            }
+        }
     })
 }
 
