@@ -4,7 +4,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
-use http_body_util::Full;
+use http_body_util::{Full, BodyExt};
 use bytes::Bytes;
 use pyo3::prelude::*;
 use std::collections::HashMap;
@@ -185,9 +185,18 @@ async fn handle_request(
     handlers: Arc<RwLock<HashMap<String, Handler>>>,
     router: Arc<RwLock<RadixRouter>>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
-    let method_str = req.method().as_str();
-    let path = req.uri().path();
-    let query_string = req.uri().query().unwrap_or("");
+    // Extract parts first before borrowing
+    let (parts, body) = req.into_parts();
+    let method_str = parts.method.as_str();
+    let path = parts.uri.path();
+    let query_string = parts.uri.query().unwrap_or("");
+    let body_bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            eprintln!("Failed to read request body: {}", e);
+            Bytes::new()
+        }
+    };
     
     // PHASE 2+: Basic rate limiting check (DISABLED BY DEFAULT FOR BENCHMARKING)
     // Rate limiting is completely disabled by default to ensure accurate benchmarks
@@ -195,8 +204,17 @@ async fn handle_request(
     let rate_config = RATE_LIMIT_CONFIG.get();
     if let Some(config) = rate_config {
         if config.enabled {
-            if let Some(client_ip) = extract_client_ip(&req) {
-                if !check_rate_limit(&client_ip) {
+            // Extract client IP from headers
+            let client_ip = parts.headers.get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(',').next())
+                .map(|s| s.trim().to_string())
+                .or_else(|| parts.headers.get("x-real-ip")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string()));
+            
+            if let Some(ip) = client_ip {
+                if !check_rate_limit(&ip) {
                     let rate_limit_json = format!(
                         r#"{{"error": "RateLimitExceeded", "message": "Too many requests", "retry_after": 60}}"#
                     );
@@ -223,7 +241,7 @@ async fn handle_request(
     
     // Process handler if found
     if let Some(handler) = handler {
-        let response_result = call_python_handler_fast(handler, method_str, path, query_string);
+        let response_result = call_python_handler_fast(handler, method_str, path, query_string, &body_bytes);
         
         match response_result {
             Ok(response_str) => {
@@ -379,7 +397,8 @@ fn call_python_handler_fast(
     handler: Handler, 
     method_str: &str, 
     path: &str, 
-    query_string: &str
+    query_string: &str,
+    body: &Bytes
 ) -> Result<String, pyo3::PyErr> {
     Python::with_gil(|py| {
         // Get cached modules (initialized once)
@@ -401,12 +420,16 @@ fn call_python_handler_fast(
         request_obj.setattr(py, "path", path)?;
         request_obj.setattr(py, "query_string", query_string)?;
         
-        // Use cached empty dict and None
-        let empty_dict = builtins_module.getattr(py, "dict")?.call0(py)?;
-        let none_value = py.None();
+        // Set body as bytes
+        let body_py = pyo3::types::PyBytes::new(py, body.as_ref());
+        request_obj.setattr(py, "body", body_py.clone())?;
         
-        request_obj.setattr(py, "get_headers", empty_dict)?;
-        request_obj.setattr(py, "get_body", none_value)?;
+        // Use cached empty dict for headers
+        let empty_dict = builtins_module.getattr(py, "dict")?.call0(py)?;
+        request_obj.setattr(py, "headers", empty_dict)?;
+        
+        // Create get_body method that returns the body
+        request_obj.setattr(py, "get_body", body_py)?;
         
         // Call handler directly
         let result = handler.call1(py, (request_obj,))?;

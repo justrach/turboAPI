@@ -8,6 +8,7 @@ import json
 from typing import Any
 
 from .main_app import TurboAPI
+from .request_handler import create_enhanced_handler, ResponseHandler
 from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
 
 try:
@@ -123,16 +124,35 @@ class RustIntegratedTurboAPI(TurboAPI):
                 # Store Python handler
                 self.route_handlers[route_key] = route.handler
 
+                # Create enhanced handler with automatic body parsing
+                enhanced_handler = create_enhanced_handler(route.handler, route)
+                
                 # Create Rust-compatible handler wrapper
                 def create_rust_handler(python_handler, route_def):
                     def rust_handler(rust_request):
-                        """Rust-callable handler that calls Python function."""
+                        """Rust-callable handler that calls Python function with automatic body parsing."""
                         try:
                             # Extract request data from Rust
                             path = rust_request.path
-                            headers = rust_request.get_headers() if hasattr(rust_request, 'get_headers') and callable(rust_request.get_headers) else {}
                             query_string = rust_request.query_string
-                            body = rust_request.get_body() if hasattr(rust_request, 'get_body') and callable(rust_request.get_body) else b''
+                            
+                            # Get headers - try method call first, then attribute
+                            try:
+                                headers = rust_request.get_headers() if callable(getattr(rust_request, 'get_headers', None)) else {}
+                            except:
+                                headers = getattr(rust_request, 'headers', {})
+                            
+                            # Get body - Rust sets it as 'body' attribute (bytes)
+                            body = getattr(rust_request, 'body', b'')
+                            
+                            # Also try get_body if it's set
+                            if not body:
+                                get_body_attr = getattr(rust_request, 'get_body', None)
+                                if get_body_attr is not None:
+                                    if callable(get_body_attr):
+                                        body = get_body_attr()
+                                    else:
+                                        body = get_body_attr
 
                             # Parse query parameters
                             query_params = {}
@@ -146,103 +166,47 @@ class RustIntegratedTurboAPI(TurboAPI):
                             # Parse path parameters
                             path_params = self._extract_path_params(route_def.path, path)
 
-                            # Prepare function arguments
-                            sig = inspect.signature(python_handler)
+                            # Prepare arguments for enhanced handler
                             call_args = {}
+                            
+                            # Add path parameters
+                            call_args.update(path_params)
+                            
+                            # Add query parameters
+                            call_args.update(query_params)
+                            
+                            # Always add body and headers for enhanced handler
+                            call_args['body'] = body if body else b''
+                            call_args['headers'] = headers
 
-                            # Add path parameters with type conversion
-                            for param_name, param_value in path_params.items():
-                                if param_name in sig.parameters:
-                                    param_def = next((p for p in route_def.path_params if p.name == param_name), None)
-                                    if param_def and param_def.type is not str:
-                                        try:
-                                            param_value = param_def.type(param_value)
-                                        except (ValueError, TypeError):
-                                            # Return 400 error for invalid path params
-                                            error_response = turbonet.ResponseView(400)
-                                            error_response.json(json.dumps({
-                                                "error": "Bad Request",
-                                                "detail": f"Invalid {param_name}: {param_value}"
-                                            }))
-                                            return error_response
-                                    call_args[param_name] = param_value
-
-                            # Add query parameters with type conversion
-                            for param_name, param in sig.parameters.items():
-                                if param_name not in call_args and param_name in query_params:
-                                    param_value = query_params[param_name]
-
-                                    # Convert to correct type
-                                    if param.annotation != inspect.Parameter.empty:
-                                        try:
-                                            if param.annotation is int:
-                                                param_value = int(param_value)
-                                            elif param.annotation is float:
-                                                param_value = float(param_value)
-                                            elif param.annotation is bool:
-                                                param_value = param_value.lower() in ('true', '1', 'yes', 'on')
-                                        except (ValueError, TypeError):
-                                            # Return 400 error for invalid query params
-                                            error_response = turbonet.ResponseView(400)
-                                            error_response.json(json.dumps({
-                                                "error": "Bad Request",
-                                                "detail": f"Invalid {param_name}: {param_value}"
-                                            }))
-                                            return error_response
-
-                                    call_args[param_name] = param_value
-
-                            # Parse JSON body for POST/PUT requests
-                            if body and headers.get("content-type", "").startswith("application/json"):
-                                try:
-                                    json_data = json.loads(body.decode('utf-8'))
-
-                                    # Add JSON fields as parameters
-                                    for param_name, _param in sig.parameters.items():
-                                        if param_name not in call_args and param_name in json_data:
-                                            call_args[param_name] = json_data[param_name]
-
-                                except (json.JSONDecodeError, UnicodeDecodeError):
-                                    return {
-                                        "error": "Bad Request",
-                                        "detail": "Invalid JSON body",
-                                        "status_code": 400
-                                    }
-
-                            # Call Python handler with only expected parameters
-                            sig = inspect.signature(python_handler)
-                            filtered_args = {}
-
-                            # Only pass arguments that the function expects
-                            for param_name in sig.parameters:
-                                if param_name in call_args:
-                                    filtered_args[param_name] = call_args[param_name]
-
-                            # Call Python handler
-                            if inspect.iscoroutinefunction(python_handler):
-                                # For async handlers, we'd need to handle this differently
-                                # For now, assume sync handlers
-                                result = python_handler(**filtered_args)
-                            else:
-                                result = python_handler(**filtered_args)
-
-                            # Return raw result - let Rust server handle JSON serialization
+                            # Call enhanced handler (handles parsing, validation, response normalization)
+                            result = python_handler(**call_args)
+                            
+                            # Enhanced handler returns normalized format
+                            # {"content": ..., "status_code": ..., "content_type": ...}
+                            # But Rust expects a plain dict that it will JSON serialize
+                            # So just return the content directly
+                            if isinstance(result, dict) and 'content' in result and 'status_code' in result:
+                                # Return just the content - Rust will handle status codes later
+                                # For now, just return the content as a dict
+                                return result['content']
+                            
+                            # Fallback for plain dict responses
                             return result
 
                         except Exception as e:
-                            # Return 500 error as raw data with more debugging info
+                            # Return 500 error as plain dict (Rust will serialize it)
                             import traceback
                             return {
                                 "error": "Internal Server Error",
                                 "detail": str(e),
-                                "traceback": traceback.format_exc(),
-                                "status_code": 500
+                                "traceback": traceback.format_exc()
                             }
 
                     return rust_handler  # noqa: B023
 
                 # Create and register the handler
-                handler_func = create_rust_handler(route.handler, route)
+                handler_func = create_rust_handler(enhanced_handler, route)
                 rust_handler = handler_func
 
                 # Register with Rust server

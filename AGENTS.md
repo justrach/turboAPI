@@ -1,4 +1,4 @@
-# TurboAPI v0.3.0 - AI Agent Guide 🤖
+# TurboAPI v0.3.0+ - AI Agent Guide 🤖
 
 **For AI assistants, code generation tools, and automated development systems**
 
@@ -8,7 +8,8 @@ TurboAPI is a **FastAPI-compatible** Python web framework that delivers **5-10x 
 - **Rust-powered HTTP core** (zero Python overhead)
 - **Python 3.13 free-threading** support (true parallelism) 
 - **Zero-copy optimizations** and intelligent caching
-- **100% FastAPI syntax compatibility** (drop-in replacement)
+- **100% FastAPI syntax compatibility** with automatic body parsing
+- **Satya validation** (faster than Pydantic)
 
 ## 🚀 **For AI Agents: Key Facts**
 
@@ -32,7 +33,15 @@ from turboapi import TurboAPI as FastAPI  # Only change needed!
 ✅ **Same Parameters**: Path params, query params, request bodies  
 ✅ **Same Responses**: JSON, HTML, status codes, headers  
 ✅ **Same Patterns**: Dependency injection, middleware, routers  
-✅ **Same Installation**: `pip install` and standard Python imports  
+✅ **Same Installation**: `pip install` and standard Python imports
+
+### **✨ NEW in v0.3.0+: True FastAPI Compatibility**
+
+✅ **Automatic JSON Body Parsing**: Parameters extracted from request body automatically  
+✅ **Tuple Return Support**: `return {"error": "msg"}, 404` works perfectly  
+✅ **Satya Model Validation**: Faster than Pydantic with same syntax  
+✅ **Startup/Shutdown Events**: `@app.on_event("startup")` supported  
+✅ **Type-Safe Parameters**: Automatic conversion and validation  
 
 ## 🔧 **For Code Generation**
 
@@ -54,10 +63,40 @@ def get_user(user_id: int):
 def search(q: str, limit: int = 10):
     return {"query": q, "results": []}
 
-# Request body
+# Request body - AUTOMATIC parsing from JSON!
 @app.post("/users")
 def create_user(name: str, email: str):
+    """Parameters auto-extracted from JSON body!"""
     return {"name": name, "email": email, "status": "created"}
+
+# Satya model validation (faster than Pydantic)
+from satya import Model, Field
+
+class User(Model):
+    name: str = Field(min_length=1, max_length=100)
+    email: str = Field(pattern=r'^[\w\.-]+@[\w\.-]+\.\w+$')
+    age: int = Field(ge=0, le=150)
+
+@app.post("/users/validate")
+def create_validated_user(user: User):
+    """Automatic Satya validation!"""
+    return {"created": user.model_dump()}, 201
+
+# Tuple returns for status codes
+@app.get("/items/{item_id}")
+def get_item(item_id: int):
+    if item_id not in database:
+        return {"error": "Not Found"}, 404  # FastAPI-style!
+    return database[item_id]
+
+# Startup/shutdown events
+@app.on_event("startup")
+def startup():
+    print("✅ Database connected")
+
+@app.on_event("shutdown")
+def shutdown():
+    print("✅ Database disconnected")
 
 # All HTTP methods supported
 @app.put("/users/{user_id}")
@@ -258,10 +297,11 @@ When helping users benchmark or compare:
 
 ## 🔄 **Version Information**
 
-**Current Version**: 0.3.0  
+**Current Version**: 0.3.0+  
 **Python Requirements**: 3.13+ (free-threading recommended)  
 **Rust Version**: 1.70+  
-**FastAPI Compatibility**: 100% syntax compatible  
+**Dependencies**: `satya` for validation (install: `pip install satya`)  
+**FastAPI Compatibility**: 100% syntax compatible with automatic body parsing  
 **Status**: Production-ready for high-performance applications  
 
 ## 🤝 **AI Agent Integration Tips**
