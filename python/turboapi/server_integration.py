@@ -13,10 +13,11 @@ from .main_app import TurboAPI
 from .version_check import CHECK_MARK, ROCKET
 
 try:
-    import turbonet
+    from turboapi import _rust as turbonet
     RUST_CORE_AVAILABLE = True
 except ImportError:
     RUST_CORE_AVAILABLE = False
+    turbonet = None
     print("[WARN] Rust core not available - running in simulation mode")
 
 class RequestContextAdapter:
