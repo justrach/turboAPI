@@ -1426,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "turbonet"
-version = "0.3.16"
+version = "0.3.17"
 dependencies = [
  "anyhow",
  "bytes",

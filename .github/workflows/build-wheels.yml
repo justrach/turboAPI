@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.13"]  # TurboAPI requires Python 3.13+ free-threading
+        python-version: ["3.13", "3.13t", "3.14.0-rc.3"]
         manylinux: ["2_17"]
       fail-fast: false
     steps:
@@ -29,6 +29,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -37,7 +38,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: x86_64
-          args: --release --out ../dist --strip --interpreter python3.13t
+          args: --release --out ../dist --strip
           sccache: 'true'
           manylinux: ${{ matrix.manylinux }}
           working-directory: python
@@ -53,7 +54,7 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
-        python-version: ["3.13"]  # Standard Python 3.13 (free-threading not available in GH Actions)
+        python-version: ["3.13", "3.13t", "3.14.0-rc.3"]
         target: [x64]
       fail-fast: false
     steps:
@@ -61,12 +62,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
           architecture: ${{ matrix.target }}
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out ../dist --strip --interpreter python3.13
+          args: --release --out ../dist --strip
           sccache: 'true'
           working-directory: python
       - name: Upload wheels
@@ -79,7 +81,7 @@ jobs:
     runs-on: macos-latest
     strategy:
       matrix:
-        python-version: ["3.13"]  # TurboAPI requires Python 3.13+ free-threading
+        python-version: ["3.13", "3.13t", "3.14.0-rc.3"]
         target: [x86_64, aarch64]
       fail-fast: false
     steps:
@@ -87,11 +89,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out ../dist --strip --interpreter python3.13t
+          args: --release --out ../dist --strip
           sccache: 'true'
           working-directory: python
       - name: Upload wheels
