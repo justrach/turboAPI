@@ -22,38 +22,82 @@ on:
 jobs:
   # Build wheels for Linux, macOS, and Windows
   build-wheels:
-    name: 🏗️ Build wheels on ${{ matrix.os }}
+    name: 🏗️ Build wheels - ${{ matrix.platform }} - Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
+          # Linux x86_64 - Python 3.13, 3.13t, 3.14
           - os: ubuntu-latest
             target: x86_64
             platform: linux
+            python: '3.13'
+          - os: ubuntu-latest
+            target: x86_64
+            platform: linux-freethreading
+            python: '3.13t'
+          - os: ubuntu-latest
+            target: x86_64
+            platform: linux-py314
+            python: '3.14.0-rc.3'
+          
+          # Windows x64 - Python 3.13, 3.13t, 3.14
           - os: windows-latest
             target: x64
             platform: windows
-          - os: macos-13  # Intel
+            python: '3.13'
+          - os: windows-latest
+            target: x64
+            platform: windows-freethreading
+            python: '3.13t'
+          - os: windows-latest
+            target: x64
+            platform: windows-py314
+            python: '3.14.0-rc.3'
+          
+          # macOS Intel - Python 3.13, 3.13t, 3.14
+          - os: macos-13
             target: x86_64
             platform: macos-intel
-          - os: macos-14  # Apple Silicon
+            python: '3.13'
+          - os: macos-13
+            target: x86_64
+            platform: macos-intel-freethreading
+            python: '3.13t'
+          - os: macos-13
+            target: x86_64
+            platform: macos-intel-py314
+            python: '3.14.0-rc.3'
+          
+          # macOS Apple Silicon - Python 3.13, 3.13t, 3.14
+          - os: macos-14
             target: aarch64
             platform: macos-arm
+            python: '3.13'
+          - os: macos-14
+            target: aarch64
+            platform: macos-arm-freethreading
+            python: '3.13t'
+          - os: macos-14
+            target: aarch64
+            platform: macos-arm-py314
+            python: '3.14.0-rc.3'
 
     steps:
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
-      - name: 🐍 Set up Python
+      - name: 🐍 Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
 
       - name: 🦀 Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: 🔧 Install system dependencies (Linux)
-        if: matrix.platform == 'linux'
+        if: startsWith(matrix.platform, 'linux')
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
@@ -62,7 +106,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out ../wheelhouse --strip --interpreter python3.13
+          args: --release --out ../wheelhouse --strip
           sccache: 'true'
           manylinux: '2014'
           working-directory: python
