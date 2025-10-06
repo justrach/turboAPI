@@ -1,15 +1,17 @@
-# TurboAPI v0.3.0+ - AI Agent Guide 🤖
+# TurboAPI v0.3.23 - AI Agent Guide 🤖
 
 **For AI assistants, code generation tools, and automated development systems**
 
 ## 🎯 **What TurboAPI Is**
 
-TurboAPI is a **FastAPI-compatible** Python web framework that delivers **5-10x better performance** through:
+TurboAPI is a **FastAPI-compatible** Python web framework that delivers **9-10x better performance** through:
 - **Rust-powered HTTP core** (zero Python overhead)
-- **Python 3.13 free-threading** support (true parallelism) 
+- **Python 3.13 free-threading** with `Python::attach()` (TRUE parallel execution) 
+- **pyo3-async-runtimes** integration (native tokio async support)
 - **Zero-copy optimizations** and intelligent caching
 - **100% FastAPI syntax compatibility** with automatic body parsing
 - **Satya validation** (faster than Pydantic)
+- **72,000+ req/s** in production benchmarks
 
 ## 🚀 **For AI Agents: Key Facts**
 
