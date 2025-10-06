@@ -465,10 +465,18 @@ fn call_python_handler_fast(
         
         // Handle sync vs async results differently
         if is_coroutine {
-            // Async handler - we need to await the coroutine in an async context
-            let asyncio = py.import("asyncio")?;
-            let asyncio_run = asyncio.getattr("run")?;
-            let awaited_result = asyncio_run.call1((result.clone_ref(py),))?;
+            // Async handler - use pyo3-async-runtimes to convert Python coroutine to Rust future
+            // This integrates with tokio's runtime for true async performance!
+            
+            // Convert Python coroutine to Rust future using pyo3-async-runtimes
+            let rust_future = pyo3_async_runtimes::tokio::into_future(result.clone_ref(py).into_bound(py))?;
+            
+            // Await the Rust future in tokio's runtime (blocking this thread)
+            let awaited_result = py.allow_threads(|| {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(rust_future)
+                })
+            })?;
             
             // Serialize the awaited result
             let json_dumps = json_module.getattr(py, "dumps")?;

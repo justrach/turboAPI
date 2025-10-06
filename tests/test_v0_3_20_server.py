@@ -2,10 +2,9 @@
 TurboAPI v0.3.20 Test Server for wrk benchmarking
 Tests both sync and async handlers with parameterized routes
 """
-import asyncio
 from turboapi import TurboAPI
 
-app = TurboAPI(title="TurboAPI v0.3.20 Benchmark", version="0.3.20")
+app = TurboAPI(title="TurboAPI v0.3.21 Benchmark", version="0.3.21")
 
 # Simple GET (baseline)
 @app.get("/")
@@ -40,14 +39,16 @@ def echo(message: str = ""):
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("TurboAPI v0.3.20 Benchmark Server")
+    print("TurboAPI v0.3.21 Benchmark Server (SYNC ONLY)")
     print("=" * 70)
     print("Endpoints:")
     print("  GET  /              - Simple response")
-    print("  GET  /users/{id}    - Parameterized route (NEW)")
+    print("  GET  /users/{id}    - Parameterized route")
     print("  GET  /compute       - Computation")
-    print("  GET  /api/v1/users/{uid}/posts/{pid} - Nested params (NEW)")
+    print("  GET  /api/v1/users/{uid}/posts/{pid} - Nested params")
     print("  POST /echo          - Body parsing")
+    print("=" * 70)
+    print("⚠️  RATE LIMITING: DISABLED for benchmarking")
     print("=" * 70)
     
     app.configure_rate_limiting(enabled=False)
