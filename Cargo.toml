@@ -1,6 +1,6 @@
 [package]
 name = "turbonet"
-version = "0.3.21"
+version = "0.3.23"
 edition = "2021"
 authors = ["Rach Pradhan <rach@turboapi.dev>"]
 description = "High-performance Python web framework core - Rust-powered HTTP server with Python 3.13 free-threading support"

@@ -415,6 +415,7 @@ pub fn configure_rate_limiting(enabled: bool, requests_per_minute: Option<u32>) 
 
 /// PHASE 2: Fast Python handler call with cached modules and optimized object creation
 /// Now supports async Python handlers via pyo3-async-runtimes + tokio
+/// FREE-THREADING: Uses Python::attach() for true parallelism on Python 3.13+
 fn call_python_handler_fast(
     handler: Handler, 
     method_str: &str, 
@@ -422,7 +423,9 @@ fn call_python_handler_fast(
     query_string: &str,
     body: &Bytes
 ) -> Result<String, pyo3::PyErr> {
-    Python::with_gil(|py| {
+    // Use Python::attach() instead of with_gil() for free-threading parallelism!
+    // This allows multiple Python handlers to run in parallel on Python 3.13+
+    Python::attach(|py| {
         // Get cached modules (initialized once)
         let types_module = CACHED_TYPES_MODULE.get_or_init(|| {
             py.import("types").unwrap().into()
