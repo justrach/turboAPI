@@ -468,13 +468,15 @@ fn call_python_handler_fast(
         
         // Handle sync vs async results differently
         if is_coroutine {
-            // Async handler - use pyo3-async-runtimes to convert Python coroutine to Rust future
-            // This integrates with tokio's runtime for true async performance!
+            // Async handler - use pyo3-async-runtimes for tokio integration
+            // NOTE: Still uses block_in_place() - true async requires making handle_request async
+            // Current performance: ~13K RPS (vs 72K for sync)
+            // Future optimization: Make entire request pipeline async (v0.4.0)
             
             // Convert Python coroutine to Rust future using pyo3-async-runtimes
             let rust_future = pyo3_async_runtimes::tokio::into_future(result.clone_ref(py).into_bound(py))?;
             
-            // Await the Rust future in tokio's runtime (blocking this thread)
+            // Await the future (releases Python but blocks tokio thread)
             let awaited_result = py.allow_threads(|| {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(rust_future)
