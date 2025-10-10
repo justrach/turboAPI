@@ -7,6 +7,30 @@ Built with Rust for revolutionary speed, designed with Python for developer happ
 > **⚡ Try it in 30 seconds:** `python live_performance_showcase.py` → Visit `http://127.0.0.1:8080`  
 > **🔥 See the difference:** Same FastAPI syntax, 5-10x faster performance!  
 > **🎯 Zero migration effort:** Change 1 import line, keep all your existing code
+> **🔒 NEW in v0.3.27:** Complete FastAPI-compatible security & middleware suite!
+
+## 🆕 **What's New in v0.3.27**
+
+### **Multi-Worker Architecture** 
+- **27,000 async RPS** (15x improvement from 1.8K!)
+- N Python workers (N = CPU cores) with hash-based distribution
+- Python 3.14 free-threading support for true parallelism
+- Independent Tokio runtimes per worker
+
+### **Complete Security Suite** (100% FastAPI-compatible)
+- **OAuth2** (Password Bearer, Authorization Code)
+- **HTTP Auth** (Basic, Bearer, Digest)
+- **API Keys** (Query, Header, Cookie)
+- **Security Scopes** for fine-grained authorization
+
+### **Complete Middleware Suite** (100% FastAPI-compatible)
+- **CORS** with regex and expose_headers
+- **Trusted Host** (Host Header attack prevention)
+- **GZip** compression
+- **HTTPS** redirect
+- **Session** management
+- **Rate Limiting** (TurboAPI exclusive!)
+- **Custom** middleware support
 
 ## 🎨 **100% FastAPI-Compatible Developer Experience**
 
@@ -208,7 +232,7 @@ source turbo-env/bin/activate  # On Windows: turbo-env\Scripts\activate
 pip install turboapi
 
 # Verify installation
-python -c "from turboapi import TurboAPI; print('✅ TurboAPI v0.3.12 ready!')"
+python -c "from turboapi import TurboAPI; print('✅ TurboAPI v0.3.27 ready!')"
 ```
 
 #### **Option 2: Build from Source**
@@ -285,6 +309,118 @@ def delete_user(user_id: int):
     return {"user_id": user_id, "deleted": True}
 
 app.run()
+```
+
+## 🔒 **Security & Authentication (NEW!)**
+
+TurboAPI now includes **100% FastAPI-compatible** security features:
+
+### **OAuth2 Authentication**
+```python
+from turboapi import TurboAPI
+from turboapi.security import OAuth2PasswordBearer, Depends
+
+app = TurboAPI()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+@app.post("/token")
+def login(username: str, password: str):
+    # Validate credentials
+    return {"access_token": username, "token_type": "bearer"}
+
+@app.get("/users/me")
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    # Decode and validate token
+    return {"token": token, "user": "current_user"}
+```
+
+### **HTTP Basic Authentication**
+```python
+from turboapi.security import HTTPBasic, HTTPBasicCredentials
+import secrets
+
+security = HTTPBasic()
+
+@app.get("/admin")
+def admin_panel(credentials: HTTPBasicCredentials = Depends(security)):
+    correct_username = secrets.compare_digest(credentials.username, "admin")
+    correct_password = secrets.compare_digest(credentials.password, "secret")
+    if not (correct_username and correct_password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {"message": "Welcome admin!"}
+```
+
+### **API Key Authentication**
+```python
+from turboapi.security import APIKeyHeader
+
+api_key_header = APIKeyHeader(name="X-API-Key")
+
+@app.get("/secure-data")
+def get_secure_data(api_key: str = Depends(api_key_header)):
+    if api_key != "secret-key-123":
+        raise HTTPException(status_code=403, detail="Invalid API key")
+    return {"data": "sensitive information"}
+```
+
+## 🛡️ **Middleware (NEW!)**
+
+Add powerful middleware with FastAPI-compatible syntax:
+
+### **CORS Middleware**
+```python
+from turboapi.middleware import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "https://example.com"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Custom-Header"],
+    max_age=600,
+)
+```
+
+### **GZip Compression**
+```python
+from turboapi.middleware import GZipMiddleware
+
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=9)
+```
+
+### **Rate Limiting** (TurboAPI Exclusive!)
+```python
+from turboapi.middleware import RateLimitMiddleware
+
+app.add_middleware(
+    RateLimitMiddleware,
+    requests_per_minute=100,
+    burst=20
+)
+```
+
+### **Trusted Host Protection**
+```python
+from turboapi.middleware import TrustedHostMiddleware
+
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["example.com", "*.example.com"]
+)
+```
+
+### **Custom Middleware**
+```python
+import time
+
+@app.middleware("http")
+async def add_process_time_header(request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    response.headers["X-Process-Time"] = str(process_time)
+    return response
 ```
 
 ## Architecture
