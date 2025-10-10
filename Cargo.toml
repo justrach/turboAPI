@@ -1,9 +1,9 @@
 [package]
 name = "turbonet"
-version = "0.3.19"
+version = "0.3.20"
 edition = "2021"
 authors = ["Rach Pradhan <rach@turboapi.dev>"]
-description = "High-performance Python web framework core - Rust-powered HTTP server with Python 3.13 free-threading support"
+description = "High-performance Python web framework core - Rust-powered HTTP server with Python 3.14 free-threading support, FastAPI-compatible security and middleware"
 license = "MIT"
 repository = "https://github.com/justrach/turboAPI"
 homepage = "https://github.com/justrach/turboAPI"
