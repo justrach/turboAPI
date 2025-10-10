@@ -7,29 +7,53 @@ use tokio::net::TcpListener;
 use http_body_util::{Full, BodyExt};
 use bytes::Bytes;
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyString};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc, oneshot};
 use crate::router::RadixRouter;
 use std::sync::OnceLock;
 use std::collections::HashMap as StdHashMap;
 use crate::zerocopy::ZeroCopyBufferPool;
 use std::time::{Duration, Instant};
-// removed duplicate import of SocketAddr
+use std::thread;
 
 type Handler = Arc<PyObject>;
+
+// MULTI-WORKER: Metadata struct to cache is_async check
+#[derive(Clone)]
+struct HandlerMetadata {
+    handler: Handler,
+    is_async: bool, // Cached at registration time!
+}
+
+// MULTI-WORKER: Request structure for worker communication
+struct PythonRequest {
+    handler: Handler,
+    method: String,
+    path: String,
+    query_string: String,
+    body: Bytes,
+    response_tx: oneshot::Sender<Result<String, String>>,
+}
+
+// Cached Python modules for performance
+static CACHED_JSON_MODULE: OnceLock<PyObject> = OnceLock::new();
+static CACHED_BUILTINS_MODULE: OnceLock<PyObject> = OnceLock::new();
+static CACHED_TYPES_MODULE: OnceLock<PyObject> = OnceLock::new();
 
 /// TurboServer - Main HTTP server class with radix trie routing
 #[pyclass]
 pub struct TurboServer {
-    handlers: Arc<RwLock<HashMap<String, Handler>>>,
+    handlers: Arc<RwLock<HashMap<String, HandlerMetadata>>>, // HYBRID: Store metadata with is_async cached!
     router: Arc<RwLock<RadixRouter>>,
     host: String,
     port: u16,
     worker_threads: usize,
     buffer_pool: Arc<ZeroCopyBufferPool>, // PHASE 2: Zero-copy buffer pool
+    python_workers: Option<Vec<mpsc::Sender<PythonRequest>>>, // MULTI-WORKER: Multiple async workers
 }
 
 #[pymethods]
@@ -40,10 +64,10 @@ impl TurboServer {
         let cpu_cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-            
-        // Optimal configuration based on workload analysis:
-        // - I/O bound: 3x CPU cores for better request handling
-        // - But cap at 24 threads to avoid context switching overhead
+        
+        // PHASE 2: Optimized worker thread calculation
+        // - Use 3x CPU cores for I/O-bound workloads (common in web servers)
+        // - Cap at 24 threads to avoid excessive context switching
         // - Minimum 8 threads for good baseline performance
         let worker_threads = ((cpu_cores * 3).min(24)).max(8);
             
@@ -54,6 +78,7 @@ impl TurboServer {
             port: port.unwrap_or(8000),
             worker_threads,
             buffer_pool: Arc::new(ZeroCopyBufferPool::new()), // PHASE 2: Initialize buffer pool
+            python_workers: None, // MULTI-WORKER: Initialized in run()
         }
     }
 
@@ -61,7 +86,15 @@ impl TurboServer {
     pub fn add_route(&self, method: String, path: String, handler: PyObject) -> PyResult<()> {
         let route_key = format!("{} {}", method.to_uppercase(), path);
         
-        // For now, we'll use a simple blocking approach
+        // HYBRID: Check if handler is async ONCE at registration time!
+        let is_async = Python::with_gil(|py| {
+            let inspect = py.import("inspect")?;
+            inspect
+                .getattr("iscoroutinefunction")?
+                .call1((&handler,))?
+                .extract::<bool>()
+        })?;
+        
         let handlers = Arc::clone(&self.handlers);
         let router = Arc::clone(&self.router);
         
@@ -70,9 +103,12 @@ impl TurboServer {
                 // Use a blocking runtime for this operation
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
-                    // Store the handler (write lock)
+                    // Store the handler with metadata (write lock)
                     let mut handlers_guard = handlers.write().await;
-                    handlers_guard.insert(route_key.clone(), Arc::new(handler));
+                    handlers_guard.insert(route_key.clone(), HandlerMetadata {
+                        handler: Arc::new(handler),
+                        is_async,
+                    });
                     drop(handlers_guard); // Release write lock immediately
             
                     // Add to router for path parameter extraction
@@ -99,6 +135,17 @@ impl TurboServer {
 
         let handlers = Arc::clone(&self.handlers);
         let router = Arc::clone(&self.router);
+        
+        // MULTI-WORKER: Spawn N Python workers for parallel async execution!
+        // Use ALL available cores for maximum parallelism with Python 3.14 free-threading!
+        let num_workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8)
+            .max(8); // At least 8 workers, up to all cores!
+        
+        eprintln!("🚀 Spawning {} Python workers for parallel async execution...", num_workers);
+        let python_workers = spawn_python_workers(num_workers);
+        eprintln!("✅ All {} Python workers ready!", num_workers);
         
         py.allow_threads(|| {
             // PHASE 2: Optimized runtime with advanced thread management
@@ -135,6 +182,7 @@ impl TurboServer {
                     let io = TokioIo::new(stream);
                     let handlers_clone = Arc::clone(&handlers);
                     let router_clone = Arc::clone(&router);
+                    let python_workers_clone = python_workers.clone(); // MULTI-WORKER: Clone workers Vec
 
                     // Spawn optimized connection handler
                     tokio::task::spawn(async move {
@@ -148,7 +196,8 @@ impl TurboServer {
                             .serve_connection(io, service_fn(move |req| {
                                 let handlers = Arc::clone(&handlers_clone);
                                 let router = Arc::clone(&router_clone);
-                                handle_request(req, handlers, router)
+                                let python_workers = python_workers_clone.clone(); // MULTI-WORKER
+                                handle_request(req, handlers, router, python_workers)
                             }))
                             .await;
                         // Connection automatically cleaned up when task ends
@@ -182,8 +231,9 @@ impl TurboServer {
 
 async fn handle_request(
     req: Request<IncomingBody>,
-    handlers: Arc<RwLock<HashMap<String, Handler>>>,
+    handlers: Arc<RwLock<HashMap<String, HandlerMetadata>>>, // HYBRID: HandlerMetadata with is_async cached!
     router: Arc<RwLock<RadixRouter>>,
+    python_workers: Vec<mpsc::Sender<PythonRequest>>, // MULTI-WORKER: Multiple workers for parallelism!
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     // Extract parts first before borrowing
     let (parts, body) = req.into_parts();
@@ -236,12 +286,45 @@ async fn handle_request(
     
     // OPTIMIZED: Single read lock acquisition for handler lookup
     let handlers_guard = handlers.read().await;
-    let handler = handlers_guard.get(&route_key).cloned();
+    let metadata = handlers_guard.get(&route_key).cloned();
     drop(handlers_guard); // Immediate lock release
     
     // Process handler if found
-    if let Some(handler) = handler {
-        let response_result = call_python_handler_fast(handler, method_str, path, query_string, &body_bytes);
+    if let Some(metadata) = metadata {
+        // HYBRID APPROACH: Direct call for sync, worker for async!
+        let response_result = if metadata.is_async {
+            // ASYNC PATH: Hash-based worker selection for cache locality!
+            let worker_id = hash_route_key(&route_key) % python_workers.len();
+            let worker_tx = &python_workers[worker_id];
+            
+            let (resp_tx, resp_rx) = oneshot::channel();
+            let python_req = PythonRequest {
+                handler: metadata.handler.clone(),
+                method: method_str.to_string(),
+                path: path.to_string(),
+                query_string: query_string.to_string(),
+                body: body_bytes.clone(),
+                response_tx: resp_tx,
+            };
+            
+            match worker_tx.send(python_req).await {
+                Ok(_) => {
+                    match resp_rx.await {
+                        Ok(result) => result,
+                        Err(_) => Err("Python worker died".to_string()),
+                    }
+                }
+                Err(_) => {
+                    return Ok(Response::builder()
+                        .status(503)
+                        .body(Full::new(Bytes::from(r#"{"error": "Service Unavailable", "message": "Server overloaded"}"#)))
+                        .unwrap());
+                }
+            }
+        } else {
+            // SYNC PATH: Direct Python call (FAST!)
+            call_python_handler_sync_direct(&metadata.handler, method_str, path, query_string, &body_bytes)
+        };
         
         match response_result {
             Ok(response_str) => {
@@ -352,11 +435,6 @@ fn create_route_key_fast(method: &str, path: &str, buffer: &mut [u8]) -> String 
         format!("{} {}", method_upper, path)
     }
 }
-
-/// PHASE 2: Cached Python modules for faster handler execution
-static CACHED_TYPES_MODULE: OnceLock<PyObject> = OnceLock::new();
-static CACHED_JSON_MODULE: OnceLock<PyObject> = OnceLock::new();
-static CACHED_BUILTINS_MODULE: OnceLock<PyObject> = OnceLock::new();
 
 /// PHASE 2: Object pool for request objects to reduce allocations
 static REQUEST_OBJECT_POOL: OnceLock<std::sync::Mutex<Vec<PyObject>>> = OnceLock::new();
@@ -532,4 +610,182 @@ fn create_zero_copy_response(data: &str) -> Bytes {
     // For now, use direct conversion but optimized for future zero-copy implementation
     // In production, this would use memory-mapped buffers or shared memory
     Bytes::from(data.to_string())
+}
+
+// ============================================================================
+// MULTI-WORKER UTILITIES
+// ============================================================================
+
+/// Simple hash function for worker selection (FNV-1a hash)
+/// Hash-based distribution keeps same handler on same worker (hot caches!)
+fn hash_route_key(route_key: &str) -> usize {
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+    for byte in route_key.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+    }
+    hash as usize
+}
+
+// ============================================================================
+// HYBRID APPROACH - Direct Sync Calls + Worker for Async
+// ============================================================================
+
+/// HYBRID: Direct synchronous Python handler call (NO channel overhead!)
+/// This is the FAST PATH for sync handlers - bypasses the worker thread entirely
+/// FREE-THREADING: Uses Python::attach() for TRUE parallelism (no GIL contention!)
+fn call_python_handler_sync_direct(
+    handler: &PyObject,
+    method_str: &str,
+    path: &str,
+    query_string: &str,
+    body_bytes: &Bytes,
+) -> Result<String, String> {
+    // FREE-THREADING: Python::attach() instead of Python::with_gil()
+    // This allows TRUE parallel execution on Python 3.14+ with --disable-gil
+    Python::attach(|py| {
+        // Get cached modules
+        let json_module = CACHED_JSON_MODULE.get_or_init(|| {
+            py.import("json").unwrap().into()
+        });
+        
+        // Call sync handler directly (NO kwargs - handlers don't expect them!)
+        let result = handler.call0(py)
+            .map_err(|e| format!("Python error: {}", e))?;
+        
+        // Extract or serialize result
+        match result.extract::<String>(py) {
+            Ok(json_str) => Ok(json_str),
+            Err(_) => {
+                let json_dumps = json_module.getattr(py, "dumps").unwrap();
+                let json_str = json_dumps.call1(py, (result,))
+                    .map_err(|e| format!("JSON error: {}", e))?;
+                json_str.extract::<String>(py)
+                    .map_err(|e| format!("Extract error: {}", e))
+            }
+        }
+    })
+}
+
+// ============================================================================
+// MULTI-WORKER PATTERN - Multiple Python Workers for Parallel Async Execution
+// ============================================================================
+
+/// Spawn N dedicated Python worker threads for parallel async execution
+/// Each worker has its own current_thread runtime
+/// This enables TRUE parallelism for async handlers!
+fn spawn_python_workers(num_workers: usize) -> Vec<mpsc::Sender<PythonRequest>> {
+    eprintln!("🚀 Spawning {} Python workers for parallel async execution...", num_workers);
+    
+    (0..num_workers)
+        .map(|worker_id| {
+            let (tx, mut rx) = mpsc::channel::<PythonRequest>(20000); // INCREASED: 20K capacity for high throughput!
+            
+            thread::spawn(move || {
+                // Create single-threaded Tokio runtime for this worker
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create worker runtime");
+                
+                rt.block_on(async move {
+                    eprintln!("🚀 Python worker {} started!", worker_id);
+                    
+                    // Initialize Python ONCE on this thread
+                    pyo3::prepare_freethreaded_python();
+                    
+                    eprintln!("✅ Python worker {} initialized!", worker_id);
+                    
+                    // Process requests on this dedicated thread
+                    // We DON'T cache TaskLocals - create them per request instead
+                    // This is necessary because each worker has its own runtime
+                    while let Some(req) = rx.recv().await {
+                        let PythonRequest { handler, method, path, query_string, body, response_tx } = req;
+                        let result = handle_python_request_on_worker_no_cache(
+                            handler, method, path, query_string, body
+                        ).await;
+                        let _ = response_tx.send(result);
+                    }
+                    
+                    eprintln!("⚠️  Python worker {} shutting down", worker_id);
+                });
+            });
+            
+            tx
+        })
+        .collect()
+}
+
+/// Handle Python request WITHOUT cached TaskLocals (for multi-worker)
+/// Each worker creates its own TaskLocals per request
+async fn handle_python_request_on_worker_no_cache(
+    handler: Handler,
+    method: String,
+    path: String,
+    query_string: String,
+    body: Bytes,
+) -> Result<String, String> {
+    // Check if handler is async
+    let (is_async, coroutine_or_result) = Python::with_gil(|py| {
+        // Get cached modules
+        let json_module = CACHED_JSON_MODULE.get_or_init(|| {
+            py.import("json").unwrap().into()
+        });
+        
+        // Check if async
+        let inspect_module = py.import("inspect").unwrap();
+        let is_async = inspect_module
+            .getattr("iscoroutinefunction").unwrap()
+            .call1((handler.clone_ref(py),)).unwrap()
+            .extract::<bool>().unwrap();
+        
+        if is_async {
+            // Call handler to get coroutine (NO kwargs!)
+            let coroutine = handler.call0(py).unwrap();
+            let coroutine_obj: PyObject = coroutine.into();
+            Ok::<_, String>((true, Some(coroutine_obj)))
+        } else {
+            // Call sync handler directly (NO kwargs!)
+            let result = handler.call0(py)
+                .map_err(|e| format!("Python error: {}", e))?;
+            
+            // Extract or serialize result
+            match result.extract::<String>(py) {
+                Ok(json_str) => Ok((false, Some(PyString::new(py, &json_str).into()))),
+                Err(_) => {
+                    let json_dumps = json_module.getattr(py, "dumps").unwrap();
+                    let json_str = json_dumps.call1(py, (result,))
+                        .map_err(|e| format!("JSON error: {}", e))?;
+                    Ok((false, Some(json_str.into())))
+                }
+            }
+        }
+    }).map_err(|e: String| e)?;
+    
+    if is_async {
+        // Async path - use pyo3_async_runtimes WITHOUT cached TaskLocals
+        let coroutine = coroutine_or_result.unwrap();
+        
+        // Convert to Rust Future (creates TaskLocals internally)
+        let rust_future = Python::with_gil(|py| {
+            pyo3_async_runtimes::tokio::into_future(coroutine.bind(py).clone())
+        }).map_err(|e| format!("Future conversion error: {}", e))?;
+        
+        // Await on THIS thread's runtime
+        let result = rust_future.await
+            .map_err(|e| format!("Async execution error: {}", e))?;
+        
+        // Extract result
+        Python::with_gil(|py| {
+            result.extract::<String>(py)
+                .map_err(|e| format!("Result extraction error: {}", e))
+        })
+    } else {
+        // Sync path - result already extracted
+        let result_obj = coroutine_or_result.unwrap();
+        Python::with_gil(|py| {
+            result_obj.extract::<String>(py)
+                .map_err(|e| format!("Result extraction error: {}", e))
+        })
+    }
 }
