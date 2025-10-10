@@ -9,6 +9,7 @@ pub mod middleware;
 pub mod http2;
 pub mod websocket;
 pub mod micro_bench;
+pub mod python_worker;
 mod request;
 mod response;
 
@@ -26,7 +27,7 @@ pub use zerocopy::{ZeroCopyBufferPool, ZeroCopyBuffer, ZeroCopyBytes, StringInte
 pub use middleware::{MiddlewarePipeline, RequestContext, ResponseContext, BuiltinMiddleware, CorsMiddleware, RateLimitMiddleware, CompressionMiddleware, AuthenticationMiddleware, LoggingMiddleware, CachingMiddleware};
 
 /// TurboNet - Rust HTTP core for TurboAPI with free-threading support
-#[pymodule(name = "_rust", gil_used = false)]
+#[pymodule(gil_used = false)]
 fn turbonet(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Phase 0-3: Core HTTP and concurrency
     m.add_class::<TurboServer>()?;

@@ -12,7 +12,7 @@ from .request_handler import create_enhanced_handler, ResponseHandler
 from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
 
 try:
-    from turboapi import _rust as turbonet
+    import turbonet
     RUST_CORE_AVAILABLE = True
 except ImportError:
     RUST_CORE_AVAILABLE = False
@@ -206,15 +206,13 @@ class RustIntegratedTurboAPI(TurboAPI):
 
                     return rust_handler  # noqa: B023
 
-                # Create and register the handler
-                handler_func = create_rust_handler(enhanced_handler, route)
-                rust_handler = handler_func
-
-                # Register with Rust server
+                # Register the ORIGINAL handler directly with Rust
+                # Rust will call it with call0() (no arguments)
+                # The original handler doesn't expect any arguments
                 self.rust_server.add_route(
                     route.method.value,
                     route.path,
-                    rust_handler
+                    route.handler  # Pass original handler, not wrapper!
                 )
 
                 print(f"{CHECK_MARK} Registered {route.method.value} {route.path} with Rust server")
