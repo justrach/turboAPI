@@ -32,11 +32,33 @@ struct HandlerMetadata {
 // MULTI-WORKER: Request structure for worker communication
 struct PythonRequest {
     handler: Handler,
+    is_async: bool, // Cached from HandlerMetadata - no need to check at runtime!
     method: String,
     path: String,
     query_string: String,
     body: Bytes,
     response_tx: oneshot::Sender<Result<String, String>>,
+}
+
+// LOOP SHARDING: Structure for each event loop shard
+struct LoopShard {
+    shard_id: usize,
+    task_locals: pyo3_async_runtimes::TaskLocals,
+    json_dumps_fn: PyObject,
+    tx: mpsc::Sender<PythonRequest>,
+}
+
+impl Clone for LoopShard {
+    fn clone(&self) -> Self {
+        Python::with_gil(|py| {
+            Self {
+                shard_id: self.shard_id,
+                task_locals: self.task_locals.clone_ref(py),
+                json_dumps_fn: self.json_dumps_fn.clone_ref(py),
+                tx: self.tx.clone(),
+            }
+        })
+    }
 }
 
 // Cached Python modules for performance
@@ -53,7 +75,7 @@ pub struct TurboServer {
     port: u16,
     worker_threads: usize,
     buffer_pool: Arc<ZeroCopyBufferPool>, // PHASE 2: Zero-copy buffer pool
-    python_workers: Option<Vec<mpsc::Sender<PythonRequest>>>, // MULTI-WORKER: Multiple async workers
+    loop_shards: Option<Vec<LoopShard>>, // LOOP SHARDING: Multiple event loop shards for parallel processing
 }
 
 #[pymethods]
@@ -78,7 +100,7 @@ impl TurboServer {
             port: port.unwrap_or(8000),
             worker_threads,
             buffer_pool: Arc::new(ZeroCopyBufferPool::new()), // PHASE 2: Initialize buffer pool
-            python_workers: None, // MULTI-WORKER: Initialized in run()
+            loop_shards: None, // LOOP SHARDING: Initialized in run()
         }
     }
 
@@ -129,23 +151,24 @@ impl TurboServer {
         addr_str.push(':');
         addr_str.push_str(&self.port.to_string());
         
-        let addr: SocketAddr = addr_str
-            .parse()
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err("Invalid address"))?;
+        let addr: SocketAddr = addr_str.parse()
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("Invalid address"))?;
 
         let handlers = Arc::clone(&self.handlers);
         let router = Arc::clone(&self.router);
         
-        // MULTI-WORKER: Spawn N Python workers for parallel async execution!
-        // Use ALL available cores for maximum parallelism with Python 3.14 free-threading!
-        let num_workers = std::thread::available_parallelism()
+        // LOOP SHARDING: Spawn K event loop shards for parallel processing!
+        // Each shard has its own event loop thread - eliminates global contention!
+        let cpu_cores = std::thread::available_parallelism()
             .map(|n| n.get())
-            .unwrap_or(8)
-            .max(8); // At least 8 workers, up to all cores!
+            .unwrap_or(8);
         
-        eprintln!("🚀 Spawning {} Python workers for parallel async execution...", num_workers);
-        let python_workers = spawn_python_workers(num_workers);
-        eprintln!("✅ All {} Python workers ready!", num_workers);
+        // Optimal: 8-16 shards (tune based on CPU cores)
+        let num_shards = cpu_cores.min(16).max(8);
+        
+        eprintln!("🚀 Spawning {} event loop shards for parallel async processing!", num_shards);
+        let loop_shards = spawn_loop_shards(num_shards);
+        eprintln!("✅ All {} loop shards ready!", num_shards);
         
         py.allow_threads(|| {
             // PHASE 2: Optimized runtime with advanced thread management
@@ -182,7 +205,7 @@ impl TurboServer {
                     let io = TokioIo::new(stream);
                     let handlers_clone = Arc::clone(&handlers);
                     let router_clone = Arc::clone(&router);
-                    let python_workers_clone = python_workers.clone(); // MULTI-WORKER: Clone workers Vec
+                    let loop_shards_clone = loop_shards.clone(); // LOOP SHARDING: Clone shards Vec
 
                     // Spawn optimized connection handler
                     tokio::task::spawn(async move {
@@ -196,8 +219,8 @@ impl TurboServer {
                             .serve_connection(io, service_fn(move |req| {
                                 let handlers = Arc::clone(&handlers_clone);
                                 let router = Arc::clone(&router_clone);
-                                let python_workers = python_workers_clone.clone(); // MULTI-WORKER
-                                handle_request(req, handlers, router, python_workers)
+                                let loop_shards = loop_shards_clone.clone(); // LOOP SHARDING
+                                handle_request(req, handlers, router, loop_shards)
                             }))
                             .await;
                         // Connection automatically cleaned up when task ends
@@ -233,7 +256,7 @@ async fn handle_request(
     req: Request<IncomingBody>,
     handlers: Arc<RwLock<HashMap<String, HandlerMetadata>>>, // HYBRID: HandlerMetadata with is_async cached!
     router: Arc<RwLock<RadixRouter>>,
-    python_workers: Vec<mpsc::Sender<PythonRequest>>, // MULTI-WORKER: Multiple workers for parallelism!
+    loop_shards: Vec<LoopShard>, // LOOP SHARDING: Multiple shards for parallel processing!
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     // Extract parts first before borrowing
     let (parts, body) = req.into_parts();
@@ -291,15 +314,17 @@ async fn handle_request(
     
     // Process handler if found
     if let Some(metadata) = metadata {
-        // HYBRID APPROACH: Direct call for sync, worker for async!
+        // HYBRID APPROACH: Direct call for sync, shard for async!
         let response_result = if metadata.is_async {
-            // ASYNC PATH: Hash-based worker selection for cache locality!
-            let worker_id = hash_route_key(&route_key) % python_workers.len();
-            let worker_tx = &python_workers[worker_id];
+            // ASYNC PATH: Hash-based shard selection for cache locality!
+            let shard_id = hash_route_key(&route_key) % loop_shards.len();
+            let shard = &loop_shards[shard_id];
+            let shard_tx = &shard.tx;
             
             let (resp_tx, resp_rx) = oneshot::channel();
             let python_req = PythonRequest {
                 handler: metadata.handler.clone(),
+                is_async: metadata.is_async, // Use cached is_async!
                 method: method_str.to_string(),
                 path: path.to_string(),
                 query_string: query_string.to_string(),
@@ -307,11 +332,11 @@ async fn handle_request(
                 response_tx: resp_tx,
             };
             
-            match worker_tx.send(python_req).await {
+            match shard_tx.send(python_req).await {
                 Ok(_) => {
                     match resp_rx.await {
                         Ok(result) => result,
-                        Err(_) => Err("Python worker died".to_string()),
+                        Err(_) => Err("Loop shard died".to_string()),
                     }
                 }
                 Err(_) => {
@@ -613,11 +638,145 @@ fn create_zero_copy_response(data: &str) -> Bytes {
 }
 
 // ============================================================================
-// MULTI-WORKER UTILITIES
+// LOOP SHARDING - Phase A Implementation
 // ============================================================================
 
-/// Simple hash function for worker selection (FNV-1a hash)
-/// Hash-based distribution keeps same handler on same worker (hot caches!)
+/// Spawn N dedicated event loop shards for parallel async execution
+/// Each shard has its own event loop thread - eliminates global contention!
+/// This is the KEY optimization for reaching 5-6K RPS!
+fn spawn_loop_shards(num_shards: usize) -> Vec<LoopShard> {
+    eprintln!("🚀 Spawning {} event loop shards...", num_shards);
+    
+    (0..num_shards)
+        .map(|shard_id| {
+            let (tx, mut rx) = mpsc::channel::<PythonRequest>(20000); // High capacity channel
+            
+            // Spawn dedicated thread for this shard
+            thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create shard runtime");
+                
+                let local = tokio::task::LocalSet::new();
+                
+                rt.block_on(local.run_until(async move {
+                    eprintln!("🚀 Loop shard {} starting...", shard_id);
+                    
+                    pyo3::prepare_freethreaded_python();
+                    
+                    // Create event loop for this shard
+                    let (task_locals, json_dumps_fn, event_loop_handle) = Python::with_gil(|py| -> PyResult<_> {
+                        let asyncio = py.import("asyncio")?;
+                        let event_loop = asyncio.call_method0("new_event_loop")?;
+                        asyncio.call_method1("set_event_loop", (&event_loop,))?;
+                        
+                        eprintln!("✅ Shard {} - event loop created", shard_id);
+                        
+                        let task_locals = pyo3_async_runtimes::TaskLocals::new(event_loop.clone());
+                        let json_module = py.import("json")?;
+                        let json_dumps_fn: PyObject = json_module.getattr("dumps")?.into();
+                        let event_loop_handle: PyObject = event_loop.unbind();
+                        
+                        Ok((task_locals, json_dumps_fn, event_loop_handle))
+                    }).expect("Failed to initialize shard");
+                    
+                    // Start event loop on separate thread
+                    let event_loop_for_runner = Python::with_gil(|py| event_loop_handle.clone_ref(py));
+                    std::thread::spawn(move || {
+                        Python::with_gil(|py| {
+                            let loop_obj = event_loop_for_runner.bind(py);
+                            let _ = loop_obj.call_method0("run_forever");
+                        });
+                    });
+                    
+                    eprintln!("✅ Shard {} ready!", shard_id);
+                    
+                    // Process requests with AGGRESSIVE batching (128 instead of 32!)
+                    let mut batch = Vec::with_capacity(128);
+                    
+                    while let Some(req) = rx.recv().await {
+                        batch.push(req);
+                        
+                        // Collect up to 128 requests (increased from 32!)
+                        while batch.len() < 128 {
+                            match rx.try_recv() {
+                                Ok(req) => batch.push(req),
+                                Err(_) => break,
+                            }
+                        }
+                        
+                        // Separate and process
+                        let mut async_batch = Vec::new();
+                        let mut sync_batch = Vec::new();
+                        
+                        for req in batch.drain(..) {
+                            if req.is_async {
+                                async_batch.push(req);
+                            } else {
+                                sync_batch.push(req);
+                            }
+                        }
+                        
+                        // Process sync
+                        for req in sync_batch {
+                            let PythonRequest { handler, is_async, method: _, path: _, query_string: _, body: _, response_tx } = req;
+                            let result = process_request_optimized(
+                                handler, is_async, &task_locals, &json_dumps_fn
+                            ).await;
+                            let _ = response_tx.send(result);
+                        }
+                        
+                        // Process async concurrently
+                        if !async_batch.is_empty() {
+                            let futures: Vec<_> = async_batch.iter().map(|req| {
+                                process_request_optimized(
+                                    req.handler.clone(),
+                                    req.is_async,
+                                    &task_locals,
+                                    &json_dumps_fn
+                                )
+                            }).collect();
+                            
+                            let results = futures::future::join_all(futures).await;
+                            
+                            for (req, result) in async_batch.into_iter().zip(results) {
+                                let _ = req.response_tx.send(result);
+                            }
+                        }
+                    }
+                }));
+            });
+            
+            // Return shard handle - create a dummy event loop for the handle
+            // The actual event loop is running in the spawned thread
+            // These handles are only used for cloning, not actual execution
+            let (task_locals_handle, json_dumps_fn_handle) = Python::with_gil(|py| -> PyResult<_> {
+                // Create a temporary event loop just for the handle
+                let asyncio = py.import("asyncio")?;
+                let temp_loop = asyncio.call_method0("new_event_loop")?;
+                let task_locals = pyo3_async_runtimes::TaskLocals::new(temp_loop);
+                let json_module = py.import("json")?;
+                let json_dumps_fn: PyObject = json_module.getattr("dumps")?.into();
+                Ok((task_locals, json_dumps_fn))
+            }).expect("Failed to create shard handle");
+            
+            LoopShard {
+                shard_id,
+                task_locals: task_locals_handle,
+                json_dumps_fn: json_dumps_fn_handle,
+                tx,
+            }
+        })
+        .collect()
+}
+
+// ============================================================================
+// UTILITIES
+// ============================================================================
+
+/// Simple hash function for shard selection (FNV-1a hash)
+/// Hash-based distribution keeps same handler on same shard (hot caches!)
 fn hash_route_key(route_key: &str) -> usize {
     let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
     for byte in route_key.bytes() {
@@ -636,10 +795,10 @@ fn hash_route_key(route_key: &str) -> usize {
 /// FREE-THREADING: Uses Python::attach() for TRUE parallelism (no GIL contention!)
 fn call_python_handler_sync_direct(
     handler: &PyObject,
-    method_str: &str,
-    path: &str,
-    query_string: &str,
-    body_bytes: &Bytes,
+    _method_str: &str,
+    _path: &str,
+    _query_string: &str,
+    _body_bytes: &Bytes,
 ) -> Result<String, String> {
     // FREE-THREADING: Python::attach() instead of Python::with_gil()
     // This allows TRUE parallel execution on Python 3.14+ with --disable-gil
@@ -672,10 +831,10 @@ fn call_python_handler_sync_direct(
 // ============================================================================
 
 /// Spawn N dedicated Python worker threads for parallel async execution
-/// Each worker has its own current_thread runtime
-/// This enables TRUE parallelism for async handlers!
+/// Each worker has its own current_thread runtime + PERSISTENT asyncio event loop!
+/// This enables TRUE parallelism for async handlers with ZERO event loop creation overhead!
 fn spawn_python_workers(num_workers: usize) -> Vec<mpsc::Sender<PythonRequest>> {
-    eprintln!("🚀 Spawning {} Python workers for parallel async execution...", num_workers);
+    eprintln!("🚀 Spawning {} Python workers with persistent event loops...", num_workers);
     
     (0..num_workers)
         .map(|worker_id| {
@@ -688,27 +847,113 @@ fn spawn_python_workers(num_workers: usize) -> Vec<mpsc::Sender<PythonRequest>> 
                     .build()
                     .expect("Failed to create worker runtime");
                 
-                rt.block_on(async move {
-                    eprintln!("🚀 Python worker {} started!", worker_id);
+                // Use LocalSet for !Send futures (Python objects)
+                let local = tokio::task::LocalSet::new();
+                
+                rt.block_on(local.run_until(async move {
+                    eprintln!("🚀 Python worker {} starting...", worker_id);
                     
                     // Initialize Python ONCE on this thread
                     pyo3::prepare_freethreaded_python();
                     
-                    eprintln!("✅ Python worker {} initialized!", worker_id);
+                    // OPTIMIZATION: Create persistent asyncio event loop and cache TaskLocals + callables!
+                    let (task_locals, json_dumps_fn, event_loop_handle) = Python::with_gil(|py| -> PyResult<_> {
+                        // Import asyncio and create new event loop
+                        let asyncio = py.import("asyncio")?;
+                        let event_loop = asyncio.call_method0("new_event_loop")?;
+                        asyncio.call_method1("set_event_loop", (&event_loop,))?;
+                        
+                        eprintln!("✅ Worker {} - asyncio event loop created", worker_id);
+                        
+                        // Create TaskLocals with the event loop
+                        let task_locals = pyo3_async_runtimes::TaskLocals::new(event_loop.clone());
+                        
+                        eprintln!("✅ Worker {} - TaskLocals cached", worker_id);
+                        
+                        // PRE-BIND json.dumps callable (avoid repeated getattr!)
+                        let json_module = py.import("json")?;
+                        let json_dumps_fn: PyObject = json_module.getattr("dumps")?.into();
+                        
+                        eprintln!("✅ Worker {} - json.dumps pre-bound", worker_id);
+                        
+                        // Keep a handle to the event loop for running it
+                        let event_loop_handle: PyObject = event_loop.unbind();
+                        
+                        Ok((task_locals, json_dumps_fn, event_loop_handle))
+                    }).expect("Failed to initialize Python worker");
                     
-                    // Process requests on this dedicated thread
-                    // We DON'T cache TaskLocals - create them per request instead
-                    // This is necessary because each worker has its own runtime
+                    // Start the event loop in run_forever mode on a SEPARATE OS THREAD!
+                    // This is CRITICAL - run_forever() blocks, so it needs its own thread!
+                    let event_loop_for_runner = Python::with_gil(|py| event_loop_handle.clone_ref(py));
+                    std::thread::spawn(move || {
+                        Python::with_gil(|py| {
+                            let loop_obj = event_loop_for_runner.bind(py);
+                            // This will block forever, processing scheduled tasks
+                            // But that's OK because it's on a dedicated thread!
+                            let _ = loop_obj.call_method0("run_forever");
+                        });
+                    });
+                    
+                    eprintln!("✅ Python worker {} ready with running event loop!", worker_id);
+                    
+                    // Process requests with BATCHING for better throughput!
+                    let mut batch = Vec::with_capacity(32);
+                    
                     while let Some(req) = rx.recv().await {
-                        let PythonRequest { handler, method, path, query_string, body, response_tx } = req;
-                        let result = handle_python_request_on_worker_no_cache(
-                            handler, method, path, query_string, body
-                        ).await;
-                        let _ = response_tx.send(result);
+                        batch.push(req);
+                        
+                        // Collect up to 32 requests or until no more immediately available
+                        while batch.len() < 32 {
+                            match rx.try_recv() {
+                                Ok(req) => batch.push(req),
+                                Err(_) => break, // No more requests ready
+                            }
+                        }
+                        
+                        // Separate async and sync requests for batch processing
+                        let mut async_batch = Vec::new();
+                        let mut sync_batch = Vec::new();
+                        
+                        for req in batch.drain(..) {
+                            if req.is_async {
+                                async_batch.push(req);
+                            } else {
+                                sync_batch.push(req);
+                            }
+                        }
+                        
+                        // Process sync requests sequentially (fast anyway)
+                        for req in sync_batch {
+                            let PythonRequest { handler, is_async, method: _, path: _, query_string: _, body: _, response_tx } = req;
+                            let result = process_request_optimized(
+                                handler, is_async, &task_locals, &json_dumps_fn
+                            ).await;
+                            let _ = response_tx.send(result);
+                        }
+                        
+                        // Process async requests CONCURRENTLY with gather!
+                        if !async_batch.is_empty() {
+                            let futures: Vec<_> = async_batch.iter().map(|req| {
+                                process_request_optimized(
+                                    req.handler.clone(),
+                                    req.is_async,
+                                    &task_locals,
+                                    &json_dumps_fn
+                                )
+                            }).collect();
+                            
+                            // Await all futures concurrently!
+                            let results = futures::future::join_all(futures).await;
+                            
+                            // Send results back
+                            for (req, result) in async_batch.into_iter().zip(results) {
+                                let _ = req.response_tx.send(result);
+                            }
+                        }
                     }
                     
                     eprintln!("⚠️  Python worker {} shutting down", worker_id);
-                });
+                }));
             });
             
             tx
@@ -716,76 +961,145 @@ fn spawn_python_workers(num_workers: usize) -> Vec<mpsc::Sender<PythonRequest>> 
         .collect()
 }
 
-/// Handle Python request WITHOUT cached TaskLocals (for multi-worker)
-/// Each worker creates its own TaskLocals per request
-async fn handle_python_request_on_worker_no_cache(
+/// Process request with cached TaskLocals - OPTIMIZED VERSION!
+/// This eliminates event loop creation overhead by reusing the persistent loop!
+/// NO GIL CHECK - is_async is cached at registration time!
+/// Uses PRE-BOUND json.dumps callable to avoid repeated getattr!
+async fn process_request_optimized(
     handler: Handler,
-    method: String,
-    path: String,
-    query_string: String,
-    body: Bytes,
+    is_async: bool, // Pre-cached from HandlerMetadata!
+    task_locals: &pyo3_async_runtimes::TaskLocals,
+    json_dumps_fn: &PyObject, // Pre-bound callable!
+) -> Result<String, String> {
+    // No need to check is_async - it's passed in from cached metadata!
+    
+    if is_async {
+        // Async handler - use pyo3-async-runtimes to convert to Rust future!
+        // This is NON-BLOCKING - we await the future instead of blocking on run_until_complete!
+        let future = Python::with_gil(|py| {
+            // Call async handler to get coroutine
+            let coroutine = handler.bind(py).call0()
+                .map_err(|e| format!("Handler error: {}", e))?;
+            
+            // Convert Python coroutine to Rust future using cached TaskLocals
+            // This schedules it on the event loop WITHOUT blocking!
+            pyo3_async_runtimes::into_future_with_locals(
+                task_locals,
+                coroutine
+            ).map_err(|e| format!("Failed to convert coroutine: {}", e))
+        })?;
+        
+        // Await the Rust future (non-blocking!)
+        let result = future.await
+            .map_err(|e| format!("Async execution error: {}", e))?;
+        
+        // Serialize result
+        Python::with_gil(|py| {
+            serialize_result_optimized(py, result, json_dumps_fn)
+        })
+    } else {
+        // Sync handler - direct call with single GIL acquisition
+        Python::with_gil(|py| {
+            let result = handler.bind(py).call0()
+                .map_err(|e| format!("Handler error: {}", e))?;
+            // Convert Bound to Py for serialization
+            serialize_result_optimized(py, result.unbind(), json_dumps_fn)
+        })
+    }
+}
+
+/// Serialize Python result to JSON string - optimized version
+/// Uses PRE-BOUND json.dumps callable (no getattr overhead!)
+fn serialize_result_optimized(
+    py: Python,
+    result: Py<PyAny>,
+    json_dumps_fn: &PyObject, // Pre-bound callable!
+) -> Result<String, String> {
+    let result = result.bind(py);
+    // Try direct string extraction first
+    if let Ok(json_str) = result.extract::<String>() {
+        return Ok(json_str);
+    }
+    
+    // Call pre-bound json.dumps (no getattr!)
+    let json_str = json_dumps_fn.call1(py, (result,))
+        .map_err(|e| format!("JSON serialization error: {}", e))?;
+    
+    json_str.extract::<String>(py)
+        .map_err(|e| format!("Failed to extract JSON string: {}", e))
+}
+
+/// Handle Python request - supports both SYNC and ASYNC handlers
+/// Async handlers run in dedicated thread with their own event loop
+async fn handle_python_request_sync(
+    handler: PyObject,
+    _method: String,
+    _path: String,
+    _query_string: String,
+    _body: Bytes,
 ) -> Result<String, String> {
     // Check if handler is async
-    let (is_async, coroutine_or_result) = Python::with_gil(|py| {
-        // Get cached modules
-        let json_module = CACHED_JSON_MODULE.get_or_init(|| {
-            py.import("json").unwrap().into()
-        });
-        
-        // Check if async
-        let inspect_module = py.import("inspect").unwrap();
-        let is_async = inspect_module
-            .getattr("iscoroutinefunction").unwrap()
-            .call1((handler.clone_ref(py),)).unwrap()
-            .extract::<bool>().unwrap();
-        
-        if is_async {
-            // Call handler to get coroutine (NO kwargs!)
-            let coroutine = handler.call0(py).unwrap();
-            let coroutine_obj: PyObject = coroutine.into();
-            Ok::<_, String>((true, Some(coroutine_obj)))
-        } else {
-            // Call sync handler directly (NO kwargs!)
-            let result = handler.call0(py)
-                .map_err(|e| format!("Python error: {}", e))?;
+    let is_async = Python::with_gil(|py| {
+        let inspect = py.import("inspect").unwrap();
+        inspect.call_method1("iscoroutinefunction", (handler.clone_ref(py),))
+            .unwrap()
+            .extract::<bool>()
+            .unwrap()
+    });
+    
+    if is_async {
+        // Async handler - run in blocking thread with asyncio.run()
+        tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                // Import asyncio
+                let asyncio = py.import("asyncio")
+                    .map_err(|e| format!("Failed to import asyncio: {}", e))?;
+                
+                // Call async handler to get coroutine
+                let coroutine = handler.call0(py)
+                    .map_err(|e| format!("Failed to call handler: {}", e))?;
+                
+                // Run coroutine with asyncio.run()
+                let result = asyncio.call_method1("run", (coroutine,))
+                    .map_err(|e| format!("Failed to run coroutine: {}", e))?;
+                
+                // Serialize result
+                let json_module = CACHED_JSON_MODULE.get_or_init(|| {
+                    py.import("json").unwrap().into()
+                });
+                
+                // Try to extract as string directly, otherwise serialize with JSON
+                if let Ok(json_str) = result.extract::<String>() {
+                    Ok(json_str)
+                } else {
+                    let json_dumps = json_module.getattr(py, "dumps").unwrap();
+                    let json_str = json_dumps.call1(py, (result,))
+                        .map_err(|e| format!("JSON error: {}", e))?;
+                    json_str.extract::<String>(py)
+                        .map_err(|e| format!("Extraction error: {}", e))
+                }
+            })
+        }).await.map_err(|e| format!("Thread join error: {}", e))?
+    } else {
+        // Sync handler - call directly
+        Python::with_gil(|py| {
+            let json_module = CACHED_JSON_MODULE.get_or_init(|| {
+                py.import("json").unwrap().into()
+            });
             
-            // Extract or serialize result
+            let result = handler.call0(py)
+                .map_err(|e| format!("Python handler error: {}", e))?;
+            
             match result.extract::<String>(py) {
-                Ok(json_str) => Ok((false, Some(PyString::new(py, &json_str).into()))),
+                Ok(json_str) => Ok(json_str),
                 Err(_) => {
                     let json_dumps = json_module.getattr(py, "dumps").unwrap();
                     let json_str = json_dumps.call1(py, (result,))
                         .map_err(|e| format!("JSON error: {}", e))?;
-                    Ok((false, Some(json_str.into())))
+                    json_str.extract::<String>(py)
+                        .map_err(|e| format!("Extraction error: {}", e))
                 }
             }
-        }
-    }).map_err(|e: String| e)?;
-    
-    if is_async {
-        // Async path - use pyo3_async_runtimes WITHOUT cached TaskLocals
-        let coroutine = coroutine_or_result.unwrap();
-        
-        // Convert to Rust Future (creates TaskLocals internally)
-        let rust_future = Python::with_gil(|py| {
-            pyo3_async_runtimes::tokio::into_future(coroutine.bind(py).clone())
-        }).map_err(|e| format!("Future conversion error: {}", e))?;
-        
-        // Await on THIS thread's runtime
-        let result = rust_future.await
-            .map_err(|e| format!("Async execution error: {}", e))?;
-        
-        // Extract result
-        Python::with_gil(|py| {
-            result.extract::<String>(py)
-                .map_err(|e| format!("Result extraction error: {}", e))
-        })
-    } else {
-        // Sync path - result already extracted
-        let result_obj = coroutine_or_result.unwrap();
-        Python::with_gil(|py| {
-            result_obj.extract::<String>(py)
-                .map_err(|e| format!("Result extraction error: {}", e))
         })
     }
 }
