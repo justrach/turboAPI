@@ -7,15 +7,16 @@ Built with Rust for revolutionary speed, designed with Python for developer happ
 > **⚡ Try it in 30 seconds:** `python live_performance_showcase.py` → Visit `http://127.0.0.1:8080`  
 > **🔥 See the difference:** Same FastAPI syntax, 5-10x faster performance!  
 > **🎯 Zero migration effort:** Change 1 import line, keep all your existing code
-> **🔒 NEW in v0.3.27:** Complete FastAPI-compatible security & middleware suite!
+> **🔒 NEW in v0.3.28:** Loop sharding architecture for async endpoints!
 
-## 🆕 **What's New in v0.3.27**
+## 🆕 **What's New in v0.3.28**
 
-### **Multi-Worker Architecture** 
-- **27,000 async RPS** (15x improvement from 1.8K!)
-- N Python workers (N = CPU cores) with hash-based distribution
-- Python 3.14 free-threading support for true parallelism
-- Independent Tokio runtimes per worker
+### **Loop Sharding Architecture (Phase A)** 
+- **3,504 async RPS** (77% improvement from baseline!)
+- 14 parallel event loop shards (one per CPU core)
+- Hash-based shard routing for cache locality
+- 128-request batching for high throughput
+- Eliminated single event loop bottleneck
 
 ### **Complete Security Suite** (100% FastAPI-compatible)
 - **OAuth2** (Password Bearer, Authorization Code)
