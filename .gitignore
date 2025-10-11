@@ -34,6 +34,7 @@ turbo-freethreaded/
 # Benchmark and test outputs
 benchmark_graphs/
 *.json
+archive/
 
 # Temporary files
 *.tmp
