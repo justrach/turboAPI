@@ -45,6 +45,7 @@ struct LoopShard {
     shard_id: usize,
     task_locals: pyo3_async_runtimes::TaskLocals,
     json_dumps_fn: PyObject,
+    limiter: PyObject, // PHASE B: Semaphore limiter for gating
     tx: mpsc::Sender<PythonRequest>,
 }
 
@@ -55,6 +56,7 @@ impl Clone for LoopShard {
                 shard_id: self.shard_id,
                 task_locals: self.task_locals.clone_ref(py),
                 json_dumps_fn: self.json_dumps_fn.clone_ref(py),
+                limiter: self.limiter.clone_ref(py),
                 tx: self.tx.clone(),
             }
         })
@@ -665,8 +667,8 @@ fn spawn_loop_shards(num_shards: usize) -> Vec<LoopShard> {
                     
                     pyo3::prepare_freethreaded_python();
                     
-                    // Create event loop for this shard
-                    let (task_locals, json_dumps_fn, event_loop_handle) = Python::with_gil(|py| -> PyResult<_> {
+                    // PHASE B: Create event loop with semaphore limiter for this shard
+                    let (task_locals, json_dumps_fn, event_loop_handle, limiter) = Python::with_gil(|py| -> PyResult<_> {
                         let asyncio = py.import("asyncio")?;
                         let event_loop = asyncio.call_method0("new_event_loop")?;
                         asyncio.call_method1("set_event_loop", (&event_loop,))?;
@@ -678,7 +680,14 @@ fn spawn_loop_shards(num_shards: usize) -> Vec<LoopShard> {
                         let json_dumps_fn: PyObject = json_module.getattr("dumps")?.into();
                         let event_loop_handle: PyObject = event_loop.unbind();
                         
-                        Ok((task_locals, json_dumps_fn, event_loop_handle))
+                        // PHASE B: Create AsyncLimiter for semaphore gating (512 concurrent tasks max)
+                        let limiter_module = py.import("turboapi.async_limiter")?;
+                        let limiter = limiter_module.call_method1("get_limiter", (512,))?;
+                        let limiter_obj: PyObject = limiter.into();
+                        
+                        eprintln!("✅ Shard {} - semaphore limiter created (512 max concurrent)", shard_id);
+                        
+                        Ok((task_locals, json_dumps_fn, event_loop_handle, limiter_obj))
                     }).expect("Failed to initialize shard");
                     
                     // Start event loop on separate thread
@@ -692,14 +701,14 @@ fn spawn_loop_shards(num_shards: usize) -> Vec<LoopShard> {
                     
                     eprintln!("✅ Shard {} ready!", shard_id);
                     
-                    // Process requests with AGGRESSIVE batching (128 instead of 32!)
-                    let mut batch = Vec::with_capacity(128);
+                    // PHASE C: ULTRA-AGGRESSIVE batching (256 requests!)
+                    let mut batch = Vec::with_capacity(256);
                     
                     while let Some(req) = rx.recv().await {
                         batch.push(req);
                         
-                        // Collect up to 128 requests (increased from 32!)
-                        while batch.len() < 128 {
+                        // PHASE C: Collect up to 256 requests for maximum throughput!
+                        while batch.len() < 256 {
                             match rx.try_recv() {
                                 Ok(req) => batch.push(req),
                                 Err(_) => break,
@@ -722,19 +731,20 @@ fn spawn_loop_shards(num_shards: usize) -> Vec<LoopShard> {
                         for req in sync_batch {
                             let PythonRequest { handler, is_async, method: _, path: _, query_string: _, body: _, response_tx } = req;
                             let result = process_request_optimized(
-                                handler, is_async, &task_locals, &json_dumps_fn
+                                handler, is_async, &task_locals, &json_dumps_fn, &limiter
                             ).await;
                             let _ = response_tx.send(result);
                         }
                         
-                        // Process async concurrently
+                        // PHASE B: Process async concurrently with semaphore gating
                         if !async_batch.is_empty() {
                             let futures: Vec<_> = async_batch.iter().map(|req| {
                                 process_request_optimized(
                                     req.handler.clone(),
                                     req.is_async,
                                     &task_locals,
-                                    &json_dumps_fn
+                                    &json_dumps_fn,
+                                    &limiter  // PHASE B: Pass limiter for semaphore gating
                                 )
                             }).collect();
                             
@@ -751,20 +761,27 @@ fn spawn_loop_shards(num_shards: usize) -> Vec<LoopShard> {
             // Return shard handle - create a dummy event loop for the handle
             // The actual event loop is running in the spawned thread
             // These handles are only used for cloning, not actual execution
-            let (task_locals_handle, json_dumps_fn_handle) = Python::with_gil(|py| -> PyResult<_> {
+            let (task_locals_handle, json_dumps_fn_handle, limiter_handle) = Python::with_gil(|py| -> PyResult<_> {
                 // Create a temporary event loop just for the handle
                 let asyncio = py.import("asyncio")?;
                 let temp_loop = asyncio.call_method0("new_event_loop")?;
                 let task_locals = pyo3_async_runtimes::TaskLocals::new(temp_loop);
                 let json_module = py.import("json")?;
                 let json_dumps_fn: PyObject = json_module.getattr("dumps")?.into();
-                Ok((task_locals, json_dumps_fn))
+                
+                // Create limiter for handle
+                let limiter_module = py.import("turboapi.async_limiter")?;
+                let limiter = limiter_module.call_method1("get_limiter", (512,))?;
+                let limiter_obj: PyObject = limiter.into();
+                
+                Ok((task_locals, json_dumps_fn, limiter_obj))
             }).expect("Failed to create shard handle");
             
             LoopShard {
                 shard_id,
                 task_locals: task_locals_handle,
                 json_dumps_fn: json_dumps_fn_handle,
+                limiter: limiter_handle,
                 tx,
             }
         })
@@ -925,20 +942,28 @@ fn spawn_python_workers(num_workers: usize) -> Vec<mpsc::Sender<PythonRequest>> 
                         // Process sync requests sequentially (fast anyway)
                         for req in sync_batch {
                             let PythonRequest { handler, is_async, method: _, path: _, query_string: _, body: _, response_tx } = req;
+                            // Note: This old worker function doesn't have limiter, using dummy
+                            let dummy_limiter = Python::with_gil(|py| {
+                                py.import("turboapi.async_limiter").unwrap().call_method1("get_limiter", (512,)).unwrap().into()
+                            });
                             let result = process_request_optimized(
-                                handler, is_async, &task_locals, &json_dumps_fn
+                                handler, is_async, &task_locals, &json_dumps_fn, &dummy_limiter
                             ).await;
                             let _ = response_tx.send(result);
                         }
                         
                         // Process async requests CONCURRENTLY with gather!
                         if !async_batch.is_empty() {
+                            let dummy_limiter = Python::with_gil(|py| {
+                                py.import("turboapi.async_limiter").unwrap().call_method1("get_limiter", (512,)).unwrap().into()
+                            });
                             let futures: Vec<_> = async_batch.iter().map(|req| {
                                 process_request_optimized(
                                     req.handler.clone(),
                                     req.is_async,
                                     &task_locals,
-                                    &json_dumps_fn
+                                    &json_dumps_fn,
+                                    &dummy_limiter
                                 )
                             }).collect();
                             
@@ -965,27 +990,34 @@ fn spawn_python_workers(num_workers: usize) -> Vec<mpsc::Sender<PythonRequest>> 
 /// This eliminates event loop creation overhead by reusing the persistent loop!
 /// NO GIL CHECK - is_async is cached at registration time!
 /// Uses PRE-BOUND json.dumps callable to avoid repeated getattr!
+/// PHASE B: Semaphore gating for async handlers to prevent overload!
 async fn process_request_optimized(
     handler: Handler,
     is_async: bool, // Pre-cached from HandlerMetadata!
     task_locals: &pyo3_async_runtimes::TaskLocals,
     json_dumps_fn: &PyObject, // Pre-bound callable!
+    limiter: &PyObject, // PHASE B: Semaphore limiter for gating!
 ) -> Result<String, String> {
     // No need to check is_async - it's passed in from cached metadata!
     
     if is_async {
-        // Async handler - use pyo3-async-runtimes to convert to Rust future!
-        // This is NON-BLOCKING - we await the future instead of blocking on run_until_complete!
+        // PHASE B: Async handler with semaphore gating!
+        // Wrap coroutine with limiter to prevent event loop overload
         let future = Python::with_gil(|py| {
             // Call async handler to get coroutine
             let coroutine = handler.bind(py).call0()
                 .map_err(|e| format!("Handler error: {}", e))?;
             
+            // PHASE B: Wrap coroutine with semaphore limiter
+            // The limiter returns a coroutine that wraps the original with semaphore gating
+            let limited_coro = limiter.bind(py).call1((coroutine,))
+                .map_err(|e| format!("Limiter error: {}", e))?;
+            
             // Convert Python coroutine to Rust future using cached TaskLocals
             // This schedules it on the event loop WITHOUT blocking!
             pyo3_async_runtimes::into_future_with_locals(
                 task_locals,
-                coroutine
+                limited_coro.clone()
             ).map_err(|e| format!("Failed to convert coroutine: {}", e))
         })?;
         
