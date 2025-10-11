@@ -83,16 +83,17 @@ app.run(host="127.0.0.1", port=8000)
 
 ### **Benchmark Results - v0.4.0 Pure Rust Async Runtime** (wrk load testing)
 
-**Run the benchmark yourself:**
+**Run the benchmarks yourself:**
 ```bash
-# Start the example server
-python examples/multi_route_app.py
+# TurboAPI standalone benchmark
+python examples/multi_route_app.py  # Terminal 1
+python benchmark_v040.py            # Terminal 2
 
-# In another terminal, run the benchmark
-python benchmark_v040.py
+# TurboAPI vs FastAPI comparison (automated)
+python benchmark_turboapi_vs_fastapi.py
 ```
 
-**Results:**
+**TurboAPI Standalone Performance:**
 
 ```
 🚀 Light Load (50 connections):
@@ -117,6 +118,34 @@ python benchmark_v040.py
   • Pure Rust Async Runtime with Tokio work-stealing scheduler
   • Python 3.14 free-threading (no GIL overhead)
   • True multi-core utilization across all 14 CPU cores
+```
+
+**TurboAPI vs FastAPI Head-to-Head:**
+
+```
+🔥 Identical Endpoints Comparison (50 connections, 10s duration):
+  Root Endpoint:
+    TurboAPI:  70,690 req/s  (0.74ms latency)
+    FastAPI:    8,036 req/s  (5.94ms latency)
+    Speedup:    8.8x faster ⚡
+
+  Path Parameters (/users/{user_id}):
+    TurboAPI:  71,083 req/s  (0.72ms latency)
+    FastAPI:    7,395 req/s  (6.49ms latency)
+    Speedup:    9.6x faster ⚡
+
+  Query Parameters (/search?q=...):
+    TurboAPI:  71,513 req/s  (0.72ms latency)
+    FastAPI:    6,928 req/s  (6.94ms latency)
+    Speedup:    10.3x faster ⚡
+
+  Async Endpoint (with asyncio.sleep):
+    TurboAPI:  15,616 req/s  (3.08ms latency)
+    FastAPI:   10,147 req/s  (4.83ms latency)
+    Speedup:    1.5x faster ⚡
+
+📊 Average: 7.6x faster than FastAPI
+🏆 Best: 10.3x faster on query parameters
 ```
 
 ## 🎯 **Zero Learning Curve**
