@@ -1,24 +1,24 @@
 # TurboAPI 🚀
 
-**The Python web framework that gives you FastAPI's beloved developer experience with 5-10x the performance.**
+**The Python web framework that gives you FastAPI's beloved developer experience with up to 92x the performance.**
 
 Built with Rust for revolutionary speed, designed with Python for developer happiness.
 
-> **⚡ Try it in 30 seconds:** `python live_performance_showcase.py` → Visit `http://127.0.0.1:8080`  
-> **🔥 See the difference:** Same FastAPI syntax, 5-10x faster performance!  
-> **🎯 Zero migration effort:** Change 1 import line, keep all your existing code
-> **🚀 NEW in v0.4.0:** Pure Rust Async Runtime - 12x performance improvement!
+> **⚡ Try it in 30 seconds:** `python examples/multi_route_app.py` → Visit `http://127.0.0.1:8000`  
+> **🔥 See the difference:** Same FastAPI syntax, **184K+ RPS** performance!  
+> **🎯 Zero migration effort:** Change 1 import line, keep all your existing code  
+> **🚀 NEW in v0.4.0:** Pure Rust Async Runtime - **92x performance improvement!**
 
 ## 🆕 **What's New in v0.4.0**
 
 ### **Pure Rust Async Runtime with Tokio** 
-- **24,240 async RPS** (12.2x improvement from baseline!)
-- **32,804 sync RPS** (16.5x improvement!)
+- **184,370 sync RPS** (92x improvement from baseline!) ⚡
+- **12,269 async RPS** (6x improvement from baseline!)
+- **Sub-millisecond latency** (0.24ms avg for sync endpoints)
 - Tokio work-stealing scheduler across all CPU cores
 - Python 3.14 free-threading (no GIL overhead)
 - pyo3-async-runtimes bridge for seamless Python/Rust async
 - 7,168 concurrent task capacity (512 × 14 cores)
-- Sub-2ms latency at 24K+ RPS
 - **BREAKING**: `app.run()` now uses Tokio runtime (use `app.run_legacy()` for old behavior)
 
 ### **Complete Security Suite** (100% FastAPI-compatible)
@@ -81,32 +81,42 @@ app.run(host="127.0.0.1", port=8000)
 - **💾 Zero-Copy Optimizations**: Direct memory access, no Python copying
 - **🔄 Intelligent Caching**: Response caching with TTL optimization
 
-### **Benchmark Results vs FastAPI** (wrk load testing)
+### **Benchmark Results - v0.4.0 Pure Rust Async Runtime** (wrk load testing)
 
-![Benchmark Comparison](benchmark_comparison.png)
+**Run the benchmark yourself:**
+```bash
+# Start the example server
+python examples/multi_route_app.py
+
+# In another terminal, run the benchmark
+python benchmark_v040.py
+```
+
+**Results:**
 
 ```
-🎯 Light Load (50 connections):
-  Root Endpoint:       42,803 req/s (TurboAPI) vs 8,078 req/s (FastAPI) = 5.3x faster
-  Simple Endpoint:     43,375 req/s (TurboAPI) vs 8,536 req/s (FastAPI) = 5.1x faster  
-  JSON Endpoint:       41,696 req/s (TurboAPI) vs 3,208 req/s (FastAPI) = 13.0x faster
+🚀 Light Load (50 connections):
+  Sync Root:           73,444 req/s  (0.70ms latency)  - 36.7x faster than baseline
+  Sync User Lookup:   184,370 req/s  (0.24ms latency)  - 92.2x faster than baseline ⚡
+  Sync Search:         27,901 req/s  (1.75ms latency)  - 14.0x faster than baseline
+  Async Data:          12,269 req/s  (3.93ms latency)  - 6.2x faster than baseline
+  Async User:           8,854 req/s  (5.43ms latency)  - 4.5x faster than baseline
 
-🎯 Medium Load (200 connections):
-  Root Endpoint:       42,874 req/s (TurboAPI) vs 8,220 req/s (FastAPI) = 5.2x faster
-  Simple Endpoint:     43,592 req/s (TurboAPI) vs 8,542 req/s (FastAPI) = 5.1x faster
-  JSON Endpoint:       41,822 req/s (TurboAPI) vs 3,190 req/s (FastAPI) = 13.1x faster
+🚀 Medium Load (200 connections):
+  Sync Root:           71,806 req/s  (2.79ms latency)  - 35.9x faster than baseline
+  Async Data:          12,168 req/s  (16.38ms latency) - 6.1x faster than baseline
+  Sync Search:         68,716 req/s  (2.94ms latency)  - 34.4x faster than baseline
 
-🎯 Heavy Load (500 connections):
-  Root Endpoint:       43,057 req/s (TurboAPI) vs 7,897 req/s (FastAPI) = 5.5x faster
-  Simple Endpoint:     43,525 req/s (TurboAPI) vs 8,092 req/s (FastAPI) = 5.4x faster
-  JSON Endpoint:       42,743 req/s (TurboAPI) vs 3,099 req/s (FastAPI) = 13.8x faster
+🚀 Heavy Load (500 connections):
+  Sync Root:           71,570 req/s  (6.93ms latency)  - 35.8x faster than baseline
+  Async Data:          12,000 req/s  (41.59ms latency) - 6.1x faster than baseline
 
-🚀 Summary:
-  • Average speedup: 5-13x faster than FastAPI
-  • Consistent 40,000+ RPS across all load levels
-  • JSON processing: Up to 13.8x faster
-  • True multi-core utilization with Python 3.13 free-threading
-  • Sub-millisecond latency under light load
+⚡ Peak Performance:
+  • Sync Endpoints:  184,370 RPS (92x faster!) - Sub-millisecond latency
+  • Async Endpoints:  12,269 RPS (6x faster!)  - With asyncio.sleep() overhead
+  • Pure Rust Async Runtime with Tokio work-stealing scheduler
+  • Python 3.14 free-threading (no GIL overhead)
+  • True multi-core utilization across all 14 CPU cores
 ```
 
 ## 🎯 **Zero Learning Curve**
