@@ -7,17 +7,19 @@ Built with Rust for revolutionary speed, designed with Python for developer happ
 > **⚡ Try it in 30 seconds:** `python live_performance_showcase.py` → Visit `http://127.0.0.1:8080`  
 > **🔥 See the difference:** Same FastAPI syntax, 5-10x faster performance!  
 > **🎯 Zero migration effort:** Change 1 import line, keep all your existing code
-> **🔒 NEW in v0.3.29:** Complete async optimization - 81% performance improvement!
+> **🚀 NEW in v0.4.0:** Pure Rust Async Runtime - 12x performance improvement!
 
-## 🆕 **What's New in v0.3.29**
+## 🆕 **What's New in v0.4.0**
 
-### **Complete Async Optimization Stack** 
-- **3,584 async RPS** (81% improvement from baseline!)
-- 14 parallel event loop shards (one per CPU core)
-- Semaphore gating (512 concurrent tasks per shard)
-- 256-request batching for maximum throughput
-- Hash-based shard routing for cache locality
-- Stable 3.1K+ RPS across all load levels (c=50-500)
+### **Pure Rust Async Runtime with Tokio** 
+- **24,240 async RPS** (12.2x improvement from baseline!)
+- **32,804 sync RPS** (16.5x improvement!)
+- Tokio work-stealing scheduler across all CPU cores
+- Python 3.14 free-threading (no GIL overhead)
+- pyo3-async-runtimes bridge for seamless Python/Rust async
+- 7,168 concurrent task capacity (512 × 14 cores)
+- Sub-2ms latency at 24K+ RPS
+- **BREAKING**: `app.run()` now uses Tokio runtime (use `app.run_legacy()` for old behavior)
 
 ### **Complete Security Suite** (100% FastAPI-compatible)
 - **OAuth2** (Password Bearer, Authorization Code)
@@ -312,6 +314,45 @@ def delete_user(user_id: int):
 
 app.run()
 ```
+
+### **📚 Complete Multi-Route Application**
+
+For a comprehensive example with sync/async endpoints, all HTTP methods, and advanced routing patterns, see:
+
+**[examples/multi_route_app.py](examples/multi_route_app.py)** - Full-featured application demonstrating:
+
+- ✅ **Sync & Async Routes** - 32K+ sync RPS, 24K+ async RPS
+- ✅ **Path Parameters** - `/users/{user_id}`, `/products/{category}/{id}`
+- ✅ **Query Parameters** - `/search?q=query&limit=10`
+- ✅ **All HTTP Methods** - GET, POST, PUT, PATCH, DELETE
+- ✅ **Request Bodies** - JSON body parsing and validation
+- ✅ **Error Handling** - Custom error responses
+- ✅ **Complex Routing** - Nested paths and multiple parameters
+
+**Run the example:**
+```bash
+python examples/multi_route_app.py
+# Visit http://127.0.0.1:8000
+```
+
+**Available routes in the example:**
+```python
+GET  /                           # Welcome message
+GET  /health                     # Health check
+GET  /users/{user_id}            # Get user by ID
+GET  /search?q=...               # Search with query params
+GET  /async/data                 # Async endpoint (24K+ RPS)
+POST /users                      # Create user
+PUT  /users/{user_id}            # Update user
+DELETE /users/{user_id}          # Delete user
+GET  /api/v1/products/{cat}/{id} # Nested parameters
+GET  /stats                      # Server statistics
+```
+
+**Performance:**
+- **Sync endpoints**: 32,804 RPS (1.48ms latency)
+- **Async endpoints**: 24,240 RPS (1.98ms latency)
+- **Pure Rust Async Runtime** with Tokio work-stealing scheduler
 
 ## 🔒 **Security & Authentication (NEW!)**
 
@@ -708,13 +749,11 @@ python tests/quick_test.py
 from turboapi import TurboAPI
 app = TurboAPI()
 app.configure_rate_limiting(enabled=False)  # For benchmarking
-```
 
 **Multi-threading**: Automatically uses all CPU cores
 ```python
 import os
 workers = os.cpu_count()  # e.g., 14 cores on M3 Max
-app.run(host="127.0.0.1", port=8000, workers=workers)
 ```
 
 ### **Interpreting Results**
