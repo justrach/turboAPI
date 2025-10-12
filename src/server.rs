@@ -1120,7 +1120,7 @@ fn call_python_handler_sync_direct(
     _method_str: &str,
     _path: &str,
     _query_string: &str,
-    _body_bytes: &Bytes,
+    body_bytes: &Bytes,
 ) -> Result<String, String> {
     // FREE-THREADING: Python::attach() instead of Python::with_gil()
     // This allows TRUE parallel execution on Python 3.14+ with --disable-gil
@@ -1130,16 +1130,39 @@ fn call_python_handler_sync_direct(
             py.import("json").unwrap().into()
         });
         
-        // Call sync handler directly (NO kwargs - handlers don't expect them!)
-        let result = handler.call0(py)
+        // Create kwargs dict with request data for enhanced handler
+        use pyo3::types::PyDict;
+        let kwargs = PyDict::new(py);
+        
+        // Add body as bytes
+        kwargs.set_item("body", body_bytes.as_ref()).ok();
+        
+        // Add empty headers dict for now
+        let headers = PyDict::new(py);
+        kwargs.set_item("headers", headers).ok();
+        
+        // Call handler with kwargs (body and headers)
+        let result = handler.call(py, (), Some(&kwargs))
             .map_err(|e| format!("Python error: {}", e))?;
         
-        // Extract or serialize result
-        match result.extract::<String>(py) {
+        // Enhanced handler returns {"content": ..., "status_code": ..., "content_type": ...}
+        // Extract just the content for JSON serialization
+        let content = if let Ok(dict) = result.downcast_bound::<pyo3::types::PyDict>(py) {
+            if let Ok(Some(content_val)) = dict.get_item("content") {
+                content_val.unbind()
+            } else {
+                result
+            }
+        } else {
+            result
+        };
+        
+        // Extract or serialize content
+        match content.extract::<String>(py) {
             Ok(json_str) => Ok(json_str),
             Err(_) => {
                 let json_dumps = json_module.getattr(py, "dumps").unwrap();
-                let json_str = json_dumps.call1(py, (result,))
+                let json_str = json_dumps.call1(py, (content,))
                     .map_err(|e| format!("JSON error: {}", e))?;
                 json_str.extract::<String>(py)
                     .map_err(|e| format!("Extract error: {}", e))
@@ -1373,7 +1396,7 @@ async fn handle_python_request_sync(
     _method: String,
     _path: String,
     _query_string: String,
-    _body: Bytes,
+    body: Bytes,
 ) -> Result<String, String> {
     // Check if handler is async
     let is_async = Python::with_gil(|py| {
@@ -1384,6 +1407,8 @@ async fn handle_python_request_sync(
             .unwrap()
     });
     
+    let body_clone = body.clone();
+    
     if is_async {
         // Async handler - run in blocking thread with asyncio.run()
         tokio::task::spawn_blocking(move || {
@@ -1392,13 +1417,32 @@ async fn handle_python_request_sync(
                 let asyncio = py.import("asyncio")
                     .map_err(|e| format!("Failed to import asyncio: {}", e))?;
                 
+                // Create kwargs dict with request data
+                use pyo3::types::PyDict;
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("body", body_clone.as_ref()).ok();
+                let headers = PyDict::new(py);
+                kwargs.set_item("headers", headers).ok();
+                
                 // Call async handler to get coroutine
-                let coroutine = handler.call0(py)
+                let coroutine = handler.call(py, (), Some(&kwargs))
                     .map_err(|e| format!("Failed to call handler: {}", e))?;
                 
                 // Run coroutine with asyncio.run()
                 let result = asyncio.call_method1("run", (coroutine,))
                     .map_err(|e| format!("Failed to run coroutine: {}", e))?;
+                
+                // Enhanced handler returns {"content": ..., "status_code": ..., "content_type": ...}
+                // Extract just the content
+                let content = if let Ok(dict) = result.downcast::<PyDict>() {
+                    if let Ok(Some(content_val)) = dict.get_item("content") {
+                        content_val
+                    } else {
+                        result
+                    }
+                } else {
+                    result
+                };
                 
                 // Serialize result
                 let json_module = CACHED_JSON_MODULE.get_or_init(|| {
@@ -1406,11 +1450,11 @@ async fn handle_python_request_sync(
                 });
                 
                 // Try to extract as string directly, otherwise serialize with JSON
-                if let Ok(json_str) = result.extract::<String>() {
+                if let Ok(json_str) = content.extract::<String>() {
                     Ok(json_str)
                 } else {
                     let json_dumps = json_module.getattr(py, "dumps").unwrap();
-                    let json_str = json_dumps.call1(py, (result,))
+                    let json_str = json_dumps.call1(py, (content,))
                         .map_err(|e| format!("JSON error: {}", e))?;
                     json_str.extract::<String>(py)
                         .map_err(|e| format!("Extraction error: {}", e))
@@ -1424,14 +1468,33 @@ async fn handle_python_request_sync(
                 py.import("json").unwrap().into()
             });
             
-            let result = handler.call0(py)
+            // Create kwargs dict with request data
+            use pyo3::types::PyDict;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("body", body.as_ref()).ok();
+            let headers = PyDict::new(py);
+            kwargs.set_item("headers", headers).ok();
+            
+            let result = handler.call(py, (), Some(&kwargs))
                 .map_err(|e| format!("Python handler error: {}", e))?;
             
-            match result.extract::<String>(py) {
+            // Enhanced handler returns {"content": ..., "status_code": ..., "content_type": ...}
+            // Extract just the content
+            let content = if let Ok(dict) = result.downcast_bound::<PyDict>(py) {
+                if let Ok(Some(content_val)) = dict.get_item("content") {
+                    content_val.unbind()
+                } else {
+                    result
+                }
+            } else {
+                result
+            };
+            
+            match content.extract::<String>(py) {
                 Ok(json_str) => Ok(json_str),
                 Err(_) => {
                     let json_dumps = json_module.getattr(py, "dumps").unwrap();
-                    let json_str = json_dumps.call1(py, (result,))
+                    let json_str = json_dumps.call1(py, (content,))
                         .map_err(|e| format!("JSON error: {}", e))?;
                     json_str.extract::<String>(py)
                         .map_err(|e| format!("Extraction error: {}", e))

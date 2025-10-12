@@ -128,91 +128,14 @@ class RustIntegratedTurboAPI(TurboAPI):
                 # Create enhanced handler with automatic body parsing
                 enhanced_handler = create_enhanced_handler(route.handler, route)
                 
-                # Create Rust-compatible handler wrapper
-                def create_rust_handler(python_handler, route_def):
-                    def rust_handler(rust_request):
-                        """Rust-callable handler that calls Python function with automatic body parsing."""
-                        try:
-                            # Extract request data from Rust
-                            path = rust_request.path
-                            query_string = rust_request.query_string
-                            
-                            # Get headers - try method call first, then attribute
-                            try:
-                                headers = rust_request.get_headers() if callable(getattr(rust_request, 'get_headers', None)) else {}
-                            except:
-                                headers = getattr(rust_request, 'headers', {})
-                            
-                            # Get body - Rust sets it as 'body' attribute (bytes)
-                            body = getattr(rust_request, 'body', b'')
-                            
-                            # Also try get_body if it's set
-                            if not body:
-                                get_body_attr = getattr(rust_request, 'get_body', None)
-                                if get_body_attr is not None:
-                                    if callable(get_body_attr):
-                                        body = get_body_attr()
-                                    else:
-                                        body = get_body_attr
-
-                            # Parse query parameters
-                            query_params = {}
-                            if query_string:
-                                # Simple query string parsing
-                                for param in query_string.split('&'):
-                                    if '=' in param:
-                                        key, value = param.split('=', 1)
-                                        query_params[key] = value
-
-                            # Parse path parameters
-                            path_params = self._extract_path_params(route_def.path, path)
-
-                            # Prepare arguments for enhanced handler
-                            call_args = {}
-                            
-                            # Add path parameters
-                            call_args.update(path_params)
-                            
-                            # Add query parameters
-                            call_args.update(query_params)
-                            
-                            # Always add body and headers for enhanced handler
-                            call_args['body'] = body if body else b''
-                            call_args['headers'] = headers
-
-                            # Call enhanced handler (handles parsing, validation, response normalization)
-                            result = python_handler(**call_args)
-                            
-                            # Enhanced handler returns normalized format
-                            # {"content": ..., "status_code": ..., "content_type": ...}
-                            # But Rust expects a plain dict that it will JSON serialize
-                            # So just return the content directly
-                            if isinstance(result, dict) and 'content' in result and 'status_code' in result:
-                                # Return just the content - Rust will handle status codes later
-                                # For now, just return the content as a dict
-                                return result['content']
-                            
-                            # Fallback for plain dict responses
-                            return result
-
-                        except Exception as e:
-                            # Return 500 error as plain dict (Rust will serialize it)
-                            import traceback
-                            return {
-                                "error": "Internal Server Error",
-                                "detail": str(e),
-                                "traceback": traceback.format_exc()
-                            }
-
-                    return rust_handler  # noqa: B023
-
-                # Register the ORIGINAL handler directly with Rust
-                # Rust will call it with call0() (no arguments)
-                # The original handler doesn't expect any arguments
+                # For now, just register the original handler
+                # TODO: Implement request data passing from Rust to enable enhanced handler
+                # The Rust server currently calls handlers with call0() (no arguments)
+                # We need to modify the Rust server to pass request data
                 self.rust_server.add_route(
                     route.method.value,
                     route.path,
-                    route.handler  # Pass original handler, not wrapper!
+                    enhanced_handler  # Register enhanced handler directly
                 )
 
                 print(f"{CHECK_MARK} Registered {route.method.value} {route.path} with Rust server")

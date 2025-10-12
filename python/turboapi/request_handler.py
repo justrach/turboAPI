@@ -18,6 +18,11 @@ class RequestBodyParser:
         """
         Parse JSON body and extract parameters for handler.
         
+        Supports multiple patterns:
+        1. Single parameter (dict/list/Model) - receives entire body
+        2. Multiple parameters - extracts fields from JSON
+        3. Satya Model - validates entire body
+        
         Args:
             body: Raw request body bytes
             handler_signature: Signature of the handler function
@@ -34,9 +39,42 @@ class RequestBodyParser:
             raise ValueError(f"Invalid JSON body: {e}")
         
         parsed_params = {}
+        params_list = list(handler_signature.parameters.items())
         
-        # Check each parameter in the handler signature
-        for param_name, param in handler_signature.parameters.items():
+        # PATTERN 1: Single parameter that should receive entire body
+        # Examples: handler(data: dict), handler(items: list), handler(request: Model)
+        if len(params_list) == 1:
+            param_name, param = params_list[0]
+            
+            # Check if parameter is a Satya Model
+            try:
+                is_satya_model = inspect.isclass(param.annotation) and issubclass(param.annotation, Model)
+            except Exception:
+                is_satya_model = False
+            
+            if is_satya_model:
+                # Validate entire JSON body against Satya model
+                try:
+                    validated_model = param.annotation.model_validate(json_data)
+                    parsed_params[param_name] = validated_model
+                    return parsed_params
+                except Exception as e:
+                    raise ValueError(f"Validation error for {param_name}: {e}")
+            
+            # If annotated as dict or list, pass entire body
+            elif param.annotation in (dict, list) or param.annotation == inspect.Parameter.empty:
+                parsed_params[param_name] = json_data
+                return parsed_params
+            
+            # Check for typing.Dict, typing.List, etc.
+            origin = get_origin(param.annotation)
+            if origin in (dict, list):
+                parsed_params[param_name] = json_data
+                return parsed_params
+        
+        # PATTERN 2: Multiple parameters - extract individual fields
+        # Example: handler(name: str, age: int, email: str)
+        for param_name, param in params_list:
             if param.annotation == inspect.Parameter.empty:
                 # No type annotation, try to match by name
                 if param_name in json_data:
