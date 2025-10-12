@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.13", "3.13t", "3.14.0-rc.3"]
+        python-version: ["3.13", "3.13t", "3.14.0", "3.14t"]
         manylinux: ["2_17"]
       fail-fast: false
     steps:
@@ -54,7 +54,7 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
-        python-version: ["3.13", "3.13t", "3.14.0-rc.3"]
+        python-version: ["3.13", "3.13t", "3.14.0", "3.14t"]
         target: [x64]
       fail-fast: false
     steps:
@@ -81,7 +81,7 @@ jobs:
     runs-on: macos-latest
     strategy:
       matrix:
-        python-version: ["3.13", "3.13t", "3.14.0-rc.3"]
+        python-version: ["3.13", "3.13t", "3.14.0", "3.14t"]
         target: [x86_64, aarch64]
       fail-fast: false
     steps:

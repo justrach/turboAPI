@@ -32,6 +32,11 @@ class TurboAPI(Router):
 
         print(f"{ROCKET} TurboAPI application created: {title} v{version}")
 
+    @property
+    def routes(self):
+        """Get all registered routes."""
+        return self.registry.get_routes() if hasattr(self, 'registry') else []
+
     def add_middleware(self, middleware_class, **kwargs):
         """Add middleware to the application."""
         self.middleware_stack.append((middleware_class, kwargs))
