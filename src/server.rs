@@ -378,6 +378,14 @@ async fn handle_request(
         }
     };
     
+    // Extract headers into HashMap for Python
+    let mut headers_map = std::collections::HashMap::new();
+    for (name, value) in parts.headers.iter() {
+        if let Ok(value_str) = value.to_str() {
+            headers_map.insert(name.as_str().to_string(), value_str.to_string());
+        }
+    }
+    
     // PHASE 2+: Basic rate limiting check (DISABLED BY DEFAULT FOR BENCHMARKING)
     // Rate limiting is completely disabled by default to ensure accurate benchmarks
     // Users can explicitly enable it in production if needed
@@ -455,7 +463,7 @@ async fn handle_request(
             }
         } else {
             // SYNC PATH: Direct Python call (FAST!)
-            call_python_handler_sync_direct(&metadata.handler, method_str, path, query_string, &body_bytes)
+            call_python_handler_sync_direct(&metadata.handler, method_str, path, query_string, &body_bytes, &headers_map)
         };
         
         match response_result {
@@ -1117,10 +1125,11 @@ fn hash_route_key(route_key: &str) -> usize {
 /// FREE-THREADING: Uses Python::attach() for TRUE parallelism (no GIL contention!)
 fn call_python_handler_sync_direct(
     handler: &PyObject,
-    _method_str: &str,
-    _path: &str,
-    _query_string: &str,
+    method_str: &str,
+    path: &str,
+    query_string: &str,
     body_bytes: &Bytes,
+    headers_map: &std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
     // FREE-THREADING: Python::attach() instead of Python::with_gil()
     // This allows TRUE parallel execution on Python 3.14+ with --disable-gil
@@ -1137,9 +1146,21 @@ fn call_python_handler_sync_direct(
         // Add body as bytes
         kwargs.set_item("body", body_bytes.as_ref()).ok();
         
-        // Add empty headers dict for now
+        // Add headers dict
         let headers = PyDict::new(py);
+        for (key, value) in headers_map {
+            headers.set_item(key, value).ok();
+        }
         kwargs.set_item("headers", headers).ok();
+        
+        // Add method
+        kwargs.set_item("method", method_str).ok();
+        
+        // Add path
+        kwargs.set_item("path", path).ok();
+        
+        // Add query string
+        kwargs.set_item("query_string", query_string).ok();
         
         // Call handler with kwargs (body and headers)
         let result = handler.call(py, (), Some(&kwargs))

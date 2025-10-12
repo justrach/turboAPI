@@ -1,13 +1,105 @@
 """
 Enhanced Request Handler with Satya Integration
 Provides FastAPI-compatible automatic JSON body parsing and validation
+Supports query parameters, path parameters, headers, and request body
 """
 
 import inspect
 import json
+import urllib.parse
 from typing import Any, get_args, get_origin
 
 from satya import Model
+
+
+class QueryParamParser:
+    """Parse query parameters from query string."""
+    
+    @staticmethod
+    def parse_query_params(query_string: str) -> dict[str, Any]:
+        """
+        Parse query string into dict of parameters.
+        Supports multiple values for same key (returns list).
+        
+        Args:
+            query_string: URL query string (e.g., "q=test&limit=10")
+            
+        Returns:
+            Dictionary of parsed query parameters
+        """
+        if not query_string:
+            return {}
+        
+        params = {}
+        parsed = urllib.parse.parse_qs(query_string, keep_blank_values=True)
+        
+        for key, values in parsed.items():
+            # If only one value, return as string; otherwise return as list
+            if len(values) == 1:
+                params[key] = values[0]
+            else:
+                params[key] = values
+        
+        return params
+
+
+class PathParamParser:
+    """Parse path parameters from URL path."""
+    
+    @staticmethod
+    def extract_path_params(route_pattern: str, actual_path: str) -> dict[str, str]:
+        """
+        Extract path parameters from actual path using route pattern.
+        
+        Args:
+            route_pattern: Route pattern with {param} placeholders (e.g., "/users/{user_id}")
+            actual_path: Actual request path (e.g., "/users/123")
+            
+        Returns:
+            Dictionary of extracted path parameters
+        """
+        import re
+        
+        # Convert route pattern to regex
+        # Replace {param} with named capture groups
+        pattern = re.sub(r'\{(\w+)\}', r'(?P<\1>[^/]+)', route_pattern)
+        pattern = f'^{pattern}$'
+        
+        match = re.match(pattern, actual_path)
+        if match:
+            return match.groupdict()
+        
+        return {}
+
+
+class HeaderParser:
+    """Parse and extract headers from request."""
+    
+    @staticmethod
+    def parse_headers(headers_dict: dict[str, str], handler_signature: inspect.Signature) -> dict[str, Any]:
+        """
+        Parse headers and extract parameters needed by handler.
+        
+        Args:
+            headers_dict: Dictionary of request headers
+            handler_signature: Signature of the handler function
+            
+        Returns:
+            Dictionary of parsed header parameters
+        """
+        parsed_headers = {}
+        
+        # Check each parameter in handler signature
+        for param_name, param in handler_signature.parameters.items():
+            # Check if parameter name matches a header (case-insensitive)
+            header_key = param_name.replace('_', '-').lower()
+            
+            for header_name, header_value in headers_dict.items():
+                if header_name.lower() == header_key:
+                    parsed_headers[param_name] = header_value
+                    break
+        
+        return parsed_headers
 
 
 class RequestBodyParser:
@@ -218,9 +310,33 @@ def create_enhanced_handler(original_handler, route_definition):
     sig = inspect.signature(original_handler)
     
     def enhanced_handler(**kwargs):
-        """Enhanced handler with automatic body parsing."""
+        """Enhanced handler with automatic parsing of body, query params, path params, and headers."""
         try:
-            # If there's a body in kwargs, parse it
+            parsed_params = {}
+            
+            # 1. Parse query parameters
+            if "query_string" in kwargs:
+                query_string = kwargs.get("query_string", "")
+                if query_string:
+                    query_params = QueryParamParser.parse_query_params(query_string)
+                    parsed_params.update(query_params)
+            
+            # 2. Parse path parameters (if route pattern is available)
+            if "path" in kwargs and hasattr(route_definition, 'path'):
+                actual_path = kwargs.get("path", "")
+                route_pattern = route_definition.path
+                if actual_path and route_pattern:
+                    path_params = PathParamParser.extract_path_params(route_pattern, actual_path)
+                    parsed_params.update(path_params)
+            
+            # 3. Parse headers
+            if "headers" in kwargs:
+                headers_dict = kwargs.get("headers", {})
+                if headers_dict:
+                    header_params = HeaderParser.parse_headers(headers_dict, sig)
+                    parsed_params.update(header_params)
+            
+            # 4. Parse request body (JSON)
             if "body" in kwargs:
                 body_data = kwargs["body"]
                 
@@ -229,18 +345,12 @@ def create_enhanced_handler(original_handler, route_definition):
                         body_data, 
                         sig
                     )
-                    # Merge parsed body params into kwargs
-                    kwargs.update(parsed_body)
-                
-                # Remove the raw body to avoid passing it to handler
-                kwargs.pop("body", None)
+                    # Merge parsed body params (body params take precedence)
+                    parsed_params.update(parsed_body)
             
-            # Remove headers if present
-            kwargs.pop("headers", None)
-            
-            # Filter kwargs to only pass expected parameters
+            # Filter to only pass expected parameters
             filtered_kwargs = {
-                k: v for k, v in kwargs.items() 
+                k: v for k, v in parsed_params.items() 
                 if k in sig.parameters
             }
             
