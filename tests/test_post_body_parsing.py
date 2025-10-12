@@ -166,10 +166,12 @@ def test_satya_model_validation():
     
     @app.post("/backtest")
     def backtest(request: BacktestRequest):
+        # Use model_dump() to get actual values (Satya quirk: attributes return Field objects)
+        data = request.model_dump()
         return {
-            "symbol": request.symbol,
-            "candles_count": len(request.candles),
-            "capital": request.initial_capital
+            "symbol": data["symbol"],
+            "candles_count": len(data["candles"]),
+            "capital": data["initial_capital"]
         }
     
     # Start server in thread
