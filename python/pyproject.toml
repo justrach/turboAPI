@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "turboapi"
-version = "0.4.1"
+version = "0.4.11"
 description = "Revolutionary Python web framework with FastAPI syntax and 12x performance - Pure Rust Async Runtime (Python 3.13+ free-threading required)"
 requires-python = ">=3.13"
 license = {text = "MIT"}
@@ -45,7 +45,7 @@ benchmark = [
 
 [tool.maturin]
 python-source = "."
-module-name = "turboapi._rust"
+module-name = "turboapi.turbonet"
 manifest-path = "../Cargo.toml"
 include = ["turboapi/**/*.py"]
 
