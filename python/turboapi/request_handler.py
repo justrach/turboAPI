@@ -176,9 +176,21 @@ class ResponseHandler:
         if isinstance(content, Model):
             content = content.model_dump()
         
-        # Ensure content is JSON-serializable
-        if not isinstance(content, (dict, list, str, int, float, bool, type(None))):
-            content = str(content)
+        # Recursively convert any nested Satya models in dicts/lists
+        def make_serializable(obj):
+            if isinstance(obj, Model):
+                return obj.model_dump()
+            elif isinstance(obj, dict):
+                return {k: make_serializable(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [make_serializable(item) for item in obj]
+            elif isinstance(obj, (str, int, float, bool, type(None))):
+                return obj
+            else:
+                # Try to convert to string for unknown types
+                return str(obj)
+        
+        content = make_serializable(content)
         
         return {
             "content": content,
