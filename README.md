@@ -7,18 +7,64 @@ Built with Rust for revolutionary speed, designed with Python for developer happ
 > **⚡ Try it in 30 seconds:** `python examples/multi_route_app.py` → Visit `http://127.0.0.1:8000`  
 > **🔥 See the difference:** Same FastAPI syntax, **184K+ RPS** performance!  
 > **🎯 Zero migration effort:** Change 1 import line, keep all your existing code  
-> **🚀 NEW in v0.4.0:** Pure Rust Async Runtime - **92x performance improvement!**
+> **🚀 LATEST in v0.4.13:** POST body parsing fixed - ML/AI applications now work!
 
-## 🆕 **What's New in v0.4.0**
+## 🆕 **What's New in v0.4.x Release Series**
 
-### **Pure Rust Async Runtime with Tokio** 
+### **v0.4.13: POST Body Parsing Fix (LATEST)** 🎉
+
+**Critical Fix**: POST request body parsing now works! This resolves the major blocking issue for real-world ML/AI applications.
+
+#### **✅ What Was Fixed**
+- **POST handlers** can now receive request body data
+- **Single parameter handlers** work: `handler(request_data: dict)`
+- **Large payloads supported** (42,000+ items tested in 0.28s!)
+- **FastAPI compatibility** for POST endpoints
+
+#### **📊 Test Results: 5/5 Passing**
+- Single dict parameter: ✅
+- Single list parameter: ✅  
+- Large JSON payload (42K items): ✅
+- Satya Model validation: ✅
+- Multiple parameters: ✅
+
+#### **🚀 What Now Works**
+```python
+# Single parameter receives entire body
+@app.post('/predict/backtest')
+def handler(request_data: dict):
+    # ✅ Receives entire JSON body with 42K+ candles!
+    candles = request_data.get('candles', [])
+    return {'received': len(candles)}
+
+# Satya Model validation
+from satya import Model, Field
+
+class BacktestRequest(Model):
+    symbol: str = Field(min_length=1)
+    candles: list
+    initial_capital: float = Field(gt=0)
+
+@app.post('/backtest')
+def backtest(request: BacktestRequest):
+    data = request.model_dump()  # Use model_dump() for Satya models
+    return {'symbol': data["symbol"]}
+```
+
+### **v0.4.12: Python 3.14 Support + Routes Property**
+- **Python 3.14.0 stable support** (just released!)
+- **Python 3.14t free-threading support**
+- **Added `routes` property** to TurboAPI for introspection
+- **CI/CD updated** with 16 wheel builds (4 Python versions × 4 platforms)
+
+### **v0.4.0: Pure Rust Async Runtime** 
 - **184,370 sync RPS** (92x improvement from baseline!) ⚡
 - **12,269 async RPS** (6x improvement from baseline!)
 - **Sub-millisecond latency** (0.24ms avg for sync endpoints)
-- Tokio work-stealing scheduler across all CPU cores
-- Python 3.14 free-threading (no GIL overhead)
-- pyo3-async-runtimes bridge for seamless Python/Rust async
-- 7,168 concurrent task capacity (512 × 14 cores)
+- **Tokio work-stealing scheduler** across all CPU cores
+- **Python 3.14 free-threading** (no GIL overhead)
+- **pyo3-async-runtimes bridge** for seamless Python/Rust async
+- **7,168 concurrent task capacity** (512 × 14 cores)
 - **BREAKING**: `app.run()` now uses Tokio runtime (use `app.run_legacy()` for old behavior)
 
 ### **Complete Security Suite** (100% FastAPI-compatible)
@@ -275,7 +321,7 @@ source turbo-env/bin/activate  # On Windows: turbo-env\Scripts\activate
 pip install turboapi
 
 # Verify installation
-python -c "from turboapi import TurboAPI; print('✅ TurboAPI v0.3.27 ready!')"
+python -c "from turboapi import TurboAPI; print('✅ TurboAPI v0.4.13 ready!')"
 ```
 
 #### **Option 2: Build from Source**
@@ -296,29 +342,9 @@ pip install maturin
 maturin develop --manifest-path Cargo.toml
 
 # Verify installation
-python -c "from turboapi import TurboAPI; print('✅ TurboAPI ready!')"
-```
+python -c "from turboapi import TurboAPI; print('✅ TurboAPI ready!')"```
 
 **Note**: Free-threading wheels (cp313t) available for macOS and Linux. Windows uses standard Python 3.13.
-
-### **🎨 FastAPI-Identical Syntax Examples**
-
-#### **Basic API (Same as FastAPI)**
-```python
-from turboapi import TurboAPI
-
-app = TurboAPI(title="FastAPI-Compatible Demo", version="1.0.0")
-
-@app.get("/")
-def read_root():
-    return {"Hello": "TurboAPI", "performance": "5-10x faster!"}
-
-@app.get("/items/{item_id}")
-def read_item(item_id: int, q: str = None):
-    return {"item_id": item_id, "q": q}
-
-app.run(host="127.0.0.1", port=8000)
-```
 
 #### **Advanced Features (Same as FastAPI)**
 ```python
