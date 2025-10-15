@@ -755,6 +755,27 @@ maturin develop --release
 
 TurboAPI includes comprehensive benchmarking tools to verify performance claims.
 
+### **⚡ Benchmark Methodology**
+
+**Architecture**: TurboAPI uses **event-driven async I/O** (Tokio), not thread-per-request:
+- **Single process** with Tokio work-stealing scheduler
+- **All CPU cores utilized** (14 cores on M3 Max = ~1400% CPU usage)
+- **7,168 concurrent task capacity** (512 tasks/core × 14 cores)
+- **Async tasks** (~2KB each), not OS threads (~8MB each)
+
+**Test Hardware**:
+- CPU: Apple M3 Max (10 performance + 4 efficiency cores)
+- Python: 3.13t/3.14t free-threading (GIL-free)
+- Architecture: Event-driven (like nginx/Node.js), not process-per-request
+
+**Why We Don't Need Multiple Processes**:
+- Tokio automatically distributes work across all cores
+- No GIL bottleneck (Python 3.13t free-threading)
+- Rust HTTP layer has zero Python overhead
+- Single process is more efficient (no IPC overhead)
+
+See [BENCHMARK_FAQ.md](BENCHMARK_FAQ.md) for detailed methodology questions.
+
 ### **Quick Benchmark with wrk**
 
 ```bash

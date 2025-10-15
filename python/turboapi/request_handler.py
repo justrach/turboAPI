@@ -299,89 +299,164 @@ def create_enhanced_handler(original_handler, route_definition):
     1. Parses JSON body automatically using Satya validation
     2. Normalizes responses (supports tuple returns)
     3. Provides better error messages
+    4. Properly handles both sync and async handlers
     
     Args:
         original_handler: The original Python handler function
         route_definition: RouteDefinition with metadata
         
     Returns:
-        Enhanced handler function
+        Enhanced handler function (async if original is async, sync otherwise)
     """
     sig = inspect.signature(original_handler)
+    is_async = inspect.iscoroutinefunction(original_handler)
     
-    def enhanced_handler(**kwargs):
-        """Enhanced handler with automatic parsing of body, query params, path params, and headers."""
-        try:
-            parsed_params = {}
-            
-            # 1. Parse query parameters
-            if "query_string" in kwargs:
-                query_string = kwargs.get("query_string", "")
-                if query_string:
-                    query_params = QueryParamParser.parse_query_params(query_string)
-                    parsed_params.update(query_params)
-            
-            # 2. Parse path parameters (if route pattern is available)
-            if "path" in kwargs and hasattr(route_definition, 'path'):
-                actual_path = kwargs.get("path", "")
-                route_pattern = route_definition.path
-                if actual_path and route_pattern:
-                    path_params = PathParamParser.extract_path_params(route_pattern, actual_path)
-                    parsed_params.update(path_params)
-            
-            # 3. Parse headers
-            if "headers" in kwargs:
-                headers_dict = kwargs.get("headers", {})
-                if headers_dict:
-                    header_params = HeaderParser.parse_headers(headers_dict, sig)
-                    parsed_params.update(header_params)
-            
-            # 4. Parse request body (JSON)
-            if "body" in kwargs:
-                body_data = kwargs["body"]
+    if is_async:
+        # Create async enhanced handler for async original handlers
+        async def enhanced_handler(**kwargs):
+            """Enhanced handler with automatic parsing of body, query params, path params, and headers."""
+            try:
+                parsed_params = {}
                 
-                if body_data:  # Only parse if body is not empty
-                    parsed_body = RequestBodyParser.parse_json_body(
-                        body_data, 
-                        sig
-                    )
-                    # Merge parsed body params (body params take precedence)
-                    parsed_params.update(parsed_body)
-            
-            # Filter to only pass expected parameters
-            filtered_kwargs = {
-                k: v for k, v in parsed_params.items() 
-                if k in sig.parameters
-            }
-            
-            # Call original handler
-            if inspect.iscoroutinefunction(original_handler):
-                # For async handlers (future support)
-                result = original_handler(**filtered_kwargs)
-            else:
-                result = original_handler(**filtered_kwargs)
-            
-            # Normalize response
-            content, status_code = ResponseHandler.normalize_response(result)
-            
-            return ResponseHandler.format_json_response(content, status_code)
-            
-        except ValueError as e:
-            # Validation or parsing error (400 Bad Request)
-            return ResponseHandler.format_json_response(
-                {"error": "Bad Request", "detail": str(e)},
-                400
-            )
-        except Exception as e:
-            # Unexpected error (500 Internal Server Error)
-            import traceback
-            return ResponseHandler.format_json_response(
-                {
-                    "error": "Internal Server Error",
-                    "detail": str(e),
-                    "traceback": traceback.format_exc()
-                },
-                500
-            )
+                # 1. Parse query parameters
+                if "query_string" in kwargs:
+                    query_string = kwargs.get("query_string", "")
+                    if query_string:
+                        query_params = QueryParamParser.parse_query_params(query_string)
+                        parsed_params.update(query_params)
+                
+                # 2. Parse path parameters (if route pattern is available)
+                if "path" in kwargs and hasattr(route_definition, 'path'):
+                    actual_path = kwargs.get("path", "")
+                    route_pattern = route_definition.path
+                    if actual_path and route_pattern:
+                        path_params = PathParamParser.extract_path_params(route_pattern, actual_path)
+                        parsed_params.update(path_params)
+                
+                # 3. Parse headers
+                if "headers" in kwargs:
+                    headers_dict = kwargs.get("headers", {})
+                    if headers_dict:
+                        header_params = HeaderParser.parse_headers(headers_dict, sig)
+                        parsed_params.update(header_params)
+                
+                # 4. Parse request body (JSON)
+                if "body" in kwargs:
+                    body_data = kwargs["body"]
+                    
+                    if body_data:  # Only parse if body is not empty
+                        parsed_body = RequestBodyParser.parse_json_body(
+                            body_data, 
+                            sig
+                        )
+                        # Merge parsed body params (body params take precedence)
+                        parsed_params.update(parsed_body)
+                
+                # Filter to only pass expected parameters
+                filtered_kwargs = {
+                    k: v for k, v in parsed_params.items() 
+                    if k in sig.parameters
+                }
+                
+                # Call original async handler and await it
+                result = await original_handler(**filtered_kwargs)
+                
+                # Normalize response
+                content, status_code = ResponseHandler.normalize_response(result)
+                
+                return ResponseHandler.format_json_response(content, status_code)
+                
+            except ValueError as e:
+                # Validation or parsing error (400 Bad Request)
+                return ResponseHandler.format_json_response(
+                    {"error": "Bad Request", "detail": str(e)},
+                    400
+                )
+            except Exception as e:
+                # Unexpected error (500 Internal Server Error)
+                import traceback
+                return ResponseHandler.format_json_response(
+                    {
+                        "error": "Internal Server Error",
+                        "detail": str(e),
+                        "traceback": traceback.format_exc()
+                    },
+                    500
+                )
+        
+        return enhanced_handler
     
-    return enhanced_handler
+    else:
+        # Create sync enhanced handler for sync original handlers
+        def enhanced_handler(**kwargs):
+            """Enhanced handler with automatic parsing of body, query params, path params, and headers."""
+            try:
+                parsed_params = {}
+                
+                # 1. Parse query parameters
+                if "query_string" in kwargs:
+                    query_string = kwargs.get("query_string", "")
+                    if query_string:
+                        query_params = QueryParamParser.parse_query_params(query_string)
+                        parsed_params.update(query_params)
+                
+                # 2. Parse path parameters (if route pattern is available)
+                if "path" in kwargs and hasattr(route_definition, 'path'):
+                    actual_path = kwargs.get("path", "")
+                    route_pattern = route_definition.path
+                    if actual_path and route_pattern:
+                        path_params = PathParamParser.extract_path_params(route_pattern, actual_path)
+                        parsed_params.update(path_params)
+                
+                # 3. Parse headers
+                if "headers" in kwargs:
+                    headers_dict = kwargs.get("headers", {})
+                    if headers_dict:
+                        header_params = HeaderParser.parse_headers(headers_dict, sig)
+                        parsed_params.update(header_params)
+                
+                # 4. Parse request body (JSON)
+                if "body" in kwargs:
+                    body_data = kwargs["body"]
+                    
+                    if body_data:  # Only parse if body is not empty
+                        parsed_body = RequestBodyParser.parse_json_body(
+                            body_data, 
+                            sig
+                        )
+                        # Merge parsed body params (body params take precedence)
+                        parsed_params.update(parsed_body)
+                
+                # Filter to only pass expected parameters
+                filtered_kwargs = {
+                    k: v for k, v in parsed_params.items() 
+                    if k in sig.parameters
+                }
+                
+                # Call original sync handler
+                result = original_handler(**filtered_kwargs)
+                
+                # Normalize response
+                content, status_code = ResponseHandler.normalize_response(result)
+                
+                return ResponseHandler.format_json_response(content, status_code)
+                
+            except ValueError as e:
+                # Validation or parsing error (400 Bad Request)
+                return ResponseHandler.format_json_response(
+                    {"error": "Bad Request", "detail": str(e)},
+                    400
+                )
+            except Exception as e:
+                # Unexpected error (500 Internal Server Error)
+                import traceback
+                return ResponseHandler.format_json_response(
+                    {
+                        "error": "Internal Server Error",
+                        "detail": str(e),
+                        "traceback": traceback.format_exc()
+                    },
+                    500
+                )
+        
+        return enhanced_handler
