@@ -1,6 +1,6 @@
 [package]
 name = "turbonet"
-version = "0.4.15"
+version = "0.4.16"
 edition = "2021"
 authors = ["Rach Pradhan <rach@turboapi.dev>"]
 description = "High-performance Python web framework core - Rust-powered HTTP server with Python 3.14 free-threading support, FastAPI-compatible security and middleware"
@@ -40,6 +40,10 @@ futures = "0.3"
 rayon = "1.8"
 crossbeam = "0.8"
 num_cpus = "1.16"
+memchr = "2.7"
+simd-json = "0.14"
+itoa = "1.0"
+ryu = "1.0"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
