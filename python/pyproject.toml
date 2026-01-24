@@ -12,7 +12,7 @@ authors = [
     {name = "Rach Pradhan", email = "rach@turboapi.dev"}
 ]
 dependencies = [
-    "satya>=0.5.1",
+    "dhi>=1.1.0",
 ]
 keywords = ["web", "framework", "http", "server", "rust", "performance", "free-threading", "no-gil", "fastapi-compatible"]
 classifiers = [

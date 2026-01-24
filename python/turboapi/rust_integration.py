@@ -9,10 +9,10 @@ import json
 from typing import Any, get_origin
 
 try:
-    from satya import Model
+    from dhi import BaseModel
 except ImportError:
-    # Satya not installed - Model-based handlers won't get special treatment
-    Model = None
+    # Dhi not installed - Model-based handlers won't get special treatment
+    BaseModel = None
 
 from .main_app import TurboAPI
 from .request_handler import create_enhanced_handler, ResponseHandler
@@ -39,7 +39,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str]]:
         annotation = param.annotation
 
         try:
-            if Model is not None and inspect.isclass(annotation) and issubclass(annotation, Model):
+            if BaseModel is not None and inspect.isclass(annotation) and issubclass(annotation, BaseModel):
                 needs_model = True
                 break
         except TypeError:

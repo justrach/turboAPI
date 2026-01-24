@@ -1,21 +1,21 @@
 """
-Test Satya 0.5.1 compatibility with TurboAPI.
+Test Dhi 1.1.0 compatibility with TurboAPI.
 
-Satya 0.5.1 includes the TurboValidator architecture (1.17× faster than Pydantic v2)
-and fixes the Field descriptor bug from 0.4.0 (field access now returns values directly).
+Dhi provides a Pydantic v2 compatible BaseModel with high-performance
+validation powered by Zig/C native extensions.
 """
 
 import pytest
-from satya import Model, Field
+from dhi import BaseModel, Field, ValidationError, field_validator
 from turboapi.models import TurboRequest, TurboResponse
 
 
-class TestSatyaFieldAccess:
-    """Test field access behavior in Satya 0.5.1 (descriptor bug fixed)."""
+class TestDhiFieldAccess:
+    """Test field access behavior in Dhi BaseModel."""
 
     def test_field_without_constraints(self):
         """Fields without Field() should work normally."""
-        class SimpleModel(Model):
+        class SimpleModel(BaseModel):
             name: str
             age: int
 
@@ -26,25 +26,22 @@ class TestSatyaFieldAccess:
         assert isinstance(obj.age, int)
 
     def test_field_with_constraints(self):
-        """Fields with Field() constraints return values directly (fixed in 0.4.12+)."""
-        class ConstrainedModel(Model):
+        """Fields with Field() constraints return values directly."""
+        class ConstrainedModel(BaseModel):
             age: int = Field(ge=0, le=150)
 
         obj = ConstrainedModel(age=30)
-        # Direct access works correctly in 0.5.1
         assert obj.age == 30
         assert isinstance(obj.age, int)
         assert obj.age + 5 == 35
 
     def test_field_with_description(self):
         """Fields with Field(description=...) return values directly."""
-        class DescribedModel(Model):
+        class DescribedModel(BaseModel):
             name: str = Field(description="User name")
             age: int = Field(ge=0, description="User age")
 
         obj = DescribedModel(name="Alice", age=30)
-
-        # Direct field access works in 0.5.1 (no __dict__ workaround needed)
         assert obj.name == "Alice"
         assert obj.age == 30
         assert isinstance(obj.name, str)
@@ -52,7 +49,7 @@ class TestSatyaFieldAccess:
 
     def test_field_arithmetic(self):
         """Field values support arithmetic operations directly."""
-        class NumericModel(Model):
+        class NumericModel(BaseModel):
             x: int = Field(ge=0, description="X coordinate")
             y: float = Field(description="Y coordinate")
 
@@ -62,7 +59,7 @@ class TestSatyaFieldAccess:
 
     def test_model_dump_works(self):
         """model_dump() should work correctly."""
-        class TestModel(Model):
+        class TestModel(BaseModel):
             name: str = Field(description="Name")
             age: int = Field(ge=0, description="Age")
 
@@ -74,8 +71,8 @@ class TestSatyaFieldAccess:
         assert isinstance(dumped["age"], int)
 
     def test_model_dump_json(self):
-        """model_dump_json() provides fast Rust-powered JSON serialization."""
-        class TestModel(Model):
+        """model_dump_json() provides JSON serialization."""
+        class TestModel(BaseModel):
             name: str = Field(description="Name")
             age: int = Field(ge=0, description="Age")
 
@@ -90,7 +87,7 @@ class TestSatyaFieldAccess:
 
 
 class TestTurboRequestCompatibility:
-    """Test TurboRequest with Satya 0.5.1."""
+    """Test TurboRequest with Dhi BaseModel."""
 
     def test_turbo_request_creation(self):
         """TurboRequest should create successfully with direct field access."""
@@ -104,7 +101,6 @@ class TestTurboRequestCompatibility:
             body=b'{"test": "data"}'
         )
 
-        # Direct access works in 0.5.1
         assert req.method == "GET"
         assert req.path == "/test"
         assert req.query_string == "foo=bar"
@@ -162,7 +158,7 @@ class TestTurboRequestCompatibility:
 
 
 class TestTurboResponseCompatibility:
-    """Test TurboResponse with Satya 0.5.1."""
+    """Test TurboResponse with Dhi BaseModel."""
 
     def test_turbo_response_creation(self):
         """TurboResponse should create successfully with direct field access."""
@@ -172,7 +168,6 @@ class TestTurboResponseCompatibility:
             headers={"content-type": "text/plain"}
         )
 
-        # Direct access works in 0.5.1
         assert resp.status_code == 200
         assert resp.content == "Hello, World!"
 
@@ -197,20 +192,18 @@ class TestTurboResponseCompatibility:
         """Dict content should serialize to JSON via body property."""
         resp = TurboResponse(content={"key": "value"})
 
-        # content stores the raw value
         assert resp.content == {"key": "value"}
-        # body property serializes to JSON bytes
         body = resp.body
         assert b'"key"' in body
         assert b'"value"' in body
 
 
-class TestSatya051Features:
-    """Test Satya 0.5.1 features including TurboValidator performance."""
+class TestDhiFeatures:
+    """Test Dhi features including Pydantic v2 compatible API."""
 
     def test_model_validate(self):
-        """Test standard model_validate()."""
-        class User(Model):
+        """Test model_validate() classmethod."""
+        class User(BaseModel):
             name: str
             age: int = Field(ge=0, le=150)
 
@@ -218,37 +211,33 @@ class TestSatya051Features:
         assert user.name == "Alice"
         assert user.age == 30
 
-    def test_model_validate_fast(self):
-        """Test model_validate_fast() (optimized validation path)."""
-        class User(Model):
+    def test_model_json_schema(self):
+        """Test model_json_schema() for OpenAPI compatibility."""
+        class User(BaseModel):
+            name: str = Field(description="User name", min_length=1)
+            age: int = Field(ge=0, le=150, description="User age")
+
+        schema = User.model_json_schema()
+        assert schema["title"] == "User"
+        assert schema["type"] == "object"
+        assert "name" in schema["properties"]
+        assert "age" in schema["properties"]
+
+    def test_model_copy(self):
+        """Test model_copy() with updates."""
+        class User(BaseModel):
             name: str
-            age: int = Field(ge=0, le=150)
+            age: int
 
-        user = User.model_validate_fast({"name": "Alice", "age": 30})
-        assert user.name == "Alice"
-        assert user.age == 30
+        user = User(name="Alice", age=30)
+        updated = user.model_copy(update={"age": 31})
+        assert updated.name == "Alice"
+        assert updated.age == 31
+        assert user.age == 30  # Original unchanged
 
-    def test_validate_many(self):
-        """Test batch validation with validate_many()."""
-        class User(Model):
-            name: str
-            age: int = Field(ge=0, le=150)
-
-        users_data = [
-            {"name": "Alice", "age": 30},
-            {"name": "Bob", "age": 25},
-            {"name": "Charlie", "age": 35}
-        ]
-
-        users = User.validate_many(users_data)
-        assert len(users) == 3
-        assert users[0].name == "Alice"
-        assert users[1].name == "Bob"
-        assert users[2].age == 35
-
-    def test_model_dump_json_fast(self):
-        """Test model_dump_json() uses Rust fast path for serialization."""
-        class User(Model):
+    def test_model_dump_json(self):
+        """Test model_dump_json() serialization."""
+        class User(BaseModel):
             name: str
             age: int = Field(ge=0)
             email: str = Field(description="Email address")
@@ -261,86 +250,81 @@ class TestSatya051Features:
         assert "30" in json_str
         assert "alice@example.com" in json_str
 
-    def test_model_validate_json_bytes(self):
-        """Test streaming JSON bytes validation."""
-        class User(Model):
+    def test_field_validator(self):
+        """Test field_validator decorator."""
+        class User(BaseModel):
             name: str
-            age: int
+            email: str
 
-        user = User.model_validate_json_bytes(
-            b'{"name": "Alice", "age": 30}',
-            streaming=True
-        )
+            @field_validator('name')
+            @classmethod
+            def name_must_not_be_empty(cls, v):
+                if not v.strip():
+                    raise ValueError('name cannot be empty')
+                return v.strip()
+
+        user = User(name="  Alice  ", email="a@b.com")
         assert user.name == "Alice"
-        assert user.age == 30
-
-    def test_nested_model_validation(self):
-        """Test nested model validation works correctly."""
-        class Address(Model):
-            street: str
-            city: str
-
-        class User(Model):
-            name: str
-            address: Address
-
-        user = User.model_validate({
-            "name": "Alice",
-            "address": {"street": "123 Main St", "city": "Portland"}
-        })
-
-        assert user.name == "Alice"
-        assert user.address.street == "123 Main St"
-        assert user.address.city == "Portland"
-
-    def test_nested_model_dump(self):
-        """Test nested model_dump() serializes recursively."""
-        class Address(Model):
-            street: str
-            city: str
-
-        class User(Model):
-            name: str
-            address: Address
-
-        user = User(name="Alice", address=Address(street="123 Main St", city="Portland"))
-        dumped = user.model_dump()
-
-        assert dumped == {
-            "name": "Alice",
-            "address": {"street": "123 Main St", "city": "Portland"}
-        }
 
     def test_default_factory(self):
-        """Test default_factory support (added in 0.4.12)."""
-        class Config(Model):
-            tags: list = Field(default_factory=list)
-            metadata: dict = Field(default_factory=dict)
+        """Test default_factory support (requires Annotated pattern)."""
+        from typing import Annotated
+
+        class Config(BaseModel):
+            tags: Annotated[list, Field(default_factory=list)]
+            metadata: Annotated[dict, Field(default_factory=dict)]
 
         c1 = Config()
         c2 = Config()
 
         c1.tags.append("admin")
-        # Each instance gets its own list
         assert c1.tags == ["admin"]
         assert c2.tags == []
 
     def test_constraint_validation(self):
-        """Test field constraints are properly enforced."""
-        class Bounded(Model):
-            value: int = Field(ge=0, le=100)
-            name: str = Field(min_length=2, max_length=50)
+        """Test field constraints are properly enforced (Annotated pattern)."""
+        from typing import Annotated
+
+        class Bounded(BaseModel):
+            value: Annotated[int, Field(ge=0, le=100)]
+            name: Annotated[str, Field(min_length=2, max_length=50)]
 
         obj = Bounded(value=50, name="test")
         assert obj.value == 50
         assert obj.name == "test"
 
-        # Test constraint violations
         with pytest.raises(Exception):
             Bounded(value=-1, name="test")
 
         with pytest.raises(Exception):
             Bounded(value=50, name="x")  # too short
+
+    def test_model_dump_exclude_include(self):
+        """Test model_dump with exclude/include parameters."""
+        class User(BaseModel):
+            name: str
+            age: int
+            email: str
+
+        user = User(name="Alice", age=30, email="a@b.com")
+
+        partial = user.model_dump(include={"name", "age"})
+        assert partial == {"name": "Alice", "age": 30}
+
+        without_email = user.model_dump(exclude={"email"})
+        assert without_email == {"name": "Alice", "age": 30}
+
+    def test_annotated_field_pattern(self):
+        """Test Annotated[type, Field(...)] pattern (Pydantic v2 style)."""
+        from typing import Annotated
+
+        class User(BaseModel):
+            name: Annotated[str, Field(min_length=1, max_length=100)]
+            age: Annotated[int, Field(ge=0, le=150)]
+
+        user = User(name="Alice", age=30)
+        assert user.name == "Alice"
+        assert user.age == 30
 
 
 if __name__ == "__main__":

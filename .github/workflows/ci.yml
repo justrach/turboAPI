@@ -81,7 +81,7 @@ jobs:
         run: maturin build --release -i python --out dist && pip install dist/*.whl
 
       - name: Install satya
-        run: pip install "satya>=0.5.1"
+        run: pip install "dhi>=1.1.0"
 
       - name: Run tests
         working-directory: /tmp
@@ -119,7 +119,7 @@ jobs:
         run: maturin build --release -i python --out dist && pip install dist/*.whl
 
       - name: Install satya
-        run: pip install "satya>=0.5.1"
+        run: pip install "dhi>=1.1.0"
 
       - name: Run tests (free-threaded)
         working-directory: /tmp
