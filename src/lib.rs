@@ -10,6 +10,8 @@ pub mod http2;
 pub mod websocket;
 pub mod micro_bench;
 pub mod python_worker;
+pub mod simd_json;
+pub mod simd_parse;
 mod request;
 mod response;
 
