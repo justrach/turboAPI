@@ -17,7 +17,7 @@ class TurboRequest(Model):
     headers: dict[str, str] = Field(default={}, description="HTTP headers")
     path_params: dict[str, str] = Field(default={}, description="Path parameters")
     query_params: dict[str, str] = Field(default={}, description="Query parameters")
-    body: bytes | None = Field(default=None, description="Request body")
+    body: bytes | None = Field(default=None, required=False, description="Request body")
 
     def get_header(self, name: str, default: str | None = None) -> str | None:
         """Get header value (case-insensitive)."""
@@ -67,32 +67,14 @@ class TurboResponse(Model):
     headers: dict[str, str] = Field(default={}, description="HTTP headers")
     content: Any = Field(default="", description="Response content")
 
-    def __init__(self, **data):
-        # Handle content serialization before validation
-        if 'content' in data:
-            content = data['content']
-            if isinstance(content, dict):
-                # Serialize dict to JSON
-                data['content'] = json.dumps(content)
-                if 'headers' not in data:
-                    data['headers'] = {}
-                data['headers']['content-type'] = 'application/json'
-            elif isinstance(content, (str, int, float, bool)):
-                # Keep as-is, will be converted to string
-                pass
-            elif isinstance(content, bytes):
-                # Convert bytes to string for storage
-                data['content'] = content.decode('utf-8')
-            else:
-                # Convert other types to string
-                data['content'] = str(content)
-
-        super().__init__(**data)
-
     @property
     def body(self) -> bytes:
         """Get response body as bytes."""
-        if isinstance(self.content, str):
+        if isinstance(self.content, dict):
+            return json.dumps(self.content).encode('utf-8')
+        elif isinstance(self.content, (list, tuple)):
+            return json.dumps(self.content).encode('utf-8')
+        elif isinstance(self.content, str):
             return self.content.encode('utf-8')
         elif isinstance(self.content, bytes):
             return self.content
