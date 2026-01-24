@@ -80,7 +80,7 @@ jobs:
       - name: Build and install
         run: maturin build --release -i python --out dist && pip install dist/*.whl
 
-      - name: Install satya
+      - name: Install dhi
         run: pip install "dhi>=1.1.0"
 
       - name: Run tests
@@ -118,7 +118,7 @@ jobs:
       - name: Build and install (free-threaded)
         run: maturin build --release -i python --out dist && pip install dist/*.whl
 
-      - name: Install satya
+      - name: Install dhi
         run: pip install "dhi>=1.1.0"
 
       - name: Run tests (free-threaded)

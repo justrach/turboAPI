@@ -31,7 +31,6 @@ class TurboRequest(BaseModel):
         """Parse request body as JSON."""
         if not self.body:
             return None
-        # Use Satya's streaming JSON parsing for performance
         return json.loads(self.body.decode('utf-8'))
 
     def validate_json(self, model_class: type) -> Any:
