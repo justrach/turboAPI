@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "turboapi"
-version = "0.4.15"
+version = "0.4.16"
 description = "Revolutionary Python web framework with FastAPI syntax and 12x performance - Pure Rust Async Runtime (Python 3.13+ free-threading required)"
 requires-python = ">=3.13"
 license = {text = "MIT"}
@@ -12,7 +12,7 @@ authors = [
     {name = "Rach Pradhan", email = "rach@turboapi.dev"}
 ]
 dependencies = [
-    "satya>=0.4.0",
+    "satya>=0.5.1",
 ]
 keywords = ["web", "framework", "http", "server", "rust", "performance", "free-threading", "no-gil", "fastapi-compatible"]
 classifiers = [
