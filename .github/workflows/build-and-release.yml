@@ -1,377 +1,199 @@
-name: 🚀 Build and Release TurboAPI
+name: Build & Publish
 
 on:
   push:
-    tags:
-      - 'v*'
-    branches:
-      - main
-    paths:
-      - 'python/pyproject.toml'
-      - 'Cargo.toml'
+    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version to release (e.g., 2.0.1)'
-        required: true
-      test_pypi:
-        description: 'Upload to Test PyPI instead of PyPI'
-        type: boolean
-        default: false
+
+permissions:
+  contents: write
+  id-token: write
 
 jobs:
-  # Build wheels for Linux, macOS, and Windows
-  build-wheels:
-    name: 🏗️ Build wheels - ${{ matrix.platform }} - Python ${{ matrix.python }}
-    runs-on: ${{ matrix.os }}
+  check-version:
+    name: Check if version is new
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check PyPI for existing version
+        id: check
+        run: |
+          VERSION=$(grep -m1 'version = "' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+            echo "Tag push detected, will publish v$VERSION"
+            exit 0
+          fi
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/turboapi/$VERSION/json")
+          if [ "$HTTP_STATUS" = "404" ]; then
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+            echo "Version $VERSION not on PyPI, will publish"
+          else
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+            echo "Version $VERSION already on PyPI, skipping"
+          fi
+
+  linux:
+    runs-on: ubuntu-latest
+    needs: [check-version]
+    if: needs.check-version.outputs.should_publish == 'true'
     strategy:
       matrix:
-        include:
-          # Linux x86_64 - Python 3.13, 3.13t, 3.14
-          - os: ubuntu-latest
-            target: x86_64
-            platform: linux
-            python: '3.13'
-          - os: ubuntu-latest
-            target: x86_64
-            platform: linux-freethreading
-            python: '3.13t'
-          - os: ubuntu-latest
-            target: x86_64
-            platform: linux-py314
-            python: '3.14.0-rc.3'
-          
-          # Windows x64 - Python 3.13, 3.13t, 3.14
-          - os: windows-latest
-            target: x64
-            platform: windows
-            python: '3.13'
-          - os: windows-latest
-            target: x64
-            platform: windows-freethreading
-            python: '3.13t'
-          - os: windows-latest
-            target: x64
-            platform: windows-py314
-            python: '3.14.0-rc.3'
-          
-          # macOS Intel - Python 3.13, 3.13t, 3.14
-          - os: macos-13
-            target: x86_64
-            platform: macos-intel
-            python: '3.13'
-          - os: macos-13
-            target: x86_64
-            platform: macos-intel-freethreading
-            python: '3.13t'
-          - os: macos-13
-            target: x86_64
-            platform: macos-intel-py314
-            python: '3.14.0-rc.3'
-          
-          # macOS Apple Silicon - Python 3.13, 3.13t, 3.14
-          - os: macos-14
-            target: aarch64
-            platform: macos-arm
-            python: '3.13'
-          - os: macos-14
-            target: aarch64
-            platform: macos-arm-freethreading
-            python: '3.13t'
-          - os: macos-14
-            target: aarch64
-            platform: macos-arm-py314
-            python: '3.14.0-rc.3'
-
+        target: [x86_64, aarch64]
+      fail-fast: false
     steps:
-      - name: 📥 Checkout Code
-        uses: actions/checkout@v4
-
-      - name: 🐍 Set up Python ${{ matrix.python }}
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
-          allow-prereleases: true
-
-      - name: 🦀 Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: 🔧 Install system dependencies (Linux)
-        if: startsWith(matrix.platform, 'linux')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
-
-      - name: 🏗️ Build wheels
+          python-version: |
+            3.13
+      - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out ../wheelhouse --strip
+          args: --release --out dist --find-interpreter
           sccache: 'true'
-          manylinux: '2014'
-          working-directory: python
-          before-script-linux: |
-            # Install OpenSSL development libraries in the manylinux container
-            yum update -y
-            yum install -y openssl-devel pkgconfig
-
-      - name: 📤 Upload wheels as artifacts
-        uses: actions/upload-artifact@v4
+          manylinux: auto
+      - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.platform }}
-          path: ./wheelhouse/*.whl
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
 
-# ARM64 Linux wheels removed due to Docker issues - use basic maturin only
-
-  # Build source distribution
-  build-sdist:
-    name: 📦 Build source distribution
-    runs-on: ubuntu-latest
+  windows:
+    runs-on: windows-latest
+    needs: [check-version]
+    if: needs.check-version.outputs.should_publish == 'true'
+    strategy:
+      matrix:
+        target: [x64]
+      fail-fast: false
     steps:
-      - name: 📥 Checkout Code
-        uses: actions/checkout@v4
-
-      - name: 🐍 Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: |
+            3.13
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          args: --release --out dist --find-interpreter
+          sccache: 'true'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.target }}
+          path: dist
 
-      - name: 🦀 Install Rust
-        uses: dtolnay/rust-toolchain@stable
+  macos:
+    runs-on: macos-latest
+    needs: [check-version]
+    if: needs.check-version.outputs.should_publish == 'true'
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.13
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
+          sccache: 'true'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
 
-      - name: 📦 Build source distribution
+  sdist:
+    runs-on: ubuntu-latest
+    needs: [check-version]
+    if: needs.check-version.outputs.should_publish == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
-          args: --out ../dist
-          working-directory: python
-
-      - name: 📤 Upload sdist as artifact
-        uses: actions/upload-artifact@v4
+          args: --out dist
+      - uses: actions/upload-artifact@v4
         with:
           name: sdist
-          path: dist/*.tar.gz
+          path: dist
 
-  # Test installation from wheels
-  test-wheels:
-    name: 🧪 Test wheel installation
-    needs: [build-wheels]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ['3.13']
-
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [linux, windows, macos, sdist]
     steps:
-      - name: 📥 Download wheels
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          pattern: wheels-*
-          path: wheelhouse
+          pattern: '{wheels-*,sdist}'
+          path: dist
           merge-multiple: true
-
-      - name: 🐍 Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: 🔍 Install and test wheel
-        run: |
-          python -m pip install --upgrade pip
-          
-          # Find and install the appropriate wheel for this platform
-          python -c "
-          import os, sys, platform
-          
-          # Get platform info
-          if sys.platform.startswith('win'):
-              plat_name = 'win_amd64'
-          elif sys.platform.startswith('darwin'):
-              if platform.machine() == 'arm64':
-                  plat_name = 'macosx_11_0_arm64'
-              else:
-                  plat_name = 'macosx'
-          else:
-              plat_name = 'linux_x86_64'
-          
-          # Find compatible wheel
-          wheels = [f for f in os.listdir('wheelhouse') if f.endswith('.whl')]
-          compatible_wheel = None
-          
-          for wheel in wheels:
-              if 'cp313' in wheel and any(p in wheel for p in [plat_name, 'linux_x86_64', 'win_amd64', 'macosx']):
-                  compatible_wheel = wheel
-                  break
-          
-          if not compatible_wheel and wheels:
-              compatible_wheel = wheels[0]  # Fallback to first wheel
-          
-          if compatible_wheel:
-              print(f'Installing: {compatible_wheel}')
-              os.system(f'pip install wheelhouse/{compatible_wheel}')
-          else:
-              print('No compatible wheel found')
-              print('Available wheels:', wheels)
-              exit(1)
-          "
-          
-          # Test the installation
-          python -c "
-          try:
-              print('Testing TurboAPI import...')
-              import turboapi
-              print('✅ TurboAPI imported successfully')
-              
-              # Test basic functionality
-              from turboapi import TurboAPI
-              app = TurboAPI(title='Test App', version='1.0.0')
-              print('✅ TurboAPI app created successfully')
-              
-              # Test decorator
-              @app.get('/test')
-              def test_endpoint():
-                  return {'status': 'ok'}
-              
-              print('✅ Route decorator works')
-              print('✅ All tests passed!')
-              
-          except Exception as e:
-              print(f'❌ Test failed: {e}')
-              import traceback
-              traceback.print_exc()
-              exit(1)
-          "
-
-  # Create GitHub release
-  create-release:
-    name: 📋 Create GitHub Release
-    needs: [build-wheels, build-sdist, test-wheels]
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-
-    steps:
-      - name: 📥 Checkout Code
-        uses: actions/checkout@v4
-
-      - name: 📥 Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-
-      - name: 📁 Organize artifacts
-        run: |
-          mkdir -p final-dist
-          find dist -name "*.whl" -exec cp {} final-dist/ \;
-          find dist -name "*.tar.gz" -exec cp {} final-dist/ \;
-          ls -la final-dist/
-
-      - name: 📋 Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: final-dist/*
-          generate_release_notes: true
-          body: |
-            ## 🚀 TurboAPI Release ${{ github.ref_name }}
-            
-            **Revolutionary Python web framework with FastAPI syntax and 5-10x performance!**
-            
-            ### 🎯 Key Features
-            - ⚡ **5-10x faster** than FastAPI (160K+ RPS achieved!)
-            - 🧵 **True parallelism** with Python 3.13 free-threading
-            - 🦀 **Rust-powered** HTTP core with zero Python middleware overhead
-            - 📝 **FastAPI-compatible** syntax - drop-in replacement
-            - 🔥 **Zero-copy** architecture for maximum performance
-            
-            ### 📦 Pre-compiled wheels available for:
-            - 🐍 **Python 3.13+** (free-threading required)
-            - 🖥️ Linux (x86_64, ARM64)
-            - 🍎 macOS (Intel & Apple Silicon)
-            - 🪟 Windows (x64)
-            
-            ### 📥 Installation
-            ```bash
-            pip install turboapi==${{ github.ref_name }}
-            ```
-            
-            **No Rust compiler required!** 🎊
-            
-            ### 🚀 Quick Start
-            ```python
-            from turboapi import TurboAPI
-            
-            app = TurboAPI(title="My API", version="1.0.0")
-            
-            @app.get("/")
-            def read_root():
-                return {"message": "Hello from TurboAPI!"}
-            
-            if __name__ == "__main__":
-                app.run(host="127.0.0.1", port=8000)
-            ```
-            
-            ### 📊 Performance
-            Recent benchmarks show TurboAPI achieving:
-            - **160,743 RPS** under heavy load (200 connections)
-            - **22x faster** than FastAPI in the same conditions
-            - **Sub-millisecond** P99 latency
-            
-            See the full changelog and documentation for more details.
-
-  # Publish to PyPI
-  publish-pypi:
-    name: 🚀 Publish to PyPI
-    needs: [build-wheels, build-sdist, test-wheels]
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.version
-
-    steps:
-      - name: 📥 Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-
-      - name: 📁 Organize artifacts for PyPI
-        run: |
-          mkdir -p pypi-dist
-          find dist -name "*.whl" -exec cp {} pypi-dist/ \;
-          find dist -name "*.tar.gz" -exec cp {} pypi-dist/ \;
-          ls -la pypi-dist/
-
-      - name: 🚀 Publish to Test PyPI
-        if: github.event.inputs.test_pypi == 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
-          repository-url: https://test.pypi.org/legacy/
-          packages-dir: pypi-dist/
-
-      - name: 🚀 Publish to PyPI
-        if: startsWith(github.ref, 'refs/tags/') && github.event.inputs.test_pypi != 'true'
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
-          packages-dir: pypi-dist/
+          skip-existing: true
 
-  # Notify on completion
-  notify:
-    name: 📢 Notify Release Complete
-    needs: [create-release, publish-pypi]
+  release:
+    name: Create GitHub Release
     runs-on: ubuntu-latest
-    if: always() && (startsWith(github.ref, 'refs/tags/') || github.event.inputs.version)
-
+    needs: [check-version, publish]
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - name: 📢 Success Notification
-        if: needs.create-release.result == 'success' && needs.publish-pypi.result == 'success'
-        run: |
-          echo "🎉 TurboAPI release completed successfully!"
-          echo "✅ GitHub release created"
-          echo "✅ Published to PyPI"
-          echo "🚀 Users can now install with: pip install turboapi"
-          echo "⚡ Ready to deliver 5-10x FastAPI performance!"
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '{wheels-*,sdist}'
+          path: dist
+          merge-multiple: true
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
 
-      - name: ⚠️ Failure Notification
-        if: needs.create-release.result == 'failure' || needs.publish-pypi.result == 'failure'
+  tag-and-release:
+    name: Tag new version
+    runs-on: ubuntu-latest
+    needs: [check-version, publish]
+    if: github.ref == 'refs/heads/main' && needs.check-version.outputs.should_publish == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Configure git
         run: |
-          echo "❌ TurboAPI release failed!"
-          echo "Check the logs above for details"
-          exit 1
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+      - name: Create tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '{wheels-*,sdist}'
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          files: dist/*
+          generate_release_notes: true
