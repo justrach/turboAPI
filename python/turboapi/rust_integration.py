@@ -1,15 +1,76 @@
 """
 TurboAPI Direct Rust Integration
-Connects FastAPI-compatible routing directly to Rust HTTP core with zero Python overhead
+Connects FastAPI-compatible routing directly to Rust HTTP core with zero Python overhead.
+Phase 3: Handler classification for fast dispatch (bypass Python enhanced wrapper).
 """
 
 import inspect
 import json
-from typing import Any
+from typing import Any, get_origin
+
+try:
+    from satya import Model
+except ImportError:
+    # Satya not installed - Model-based handlers won't get special treatment
+    Model = None
 
 from .main_app import TurboAPI
 from .request_handler import create_enhanced_handler, ResponseHandler
 from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
+
+
+def classify_handler(handler, route) -> tuple[str, dict[str, str]]:
+    """Classify a handler for fast dispatch (Phase 3).
+
+    Returns:
+        (handler_type, param_types) where:
+        - handler_type: "simple_sync" | "body_sync" | "enhanced"
+        - param_types: dict mapping param_name -> type hint string
+    """
+    if inspect.iscoroutinefunction(handler):
+        return "enhanced", {}
+
+    sig = inspect.signature(handler)
+    param_types = {}
+    needs_body = False
+    needs_model = False
+
+    for param_name, param in sig.parameters.items():
+        annotation = param.annotation
+
+        try:
+            if Model is not None and inspect.isclass(annotation) and issubclass(annotation, Model):
+                needs_model = True
+                break
+        except TypeError:
+            pass
+
+        if annotation in (dict, list, bytes):
+            needs_body = True
+
+        origin = get_origin(annotation)
+        if origin in (dict, list):
+            needs_body = True
+
+        if annotation is int:
+            param_types[param_name] = "int"
+        elif annotation is float:
+            param_types[param_name] = "float"
+        elif annotation is bool:
+            param_types[param_name] = "bool"
+        elif annotation is str or annotation is inspect.Parameter.empty:
+            param_types[param_name] = "str"
+
+    if needs_model:
+        return "enhanced", {}
+
+    method = route.method.value.upper() if hasattr(route, "method") else "GET"
+    if method in ("POST", "PUT", "PATCH", "DELETE"):
+        if needs_body:
+            return "enhanced", param_types
+        return "body_sync", param_types
+
+    return "simple_sync", param_types
 
 try:
     from turboapi import turbonet
@@ -116,29 +177,41 @@ class RustIntegratedTurboAPI(TurboAPI):
             return False
 
     def _register_routes_with_rust(self):
-        """Register all Python routes with the Rust HTTP server."""
+        """Register all Python routes with the Rust HTTP server.
+        Phase 3: Uses handler classification for fast dispatch.
+        """
         for route in self.registry.get_routes():
             try:
-                # Create route key
                 route_key = f"{route.method.value}:{route.path}"
-
-                # Store Python handler
                 self.route_handlers[route_key] = route.handler
 
-                # Create enhanced handler with automatic body parsing
-                enhanced_handler = create_enhanced_handler(route.handler, route)
-                
-                # For now, just register the original handler
-                # TODO: Implement request data passing from Rust to enable enhanced handler
-                # The Rust server currently calls handlers with call0() (no arguments)
-                # We need to modify the Rust server to pass request data
-                self.rust_server.add_route(
-                    route.method.value,
-                    route.path,
-                    enhanced_handler  # Register enhanced handler directly
-                )
+                # Phase 3: Classify handler for fast dispatch
+                handler_type, param_types = classify_handler(route.handler, route)
 
-                print(f"{CHECK_MARK} Registered {route.method.value} {route.path} with Rust server")
+                if handler_type in ("simple_sync", "body_sync"):
+                    # FAST PATH: Register with metadata for Rust-side parsing
+                    # Enhanced handler is fallback, original handler is for direct call
+                    enhanced_handler = create_enhanced_handler(route.handler, route)
+                    param_types_json = json.dumps(param_types)
+
+                    self.rust_server.add_route_fast(
+                        route.method.value,
+                        route.path,
+                        enhanced_handler,  # Fallback wrapper
+                        handler_type,
+                        param_types_json,
+                        route.handler,  # Original unwrapped handler
+                    )
+                    print(f"{CHECK_MARK} [{handler_type}] {route.method.value} {route.path}")
+                else:
+                    # ENHANCED PATH: Full Python wrapper needed
+                    enhanced_handler = create_enhanced_handler(route.handler, route)
+                    self.rust_server.add_route(
+                        route.method.value,
+                        route.path,
+                        enhanced_handler,
+                    )
+                    print(f"{CHECK_MARK} [enhanced] {route.method.value} {route.path}")
 
             except Exception as e:
                 print(f"{CROSS_MARK} Failed to register route {route.method.value} {route.path}: {e}")

@@ -14,6 +14,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use crate::router::RadixRouter;
+use crate::simd_json;
+use crate::simd_parse;
 use std::sync::OnceLock;
 use std::collections::HashMap as StdHashMap;
 use crate::zerocopy::ZeroCopyBufferPool;
@@ -22,11 +24,26 @@ use std::thread;
 
 type Handler = Arc<PyObject>;
 
-// MULTI-WORKER: Metadata struct to cache is_async check
+/// Handler dispatch type for fast-path routing (Phase 3: eliminate Python wrapper)
+#[derive(Clone, Debug, PartialEq)]
+enum HandlerType {
+    /// Simple sync: no body, just path/query params. Rust parses + serializes everything.
+    SimpleSyncFast,
+    /// Needs body parsing: Rust parses body with simd-json, calls handler directly.
+    BodySyncFast,
+    /// Needs full Python enhanced wrapper (Satya model validation, async, etc.)
+    Enhanced,
+}
+
+// Metadata struct with fast dispatch info
 #[derive(Clone)]
 struct HandlerMetadata {
     handler: Handler,
-    is_async: bool, // Cached at registration time!
+    is_async: bool,
+    handler_type: HandlerType,
+    route_pattern: String,
+    param_types: HashMap<String, String>, // param_name -> type ("int", "str", "float")
+    original_handler: Option<Handler>, // Unwrapped handler for fast dispatch
 }
 
 // MULTI-WORKER: Request structure for worker communication
@@ -126,11 +143,11 @@ impl TurboServer {
         }
     }
 
-    /// Register a route handler with radix trie routing
+    /// Register a route handler with radix trie routing (legacy: uses Enhanced wrapper)
     pub fn add_route(&self, method: String, path: String, handler: PyObject) -> PyResult<()> {
         let route_key = format!("{} {}", method.to_uppercase(), path);
-        
-        // HYBRID: Check if handler is async ONCE at registration time!
+
+        // Check if handler is async ONCE at registration time
         let is_async = Python::with_gil(|py| {
             let inspect = py.import("inspect")?;
             inspect
@@ -138,30 +155,93 @@ impl TurboServer {
                 .call1((&handler,))?
                 .extract::<bool>()
         })?;
-        
+
         let handlers = Arc::clone(&self.handlers);
         let router = Arc::clone(&self.router);
-        
+        let path_clone = path.clone();
+
         Python::with_gil(|py| {
             py.allow_threads(|| {
-                // Use a blocking runtime for this operation
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
-                    // Store the handler with metadata (write lock)
                     let mut handlers_guard = handlers.write().await;
                     handlers_guard.insert(route_key.clone(), HandlerMetadata {
                         handler: Arc::new(handler),
                         is_async,
+                        handler_type: HandlerType::Enhanced,
+                        route_pattern: path_clone,
+                        param_types: HashMap::new(),
+                        original_handler: None,
                     });
-                    drop(handlers_guard); // Release write lock immediately
-            
-                    // Add to router for path parameter extraction
+                    drop(handlers_guard);
+
                     let mut router_guard = router.write().await;
                     let _ = router_guard.add_route(&method.to_uppercase(), &path, route_key.clone());
                 });
             })
         });
-        
+
+        Ok(())
+    }
+
+    /// Register a route with fast dispatch metadata (Phase 3: bypass Python wrapper).
+    ///
+    /// handler_type: "simple_sync" | "body_sync" | "enhanced"
+    /// param_types_json: JSON string of {"param_name": "type_hint", ...}
+    /// original_handler: The unwrapped Python function (no enhanced wrapper)
+    pub fn add_route_fast(
+        &self,
+        method: String,
+        path: String,
+        handler: PyObject,
+        handler_type: String,
+        param_types_json: String,
+        original_handler: PyObject,
+    ) -> PyResult<()> {
+        let route_key = format!("{} {}", method.to_uppercase(), path);
+
+        let ht = match handler_type.as_str() {
+            "simple_sync" => HandlerType::SimpleSyncFast,
+            "body_sync" => HandlerType::BodySyncFast,
+            _ => HandlerType::Enhanced,
+        };
+
+        // Parse param types from JSON
+        let param_types: HashMap<String, String> = serde_json::from_str(&param_types_json)
+            .unwrap_or_default();
+
+        let is_async = ht == HandlerType::Enhanced && Python::with_gil(|py| {
+            let inspect = py.import("inspect").ok()?;
+            inspect.getattr("iscoroutinefunction").ok()?
+                .call1((&handler,)).ok()?
+                .extract::<bool>().ok()
+        }).unwrap_or(false);
+
+        let handlers = Arc::clone(&self.handlers);
+        let router = Arc::clone(&self.router);
+        let path_clone = path.clone();
+
+        Python::with_gil(|py| {
+            py.allow_threads(|| {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    let mut handlers_guard = handlers.write().await;
+                    handlers_guard.insert(route_key.clone(), HandlerMetadata {
+                        handler: Arc::new(handler),
+                        is_async,
+                        handler_type: ht,
+                        route_pattern: path_clone,
+                        param_types,
+                        original_handler: Some(Arc::new(original_handler)),
+                    });
+                    drop(handlers_guard);
+
+                    let mut router_guard = router.write().await;
+                    let _ = router_guard.add_route(&method.to_uppercase(), &path, route_key.clone());
+                });
+            })
+        });
+
         Ok(())
     }
 
@@ -429,41 +509,70 @@ async fn handle_request(
     
     // Process handler if found
     if let Some(metadata) = metadata {
-        // HYBRID APPROACH: Direct call for sync, shard for async!
-        let response_result = if metadata.is_async {
-            // ASYNC PATH: Hash-based shard selection for cache locality!
-            let shard_id = hash_route_key(&route_key) % loop_shards.len();
-            let shard = &loop_shards[shard_id];
-            let shard_tx = &shard.tx;
-            
-            let (resp_tx, resp_rx) = oneshot::channel();
-            let python_req = PythonRequest {
-                handler: metadata.handler.clone(),
-                is_async: metadata.is_async, // Use cached is_async!
-                method: method_str.to_string(),
-                path: path.to_string(),
-                query_string: query_string.to_string(),
-                body: body_bytes.clone(),
-                response_tx: resp_tx,
-            };
-            
-            match shard_tx.send(python_req).await {
-                Ok(_) => {
-                    match resp_rx.await {
-                        Ok(result) => result,
-                        Err(_) => Err("Loop shard died".to_string()),
-                    }
-                }
-                Err(_) => {
-                    return Ok(Response::builder()
-                        .status(503)
-                        .body(Full::new(Bytes::from(r#"{"error": "Service Unavailable", "message": "Server overloaded"}"#)))
-                        .unwrap());
+        // PHASE 3: Fast dispatch based on handler type classification
+        let response_result = match &metadata.handler_type {
+            // FAST PATH: Simple sync handlers (GET with path/query params only)
+            // Rust parses everything, calls original handler, serializes response with SIMD
+            HandlerType::SimpleSyncFast => {
+                if let Some(ref orig) = metadata.original_handler {
+                    call_python_handler_fast(
+                        orig, &metadata.route_pattern, path, query_string,
+                        &metadata.param_types,
+                    )
+                } else {
+                    call_python_handler_sync_direct(&metadata.handler, method_str, path, query_string, &body_bytes, &headers_map)
                 }
             }
-        } else {
-            // SYNC PATH: Direct Python call (FAST!)
-            call_python_handler_sync_direct(&metadata.handler, method_str, path, query_string, &body_bytes, &headers_map)
+            // FAST PATH: Body sync handlers (POST/PUT with JSON body)
+            // Rust parses body with simd-json, calls original handler, serializes with SIMD
+            HandlerType::BodySyncFast => {
+                if let Some(ref orig) = metadata.original_handler {
+                    call_python_handler_fast_body(
+                        orig, &metadata.route_pattern, path, query_string,
+                        &body_bytes, &metadata.param_types,
+                    )
+                } else {
+                    call_python_handler_sync_direct(&metadata.handler, method_str, path, query_string, &body_bytes, &headers_map)
+                }
+            }
+            // ENHANCED PATH: Full Python wrapper (async, Satya models, etc.)
+            HandlerType::Enhanced => {
+                if metadata.is_async {
+                    // ASYNC: shard dispatch
+                    let shard_id = hash_route_key(&route_key) % loop_shards.len();
+                    let shard = &loop_shards[shard_id];
+                    let shard_tx = &shard.tx;
+
+                    let (resp_tx, resp_rx) = oneshot::channel();
+                    let python_req = PythonRequest {
+                        handler: metadata.handler.clone(),
+                        is_async: true,
+                        method: method_str.to_string(),
+                        path: path.to_string(),
+                        query_string: query_string.to_string(),
+                        body: body_bytes.clone(),
+                        response_tx: resp_tx,
+                    };
+
+                    match shard_tx.send(python_req).await {
+                        Ok(_) => {
+                            match resp_rx.await {
+                                Ok(result) => result,
+                                Err(_) => Err("Loop shard died".to_string()),
+                            }
+                        }
+                        Err(_) => {
+                            return Ok(Response::builder()
+                                .status(503)
+                                .body(Full::new(Bytes::from(r#"{"error": "Service Unavailable", "message": "Server overloaded"}"#)))
+                                .unwrap());
+                        }
+                    }
+                } else {
+                    // SYNC Enhanced: call with Python wrapper
+                    call_python_handler_sync_direct(&metadata.handler, method_str, path, query_string, &body_bytes, &headers_map)
+                }
+            }
         };
         
         match response_result {
@@ -610,11 +719,12 @@ pub fn configure_rate_limiting(enabled: bool, requests_per_minute: Option<u32>) 
     let _ = RATE_LIMIT_CONFIG.set(config);
 }
 
-/// PHASE 2: Fast Python handler call with cached modules and optimized object creation
-fn call_python_handler_fast(
-    handler: Handler, 
-    method_str: &str, 
-    path: &str, 
+/// Legacy fast handler call (unused, kept for reference)
+#[allow(dead_code)]
+fn call_python_handler_fast_legacy(
+    handler: Handler,
+    method_str: &str,
+    path: &str,
     query_string: &str,
     body: &Bytes
 ) -> Result<String, pyo3::PyErr> {
@@ -911,15 +1021,46 @@ async fn handle_request_tokio(
     let metadata = handlers_guard.get(&route_key).cloned();
     drop(handlers_guard);
     
+    // Extract headers for Enhanced path
+    let mut headers_map = std::collections::HashMap::new();
+    for (name, value) in parts.headers.iter() {
+        if let Ok(value_str) = value.to_str() {
+            headers_map.insert(name.as_str().to_string(), value_str.to_string());
+        }
+    }
+
     // Process handler if found
     if let Some(metadata) = metadata {
-        // PHASE D: Spawn Tokio task for request processing
-        // Tokio's work-stealing scheduler handles distribution across cores!
-        let response_result = process_request_tokio(
-            metadata.handler.clone(),
-            metadata.is_async,
-            &tokio_runtime,
-        ).await;
+        // PHASE 3: Fast dispatch based on handler type
+        let response_result = match &metadata.handler_type {
+            HandlerType::SimpleSyncFast => {
+                if let Some(ref orig) = metadata.original_handler {
+                    call_python_handler_fast(
+                        orig, &metadata.route_pattern, path, query_string,
+                        &metadata.param_types,
+                    )
+                } else {
+                    call_python_handler_sync_direct(&metadata.handler, method_str, path, query_string, &body_bytes, &headers_map)
+                }
+            }
+            HandlerType::BodySyncFast => {
+                if let Some(ref orig) = metadata.original_handler {
+                    call_python_handler_fast_body(
+                        orig, &metadata.route_pattern, path, query_string,
+                        &body_bytes, &metadata.param_types,
+                    )
+                } else {
+                    call_python_handler_sync_direct(&metadata.handler, method_str, path, query_string, &body_bytes, &headers_map)
+                }
+            }
+            HandlerType::Enhanced => {
+                process_request_tokio(
+                    metadata.handler.clone(),
+                    metadata.is_async,
+                    &tokio_runtime,
+                ).await
+            }
+        };
         
         match response_result {
             Ok(json_response) => {
@@ -1178,15 +1319,110 @@ fn call_python_handler_sync_direct(
             result
         };
         
-        // Extract or serialize content
+        // PHASE 1: SIMD JSON serialization (eliminates json.dumps FFI!)
         match content.extract::<String>(py) {
             Ok(json_str) => Ok(json_str),
             Err(_) => {
-                let json_dumps = json_module.getattr(py, "dumps").unwrap();
-                let json_str = json_dumps.call1(py, (content,))
-                    .map_err(|e| format!("JSON error: {}", e))?;
-                json_str.extract::<String>(py)
-                    .map_err(|e| format!("Extract error: {}", e))
+                // Use Rust SIMD serializer instead of Python json.dumps
+                let bound = content.bind(py);
+                simd_json::serialize_pyobject_to_json(py, bound)
+                    .map_err(|e| format!("SIMD JSON error: {}", e))
+            }
+        }
+    })
+}
+
+// ============================================================================
+// PHASE 3: FAST PATH - Direct handler calls with Rust-side parsing
+// ============================================================================
+
+/// FAST PATH for simple sync handlers (GET with path/query params only).
+/// Rust parses query string and path params, calls Python handler directly,
+/// then serializes the response with SIMD JSON — single FFI crossing!
+fn call_python_handler_fast(
+    handler: &PyObject,
+    route_pattern: &str,
+    path: &str,
+    query_string: &str,
+    param_types: &HashMap<String, String>,
+) -> Result<String, String> {
+    Python::attach(|py| {
+        let kwargs = PyDict::new(py);
+
+        // Parse path params in Rust (SIMD-accelerated)
+        simd_parse::set_path_params_into_pydict(
+            py, route_pattern, path, &kwargs, param_types,
+        ).map_err(|e| format!("Path param error: {}", e))?;
+
+        // Parse query string in Rust (SIMD-accelerated)
+        simd_parse::parse_query_into_pydict(
+            py, query_string, &kwargs, param_types,
+        ).map_err(|e| format!("Query param error: {}", e))?;
+
+        // Single FFI call: Python handler with pre-parsed kwargs
+        let result = handler.call(py, (), Some(&kwargs))
+            .map_err(|e| format!("Handler error: {}", e))?;
+
+        // SIMD JSON serialization of result (no json.dumps FFI!)
+        match result.extract::<String>(py) {
+            Ok(s) => Ok(s),
+            Err(_) => {
+                let bound = result.bind(py);
+                simd_json::serialize_pyobject_to_json(py, bound)
+                    .map_err(|e| format!("SIMD JSON error: {}", e))
+            }
+        }
+    })
+}
+
+/// FAST PATH for body sync handlers (POST/PUT with JSON body).
+/// Rust parses body with simd-json, path/query params, calls handler directly,
+/// then serializes response with SIMD JSON — single FFI crossing!
+fn call_python_handler_fast_body(
+    handler: &PyObject,
+    route_pattern: &str,
+    path: &str,
+    query_string: &str,
+    body_bytes: &Bytes,
+    param_types: &HashMap<String, String>,
+) -> Result<String, String> {
+    Python::attach(|py| {
+        let kwargs = PyDict::new(py);
+
+        // Parse path params in Rust
+        simd_parse::set_path_params_into_pydict(
+            py, route_pattern, path, &kwargs, param_types,
+        ).map_err(|e| format!("Path param error: {}", e))?;
+
+        // Parse query string in Rust
+        simd_parse::parse_query_into_pydict(
+            py, query_string, &kwargs, param_types,
+        ).map_err(|e| format!("Query param error: {}", e))?;
+
+        // Parse JSON body with simd-json (SIMD-accelerated!)
+        if !body_bytes.is_empty() {
+            let parsed = simd_parse::parse_json_body_into_pydict(
+                py, body_bytes.as_ref(), &kwargs, param_types,
+            ).map_err(|e| format!("Body parse error: {}", e))?;
+
+            if !parsed {
+                // Couldn't parse as simple JSON object, pass raw body
+                kwargs.set_item("body", body_bytes.as_ref())
+                    .map_err(|e| format!("Body set error: {}", e))?;
+            }
+        }
+
+        // Single FFI call: Python handler with pre-parsed kwargs
+        let result = handler.call(py, (), Some(&kwargs))
+            .map_err(|e| format!("Handler error: {}", e))?;
+
+        // SIMD JSON serialization
+        match result.extract::<String>(py) {
+            Ok(s) => Ok(s),
+            Err(_) => {
+                let bound = result.bind(py);
+                simd_json::serialize_pyobject_to_json(py, bound)
+                    .map_err(|e| format!("SIMD JSON error: {}", e))
             }
         }
     })
@@ -1389,25 +1625,22 @@ async fn process_request_optimized(
     }
 }
 
-/// Serialize Python result to JSON string - optimized version
-/// Uses PRE-BOUND json.dumps callable (no getattr overhead!)
+/// Serialize Python result to JSON string - SIMD-optimized version
+/// Phase 1: Uses Rust SIMD serializer instead of Python json.dumps
 fn serialize_result_optimized(
     py: Python,
     result: Py<PyAny>,
-    json_dumps_fn: &PyObject, // Pre-bound callable!
+    _json_dumps_fn: &PyObject, // Kept for API compat, no longer used
 ) -> Result<String, String> {
-    let result = result.bind(py);
-    // Try direct string extraction first
-    if let Ok(json_str) = result.extract::<String>() {
+    let bound = result.bind(py);
+    // Try direct string extraction first (zero-copy fast path)
+    if let Ok(json_str) = bound.extract::<String>() {
         return Ok(json_str);
     }
-    
-    // Call pre-bound json.dumps (no getattr!)
-    let json_str = json_dumps_fn.call1(py, (result,))
-        .map_err(|e| format!("JSON serialization error: {}", e))?;
-    
-    json_str.extract::<String>(py)
-        .map_err(|e| format!("Failed to extract JSON string: {}", e))
+
+    // PHASE 1: Rust SIMD JSON serialization (no Python FFI!)
+    simd_json::serialize_pyobject_to_json(py, bound)
+        .map_err(|e| format!("SIMD JSON serialization error: {}", e))
 }
 
 /// Handle Python request - supports both SYNC and ASYNC handlers
@@ -1465,42 +1698,29 @@ async fn handle_python_request_sync(
                     result
                 };
                 
-                // Serialize result
-                let json_module = CACHED_JSON_MODULE.get_or_init(|| {
-                    py.import("json").unwrap().into()
-                });
-                
-                // Try to extract as string directly, otherwise serialize with JSON
+                // PHASE 1: SIMD JSON serialization
                 if let Ok(json_str) = content.extract::<String>() {
                     Ok(json_str)
                 } else {
-                    let json_dumps = json_module.getattr(py, "dumps").unwrap();
-                    let json_str = json_dumps.call1(py, (content,))
-                        .map_err(|e| format!("JSON error: {}", e))?;
-                    json_str.extract::<String>(py)
-                        .map_err(|e| format!("Extraction error: {}", e))
+                    simd_json::serialize_pyobject_to_json(py, &content)
+                        .map_err(|e| format!("SIMD JSON error: {}", e))
                 }
             })
         }).await.map_err(|e| format!("Thread join error: {}", e))?
     } else {
         // Sync handler - call directly
         Python::with_gil(|py| {
-            let json_module = CACHED_JSON_MODULE.get_or_init(|| {
-                py.import("json").unwrap().into()
-            });
-            
             // Create kwargs dict with request data
             use pyo3::types::PyDict;
             let kwargs = PyDict::new(py);
             kwargs.set_item("body", body.as_ref()).ok();
             let headers = PyDict::new(py);
             kwargs.set_item("headers", headers).ok();
-            
+
             let result = handler.call(py, (), Some(&kwargs))
                 .map_err(|e| format!("Python handler error: {}", e))?;
-            
+
             // Enhanced handler returns {"content": ..., "status_code": ..., "content_type": ...}
-            // Extract just the content
             let content = if let Ok(dict) = result.downcast_bound::<PyDict>(py) {
                 if let Ok(Some(content_val)) = dict.get_item("content") {
                     content_val.unbind()
@@ -1510,15 +1730,14 @@ async fn handle_python_request_sync(
             } else {
                 result
             };
-            
+
+            // PHASE 1: SIMD JSON serialization
             match content.extract::<String>(py) {
                 Ok(json_str) => Ok(json_str),
                 Err(_) => {
-                    let json_dumps = json_module.getattr(py, "dumps").unwrap();
-                    let json_str = json_dumps.call1(py, (content,))
-                        .map_err(|e| format!("JSON error: {}", e))?;
-                    json_str.extract::<String>(py)
-                        .map_err(|e| format!("Extraction error: {}", e))
+                    let bound = content.bind(py);
+                    simd_json::serialize_pyobject_to_json(py, bound)
+                        .map_err(|e| format!("SIMD JSON error: {}", e))
                 }
             }
         })
