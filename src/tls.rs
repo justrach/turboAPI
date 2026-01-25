@@ -72,9 +72,8 @@ pub mod rustls_backend {
         })?;
         let mut reader = BufReader::new(file);
 
-        let certs: Vec<CertificateDer<'static>> = certs(&mut reader)
-            .filter_map(|c| c.ok())
-            .collect();
+        let certs: Vec<CertificateDer<'static>> =
+            certs(&mut reader).filter_map(|c| c.ok()).collect();
 
         if certs.is_empty() {
             return Err(TlsError::CertificateLoadError(
@@ -164,9 +163,7 @@ pub mod openssl_backend {
 /// Generate a self-signed certificate for development/testing
 /// This is NOT for production use!
 #[cfg(feature = "tls-rustls")]
-pub fn generate_self_signed_cert(
-    _common_name: &str,
-) -> Result<(Vec<u8>, Vec<u8>), TlsError> {
+pub fn generate_self_signed_cert(_common_name: &str) -> Result<(Vec<u8>, Vec<u8>), TlsError> {
     // For production, use rcgen crate or external tools to generate certificates
     Err(TlsError::ConfigurationError(
         "Self-signed certificate generation not implemented. Use external tools like mkcert or openssl.".to_string(),
@@ -187,8 +184,7 @@ mod tests {
 
     #[test]
     fn test_tls_config_with_alpn() {
-        let config = TlsConfig::new("cert.pem", "key.pem")
-            .with_alpn(vec!["h2".to_string()]);
+        let config = TlsConfig::new("cert.pem", "key.pem").with_alpn(vec!["h2".to_string()]);
         assert_eq!(config.alpn_protocols, vec!["h2"]);
     }
 }

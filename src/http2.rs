@@ -163,7 +163,7 @@ impl Http2Server {
     /// Requires the `tls-rustls` or `tls-openssl` feature to be enabled
     #[cfg(feature = "tls-rustls")]
     pub fn run_tls(&self, py: Python, cert_path: String, key_path: String) -> PyResult<()> {
-        use crate::tls::{TlsConfig, rustls_backend};
+        use crate::tls::{rustls_backend, TlsConfig};
 
         let addr: SocketAddr = format!("{}:{}", self.host, self.port)
             .parse()
@@ -195,7 +195,10 @@ impl Http2Server {
 
             rt.block_on(async {
                 let listener = TcpListener::bind(addr).await.unwrap();
-                println!("🔒 TurboAPI HTTP/2 + TLS server starting on https://{}", addr);
+                println!(
+                    "🔒 TurboAPI HTTP/2 + TLS server starting on https://{}",
+                    addr
+                );
                 println!("🧵 Using {} worker threads", worker_threads);
                 println!("📡 HTTP/2 + TLS features:");
                 println!(

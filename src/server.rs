@@ -376,7 +376,10 @@ impl TurboServer {
                             route_pattern: path_clone.clone(),
                             param_types: HashMap::new(),
                             original_handler: Some(Arc::new(on_connect_clone)),
-                            model_info: Some(("on_disconnect".to_string(), Arc::new(on_disconnect_clone))),
+                            model_info: Some((
+                                "on_disconnect".to_string(),
+                                Arc::new(on_disconnect_clone),
+                            )),
                         },
                     );
                     drop(handlers_guard);
@@ -394,7 +397,10 @@ impl TurboServer {
 
     /// Legacy HTTP server method (DEPRECATED)
     /// This now delegates to run() for backwards compatibility
-    #[deprecated(since = "0.5.0", note = "Use run() instead - same performance, cleaner API")]
+    #[deprecated(
+        since = "0.5.0",
+        note = "Use run() instead - same performance, cleaner API"
+    )]
     pub fn run_legacy(&self, py: Python) -> PyResult<()> {
         eprintln!("⚠️  WARNING: run_legacy() is deprecated and now delegates to run().");
         eprintln!("   Please update your code to use run() directly.");
@@ -765,7 +771,10 @@ fn initialize_tokio_runtime() -> PyResult<TokioRuntime> {
     let total_capacity = 1024 * num_cpus;
     let semaphore = Arc::new(tokio::sync::Semaphore::new(total_capacity));
 
-    eprintln!("✅ Semaphore capacity: {} concurrent requests", total_capacity);
+    eprintln!(
+        "✅ Semaphore capacity: {} concurrent requests",
+        total_capacity
+    );
     eprintln!("✅ Tokio runtime ready with {} worker threads", num_cpus);
 
     Ok(TokioRuntime {
@@ -1027,8 +1036,7 @@ async fn handle_request(
                     )
                     .await
                 } else {
-                    process_request_tokio(metadata.handler.clone(), true, &tokio_runtime)
-                        .await
+                    process_request_tokio(metadata.handler.clone(), true, &tokio_runtime).await
                 }
             }
             HandlerType::BodyAsyncFast => {
@@ -1045,8 +1053,7 @@ async fn handle_request(
                     )
                     .await
                 } else {
-                    process_request_tokio(metadata.handler.clone(), true, &tokio_runtime)
-                        .await
+                    process_request_tokio(metadata.handler.clone(), true, &tokio_runtime).await
                 }
             }
             HandlerType::Enhanced => {
@@ -1430,8 +1437,11 @@ async fn call_python_handler_async_fast(
 
         // Convert Python coroutine to Rust Future using pyo3-async-runtimes
         // Note: call() returns Py<PyAny>, bind().clone() converts to owned Bound<'py, PyAny>
-        pyo3_async_runtimes::into_future_with_locals(&runtime.task_locals, coroutine.bind(py).clone())
-            .map_err(|e| format!("Failed to convert coroutine: {}", e))
+        pyo3_async_runtimes::into_future_with_locals(
+            &runtime.task_locals,
+            coroutine.bind(py).clone(),
+        )
+        .map_err(|e| format!("Failed to convert coroutine: {}", e))
     })?;
 
     // Await the Rust future on Tokio runtime (non-blocking!)
@@ -1518,8 +1528,11 @@ async fn call_python_handler_async_fast_body(
 
         // Convert Python coroutine to Rust Future using pyo3-async-runtimes
         // Note: call() returns Py<PyAny>, bind().clone() converts to owned Bound<'py, PyAny>
-        pyo3_async_runtimes::into_future_with_locals(&runtime.task_locals, coroutine.bind(py).clone())
-            .map_err(|e| format!("Failed to convert coroutine: {}", e))
+        pyo3_async_runtimes::into_future_with_locals(
+            &runtime.task_locals,
+            coroutine.bind(py).clone(),
+        )
+        .map_err(|e| format!("Failed to convert coroutine: {}", e))
     })?;
 
     // Await the Rust future on Tokio runtime (non-blocking!)
