@@ -786,6 +786,8 @@ fn initialize_tokio_runtime() -> PyResult<TokioRuntime> {
 
 /// Process request using Tokio runtime (PHASE D)
 /// Uses Python::attach for free-threading (no GIL overhead!)
+/// NOTE: This function is for fast-path handlers that don't need request kwargs.
+/// For Enhanced handlers, use call_python_handler_enhanced_async which passes kwargs.
 async fn process_request_tokio(
     handler: Handler,
     is_async: bool,
@@ -832,6 +834,115 @@ async fn process_request_tokio(
             serialize_result_optimized(py, result.unbind(), &runtime.json_dumps_fn)
         })
     }
+}
+
+/// ENHANCED ASYNC PATH: Call async enhanced handler with request kwargs.
+/// Enhanced handlers expect: body, headers, method, path, query_string
+async fn call_python_handler_enhanced_async(
+    handler: &PyObject,
+    method_str: &str,
+    path: &str,
+    query_string: &str,
+    body_bytes: &Bytes,
+    headers_map: &std::collections::HashMap<String, String>,
+    runtime: &TokioRuntime,
+) -> Result<HandlerResponse, String> {
+    // Acquire semaphore permit for rate limiting
+    let _permit = runtime
+        .semaphore
+        .acquire()
+        .await
+        .map_err(|e| format!("Semaphore error: {}", e))?;
+
+    // Build kwargs and call async handler
+    let future = Python::with_gil(|py| {
+        use pyo3::types::PyDict;
+        let kwargs = PyDict::new(py);
+
+        // Add body as bytes
+        kwargs
+            .set_item("body", body_bytes.as_ref())
+            .map_err(|e| format!("Body set error: {}", e))?;
+
+        // Add headers dict
+        let headers = PyDict::new(py);
+        for (key, value) in headers_map {
+            headers
+                .set_item(key, value)
+                .map_err(|e| format!("Header set error: {}", e))?;
+        }
+        kwargs
+            .set_item("headers", headers)
+            .map_err(|e| format!("Headers set error: {}", e))?;
+
+        // Add method
+        kwargs
+            .set_item("method", method_str)
+            .map_err(|e| format!("Method set error: {}", e))?;
+
+        // Add path
+        kwargs
+            .set_item("path", path)
+            .map_err(|e| format!("Path set error: {}", e))?;
+
+        // Add query string
+        kwargs
+            .set_item("query_string", query_string)
+            .map_err(|e| format!("Query set error: {}", e))?;
+
+        // Call async handler to get coroutine
+        let coroutine = handler
+            .call(py, (), Some(&kwargs))
+            .map_err(|e| format!("Handler error: {}", e))?;
+
+        // Convert Python coroutine to Rust Future
+        pyo3_async_runtimes::into_future_with_locals(
+            &runtime.task_locals,
+            coroutine.bind(py).clone(),
+        )
+        .map_err(|e| format!("Failed to convert coroutine: {}", e))
+    })?;
+
+    // Await the Rust future on Tokio runtime
+    let result = future
+        .await
+        .map_err(|e| format!("Async execution error: {}", e))?;
+
+    // Extract status_code and serialize response
+    Python::with_gil(|py| {
+        let bound = result.bind(py);
+
+        // Enhanced handler returns {"content": ..., "status_code": ..., "content_type": ...}
+        let mut status_code: u16 = 200;
+        let content = if let Ok(dict) = bound.downcast::<pyo3::types::PyDict>() {
+            if let Ok(Some(status_val)) = dict.get_item("status_code") {
+                status_code = status_val
+                    .extract::<i64>()
+                    .ok()
+                    .and_then(|v| u16::try_from(v).ok())
+                    .unwrap_or(200);
+            }
+            if let Ok(Some(content_val)) = dict.get_item("content") {
+                content_val.unbind()
+            } else {
+                result
+            }
+        } else {
+            result
+        };
+
+        // Serialize to JSON
+        let body = match content.extract::<String>(py) {
+            Ok(json_str) => json_str,
+            Err(_) => {
+                let bound = content.bind(py);
+                simd_json::serialize_pyobject_to_json(py, bound)
+                    .map_err(|e| format!("SIMD JSON error: {}", e))?
+            }
+        };
+
+        Ok(HandlerResponse { body, status_code })
+    })
 }
 
 /// Handle HTTP request using pure Tokio runtime
@@ -914,8 +1025,18 @@ async fn handle_request(
     };
 
     // Single read lock acquisition for handler lookup
+    // Try direct lookup first (faster for static routes)
     let handlers_guard = handlers.read().await;
-    let metadata = handlers_guard.get(&route_key).cloned();
+    let mut metadata = handlers_guard.get(&route_key).cloned();
+
+    // If no direct match, use the radix router to find parameterized routes
+    if metadata.is_none() && !is_websocket_upgrade {
+        let router_guard = router.read().await;
+        if let Some(route_match) = router_guard.find_route(method_str, path) {
+            // Found a route with path parameters - get handler by template key
+            metadata = handlers_guard.get(&route_match.handler_key).cloned();
+        }
+    }
     drop(handlers_guard);
 
     // Handle WebSocket upgrade if detected
@@ -1057,8 +1178,29 @@ async fn handle_request(
                 }
             }
             HandlerType::Enhanced => {
-                process_request_tokio(metadata.handler.clone(), metadata.is_async, &tokio_runtime)
+                // Enhanced handlers need request kwargs (body, headers, method, path, query_string)
+                if metadata.is_async {
+                    call_python_handler_enhanced_async(
+                        &metadata.handler,
+                        method_str,
+                        path,
+                        query_string,
+                        &body_bytes,
+                        &headers_map,
+                        &tokio_runtime,
+                    )
                     .await
+                } else {
+                    // Sync enhanced handler - use direct call with kwargs
+                    call_python_handler_sync_direct(
+                        &metadata.handler,
+                        method_str,
+                        path,
+                        query_string,
+                        &body_bytes,
+                        &headers_map,
+                    )
+                }
             }
             HandlerType::WebSocket => {
                 // WebSocket requests should have been handled earlier in the function
