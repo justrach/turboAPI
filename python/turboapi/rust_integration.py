@@ -20,16 +20,15 @@ from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
 
 
 def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
-    """Classify a handler for fast dispatch (Phase 3).
+    """Classify a handler for fast dispatch (Phase 3 + Phase 4 async).
 
     Returns:
         (handler_type, param_types, model_info) where:
-        - handler_type: "simple_sync" | "body_sync" | "model_sync" | "enhanced"
+        - handler_type: "simple_sync" | "body_sync" | "model_sync" | "simple_async" | "body_async" | "enhanced"
         - param_types: dict mapping param_name -> type hint string
         - model_info: dict with "param_name" and "model_class" for model handlers
     """
-    if inspect.iscoroutinefunction(handler):
-        return "enhanced", {}, {}
+    is_async = inspect.iscoroutinefunction(handler)
 
     sig = inspect.signature(handler)
     param_types = {}
@@ -42,7 +41,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
         # Check for dhi/Pydantic BaseModel
         try:
             if BaseModel is not None and inspect.isclass(annotation) and issubclass(annotation, BaseModel):
-                # Found a model parameter - use fast model path
+                # Found a model parameter - use fast model path (sync only for now)
                 model_info = {"param_name": param_name, "model_class": annotation}
                 continue  # Don't add to param_types
         except TypeError:
@@ -64,13 +63,23 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
         elif annotation is str or annotation is inspect.Parameter.empty:
             param_types[param_name] = "str"
 
-    # Model handlers use fast model path (simd-json + model_validate)
-    if model_info:
-        method = route.method.value.upper() if hasattr(route, "method") else "GET"
+    method = route.method.value.upper() if hasattr(route, "method") else "GET"
+
+    # Model handlers use fast model path (simd-json + model_validate) - sync only
+    if model_info and not is_async:
         if method in ("POST", "PUT", "PATCH", "DELETE"):
             return "model_sync", param_types, model_info
 
-    method = route.method.value.upper() if hasattr(route, "method") else "GET"
+    # Async handlers - Phase 4 async fast paths via Tokio
+    if is_async:
+        if method in ("POST", "PUT", "PATCH", "DELETE"):
+            if needs_body:
+                # Complex body types still need enhanced path
+                return "enhanced", param_types, {}
+            return "body_async", param_types, {}
+        return "simple_async", param_types, {}
+
+    # Sync handlers - Phase 3 sync fast paths
     if method in ("POST", "PUT", "PATCH", "DELETE"):
         if needs_body:
             return "enhanced", param_types, {}
@@ -207,8 +216,7 @@ class RustIntegratedTurboAPI(TurboAPI):
                     )
                     print(f"{CHECK_MARK} [model_sync] {route.method.value} {route.path}")
                 elif handler_type in ("simple_sync", "body_sync"):
-                    # FAST PATH: Register with metadata for Rust-side parsing
-                    # Enhanced handler is fallback, original handler is for direct call
+                    # SYNC FAST PATH: Register with metadata for Rust-side parsing
                     enhanced_handler = create_enhanced_handler(route.handler, route)
                     param_types_json = json.dumps(param_types)
 
@@ -219,6 +227,20 @@ class RustIntegratedTurboAPI(TurboAPI):
                         handler_type,
                         param_types_json,
                         route.handler,  # Original unwrapped handler
+                    )
+                    print(f"{CHECK_MARK} [{handler_type}] {route.method.value} {route.path}")
+                elif handler_type in ("simple_async", "body_async"):
+                    # ASYNC FAST PATH: Register with Tokio async runtime
+                    enhanced_handler = create_enhanced_handler(route.handler, route)
+                    param_types_json = json.dumps(param_types)
+
+                    self.rust_server.add_route_async_fast(
+                        route.method.value,
+                        route.path,
+                        enhanced_handler,  # Fallback wrapper
+                        handler_type,
+                        param_types_json,
+                        route.handler,  # Original async handler
                     )
                     print(f"{CHECK_MARK} [{handler_type}] {route.method.value} {route.path}")
                 else:
