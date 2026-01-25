@@ -1,0 +1,60 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "turboapi"
+version = "0.4.16"
+description = "FastAPI-compatible web framework with Rust HTTP core - 2-3x faster with Python 3.13 free-threading"
+readme = "README.md"
+requires-python = ">=3.13"
+license = {text = "MIT"}
+authors = [
+    {name = "Rach Pradhan", email = "rach@turboapi.dev"}
+]
+keywords = ["web", "framework", "http", "server", "rust", "performance", "fastapi", "async"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Framework :: FastAPI",
+]
+dependencies = [
+    "dhi>=1.1.3",
+]
+
+[project.urls]
+Homepage = "https://github.com/justrach/turboAPI"
+Repository = "https://github.com/justrach/turboAPI"
+Documentation = "https://github.com/justrach/turboAPI#readme"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+benchmark = [
+    "matplotlib>=3.5.0",
+    "requests>=2.25.0",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "turboapi.turbonet"
+features = ["pyo3/extension-module"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = ["E501", "B008", "C901"]

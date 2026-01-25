@@ -51,32 +51,32 @@ jobs:
         run: |
           # Install bump2version if not available
           pip install bump2version
-          
-          # Extract current version from python/pyproject.toml
-          CURRENT_VERSION=$(grep -Po '(?<=version = ")[^"]*' python/pyproject.toml)
+
+          # Extract current version from pyproject.toml (root)
+          CURRENT_VERSION=$(grep -Po '(?<=version = ")[^"]*' pyproject.toml | head -1)
           echo "Current version: $CURRENT_VERSION"
-          
+
           # Create .bumpversion.cfg for coordinated version bumping
           cat > .bumpversion.cfg << EOF
           [bumpversion]
           current_version = $CURRENT_VERSION
           commit = False
           tag = False
-          
-          [bumpversion:file:python/pyproject.toml]
+
+          [bumpversion:file:pyproject.toml]
           search = version = "{current_version}"
           replace = version = "{new_version}"
-          
+
           [bumpversion:file:Cargo.toml]
           search = version = "{current_version}"
           replace = version = "{new_version}"
           EOF
-          
-          # Bump version in both python/pyproject.toml and Cargo.toml
+
+          # Bump version in both pyproject.toml and Cargo.toml
           bump2version ${{ github.event.inputs.version_bump }} --allow-dirty
-          
+
           # Get new version
-          NEW_VERSION=$(grep -Po '(?<=version = ")[^"]*' python/pyproject.toml)
+          NEW_VERSION=$(grep -Po '(?<=version = ")[^"]*' pyproject.toml | head -1)
           echo "New version: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
       
@@ -108,7 +108,7 @@ jobs:
       - name: Commit version bump and create tag
         id: create_tag
         run: |
-          git add python/pyproject.toml Cargo.toml CHANGELOG.md .bumpversion.cfg
+          git add pyproject.toml Cargo.toml CHANGELOG.md .bumpversion.cfg
           git commit -m "Bump version to v${{ steps.bump_version.outputs.new_version }}"
           git tag -a "v${{ steps.bump_version.outputs.new_version }}" -m "Release v${{ steps.bump_version.outputs.new_version }}"
           git push && git push --tags
