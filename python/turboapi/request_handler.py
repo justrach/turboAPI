@@ -1,7 +1,7 @@
 """
-Enhanced Request Handler with Satya Integration
+Enhanced Request Handler with dhi Integration
 Provides FastAPI-compatible automatic JSON body parsing and validation
-Supports query parameters, path parameters, headers, and request body
+Supports query parameters, path parameters, headers, request body, and dependencies
 """
 
 import inspect
@@ -9,7 +9,88 @@ import json
 import urllib.parse
 from typing import Any, get_args, get_origin
 
-from satya import Model
+from dhi import BaseModel as Model
+
+
+class DependencyResolver:
+    """Resolve Depends() dependencies recursively."""
+
+    @staticmethod
+    def resolve_dependencies(handler_signature: inspect.Signature, context: dict[str, Any]) -> dict[str, Any]:
+        """
+        Resolve all Depends() parameters in a handler signature.
+
+        Args:
+            handler_signature: Signature of the handler function
+            context: Context dict with headers, query_string, body, etc.
+
+        Returns:
+            Dictionary of resolved dependency values
+        """
+        from turboapi.security import Depends
+
+        resolved = {}
+        cache = {}  # Cache for use_cache=True dependencies
+
+        for param_name, param in handler_signature.parameters.items():
+            if isinstance(param.default, Depends):
+                depends = param.default
+                dependency_fn = depends.dependency
+
+                if dependency_fn is None:
+                    continue
+
+                # Check cache
+                cache_key = id(dependency_fn)
+                if depends.use_cache and cache_key in cache:
+                    resolved[param_name] = cache[cache_key]
+                    continue
+
+                # Resolve the dependency
+                result = DependencyResolver._call_dependency(dependency_fn, context, cache)
+
+                # Cache if needed
+                if depends.use_cache:
+                    cache[cache_key] = result
+
+                resolved[param_name] = result
+
+        return resolved
+
+    @staticmethod
+    def _call_dependency(dependency_fn, context: dict[str, Any], cache: dict) -> Any:
+        """Call a dependency function, resolving any nested dependencies."""
+        from turboapi.security import Depends
+
+        sig = inspect.signature(dependency_fn)
+        kwargs = {}
+
+        for param_name, param in sig.parameters.items():
+            if isinstance(param.default, Depends):
+                # Nested dependency
+                nested_fn = param.default.dependency
+                if nested_fn is not None:
+                    cache_key = id(nested_fn)
+                    if param.default.use_cache and cache_key in cache:
+                        kwargs[param_name] = cache[cache_key]
+                    else:
+                        result = DependencyResolver._call_dependency(nested_fn, context, cache)
+                        if param.default.use_cache:
+                            cache[cache_key] = result
+                        kwargs[param_name] = result
+
+        # Call the dependency function
+        if inspect.iscoroutinefunction(dependency_fn):
+            # For async dependencies, we need to handle this differently
+            # For now, just call sync functions
+            import asyncio
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(dependency_fn(**kwargs))
+            finally:
+                loop.close()
+        else:
+            return dependency_fn(**kwargs)
 
 
 class QueryParamParser:
@@ -74,31 +155,55 @@ class PathParamParser:
 
 class HeaderParser:
     """Parse and extract headers from request."""
-    
+
     @staticmethod
     def parse_headers(headers_dict: dict[str, str], handler_signature: inspect.Signature) -> dict[str, Any]:
         """
         Parse headers and extract parameters needed by handler.
-        
+
         Args:
             headers_dict: Dictionary of request headers
             handler_signature: Signature of the handler function
-            
+
         Returns:
             Dictionary of parsed header parameters
         """
+        from turboapi.datastructures import Header
+
         parsed_headers = {}
-        
+
         # Check each parameter in handler signature
         for param_name, param in handler_signature.parameters.items():
-            # Check if parameter name matches a header (case-insensitive)
-            header_key = param_name.replace('_', '-').lower()
-            
-            for header_name, header_value in headers_dict.items():
-                if header_name.lower() == header_key:
-                    parsed_headers[param_name] = header_value
-                    break
-        
+            # Check if this parameter uses Header() marker
+            is_header_param = isinstance(param.default, Header)
+
+            if is_header_param:
+                header_marker = param.default
+                # Use alias if provided, otherwise convert param name to header format
+                if header_marker.alias:
+                    header_key = header_marker.alias.lower()
+                elif header_marker.convert_underscores:
+                    header_key = param_name.replace('_', '-').lower()
+                else:
+                    header_key = param_name.lower()
+
+                # Find matching header
+                for header_name, header_value in headers_dict.items():
+                    if header_name.lower() == header_key:
+                        parsed_headers[param_name] = header_value
+                        break
+                else:
+                    # No matching header found, use default if available
+                    if header_marker.default is not ...:
+                        parsed_headers[param_name] = header_marker.default
+            else:
+                # Not a Header marker, but still try to match by name
+                header_key = param_name.replace('_', '-').lower()
+                for header_name, header_value in headers_dict.items():
+                    if header_name.lower() == header_key:
+                        parsed_headers[param_name] = header_value
+                        break
+
         return parsed_headers
 
 
@@ -218,19 +323,36 @@ class ResponseHandler:
     def normalize_response(result: Any) -> tuple[Any, int]:
         """
         Normalize handler response to (content, status_code) format.
-        
+
         Supports:
         - return {"data": "value"}  -> ({"data": "value"}, 200)
         - return {"error": "msg"}, 404  -> ({"error": "msg"}, 404)
         - return "text"  -> ("text", 200)
         - return satya_model  -> (model.model_dump(), 200)
-        
+        - return JSONResponse(content, status_code)  -> (content, status_code)
+        - return HTMLResponse(content)  -> (content, 200)
+
         Args:
             result: Raw result from handler
-            
+
         Returns:
             Tuple of (content, status_code)
         """
+        # Handle Response objects (JSONResponse, HTMLResponse, etc.)
+        from turboapi.responses import Response
+        if isinstance(result, Response):
+            # Extract content from Response object
+            body = result.body
+            if isinstance(body, bytes):
+                # Try to decode as JSON for JSONResponse
+                try:
+                    import json
+                    body = json.loads(body.decode('utf-8'))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    # Keep as string for HTML/Text responses
+                    body = body.decode('utf-8')
+            return body, result.status_code
+
         # Handle tuple returns: (content, status_code)
         if isinstance(result, tuple):
             if len(result) == 2:
@@ -239,16 +361,16 @@ class ResponseHandler:
             else:
                 # Invalid tuple format, treat as regular response
                 return result, 200
-        
-        # Handle Satya models
+
+        # Handle dhi/Satya models
         if isinstance(result, Model):
             return result.model_dump(), 200
-        
+
         # Handle dict with status_code key (internal format)
         if isinstance(result, dict) and "status_code" in result:
             status = result.pop("status_code")
             return result, status
-        
+
         # Default: treat as 200 OK response
         return result, 200
     
@@ -343,21 +465,30 @@ def create_enhanced_handler(original_handler, route_definition):
                 # 4. Parse request body (JSON)
                 if "body" in kwargs:
                     body_data = kwargs["body"]
-                    
+
                     if body_data:  # Only parse if body is not empty
                         parsed_body = RequestBodyParser.parse_json_body(
-                            body_data, 
+                            body_data,
                             sig
                         )
                         # Merge parsed body params (body params take precedence)
                         parsed_params.update(parsed_body)
-                
+
+                # 5. Resolve dependencies
+                context = {
+                    "headers": kwargs.get("headers", {}),
+                    "query_string": kwargs.get("query_string", ""),
+                    "body": kwargs.get("body", b""),
+                }
+                dependency_params = DependencyResolver.resolve_dependencies(sig, context)
+                parsed_params.update(dependency_params)
+
                 # Filter to only pass expected parameters
                 filtered_kwargs = {
-                    k: v for k, v in parsed_params.items() 
+                    k: v for k, v in parsed_params.items()
                     if k in sig.parameters
                 }
-                
+
                 # Call original async handler and await it
                 result = await original_handler(**filtered_kwargs)
                 
@@ -418,21 +549,30 @@ def create_enhanced_handler(original_handler, route_definition):
                 # 4. Parse request body (JSON)
                 if "body" in kwargs:
                     body_data = kwargs["body"]
-                    
+
                     if body_data:  # Only parse if body is not empty
                         parsed_body = RequestBodyParser.parse_json_body(
-                            body_data, 
+                            body_data,
                             sig
                         )
                         # Merge parsed body params (body params take precedence)
                         parsed_params.update(parsed_body)
-                
+
+                # 5. Resolve dependencies
+                context = {
+                    "headers": kwargs.get("headers", {}),
+                    "query_string": kwargs.get("query_string", ""),
+                    "body": kwargs.get("body", b""),
+                }
+                dependency_params = DependencyResolver.resolve_dependencies(sig, context)
+                parsed_params.update(dependency_params)
+
                 # Filter to only pass expected parameters
                 filtered_kwargs = {
-                    k: v for k, v in parsed_params.items() 
+                    k: v for k, v in parsed_params.items()
                     if k in sig.parameters
                 }
-                
+
                 # Call original sync handler
                 result = original_handler(**filtered_kwargs)
                 

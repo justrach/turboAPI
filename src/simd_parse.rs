@@ -348,6 +348,66 @@ fn set_simd_object_into_dict<'py>(
     Ok(())
 }
 
+/// Parse JSON body using simd-json and return as a Python dict.
+/// This is used for model validation where we need the full dict.
+#[inline]
+pub fn parse_json_to_pydict<'py>(
+    py: Python<'py>,
+    body: &[u8],
+) -> PyResult<Bound<'py, PyDict>> {
+    if body.is_empty() {
+        return Ok(PyDict::new(py));
+    }
+
+    // Use simd-json for fast parsing
+    let mut body_copy = body.to_vec();
+    let parsed = simd_json::to_borrowed_value(&mut body_copy)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("JSON parse error: {}", e)))?;
+
+    let dict = PyDict::new(py);
+
+    // Only handle object (dict) bodies
+    if let simd_json::BorrowedValue::Object(map) = parsed {
+        for (key, value) in map.iter() {
+            set_simd_value_into_dict(py, key.as_ref(), value, &dict)?;
+        }
+    } else {
+        return Err(pyo3::exceptions::PyValueError::new_err("Expected JSON object"));
+    }
+
+    Ok(dict)
+}
+
+/// Set a single simd-json value into a PyDict at the given key.
+fn set_simd_value_into_dict<'py>(
+    py: Python<'py>,
+    key: &str,
+    value: &simd_json::BorrowedValue,
+    dict: &Bound<'py, PyDict>,
+) -> PyResult<()> {
+    match value {
+        simd_json::BorrowedValue::String(s) => dict.set_item(key, s.as_ref())?,
+        simd_json::BorrowedValue::Static(simd_json::StaticNode::I64(n)) => dict.set_item(key, *n)?,
+        simd_json::BorrowedValue::Static(simd_json::StaticNode::U64(n)) => dict.set_item(key, *n)?,
+        simd_json::BorrowedValue::Static(simd_json::StaticNode::F64(n)) => dict.set_item(key, *n)?,
+        simd_json::BorrowedValue::Static(simd_json::StaticNode::Bool(b)) => dict.set_item(key, *b)?,
+        simd_json::BorrowedValue::Static(simd_json::StaticNode::Null) => dict.set_item(key, py.None())?,
+        simd_json::BorrowedValue::Array(arr) => {
+            let list = pyo3::types::PyList::empty(py);
+            for item in arr.iter() {
+                append_simd_value_to_list(py, item, &list)?;
+            }
+            dict.set_item(key, list)?;
+        }
+        simd_json::BorrowedValue::Object(_) => {
+            let nested = PyDict::new(py);
+            set_simd_object_into_dict(py, value, &nested)?;
+            dict.set_item(key, nested)?;
+        }
+    }
+    Ok(())
+}
+
 /// Fast URL decoding: handles %XX and + -> space.
 /// Most API parameters don't need decoding, so we fast-path the common case.
 #[inline]

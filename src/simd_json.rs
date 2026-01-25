@@ -87,7 +87,43 @@ fn write_value(py: Python, obj: &Bound<'_, PyAny>, buf: &mut Vec<u8>) -> PyResul
     }
 
     // Fallback: try to convert to a serializable Python representation
-    // First try: check if it has a model_dump() method (Satya/Pydantic models)
+
+    // Check for Response objects (JSONResponse, HTMLResponse, etc.)
+    // These have a 'body' attribute that contains the serialized content
+    if let Ok(body_attr) = obj.getattr("body") {
+        if let Ok(status_attr) = obj.getattr("status_code") {
+            // This is a Response object - extract and serialize the body content
+            if let Ok(body_bytes) = body_attr.extract::<Vec<u8>>() {
+                // Try to parse body as JSON first
+                if let Ok(json_str) = String::from_utf8(body_bytes.clone()) {
+                    // If it's valid JSON, use it directly
+                    if json_str.starts_with('{') || json_str.starts_with('[') || json_str.starts_with('"') {
+                        buf.extend_from_slice(json_str.as_bytes());
+                        return Ok(());
+                    }
+                    // Otherwise treat as string
+                    buf.push(b'"');
+                    for byte in json_str.bytes() {
+                        match byte {
+                            b'"' => buf.extend_from_slice(b"\\\""),
+                            b'\\' => buf.extend_from_slice(b"\\\\"),
+                            b'\n' => buf.extend_from_slice(b"\\n"),
+                            b'\r' => buf.extend_from_slice(b"\\r"),
+                            b'\t' => buf.extend_from_slice(b"\\t"),
+                            b if b < 32 => {
+                                buf.extend_from_slice(format!("\\u{:04x}", b).as_bytes());
+                            }
+                            _ => buf.push(byte),
+                        }
+                    }
+                    buf.push(b'"');
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // Check if it has a model_dump() method (dhi/Pydantic models)
     if let Ok(dump_method) = obj.getattr("model_dump") {
         if let Ok(dumped) = dump_method.call0() {
             return write_value(py, &dumped, buf);

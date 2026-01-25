@@ -3,10 +3,10 @@ use pyo3::types::PyDict;
 use std::collections::HashMap;
 use crate::RequestView;
 
-/// Validation bridge between TurboAPI's Rust core and Satya's validation
+/// Validation bridge between TurboAPI's Rust core and dhi's validation
 #[pyclass]
 pub struct ValidationBridge {
-    /// Cache for Satya validators to avoid recreating them
+    /// Cache for dhi validators to avoid recreating them
     validator_cache: HashMap<String, PyObject>,
 }
 
@@ -19,7 +19,7 @@ impl ValidationBridge {
         }
     }
 
-    /// Validate request data using a Satya model
+    /// Validate request data using a dhi model
     pub fn validate_request(
         &mut self,
         py: Python,
@@ -76,11 +76,11 @@ impl ValidationBridge {
             validator
         };
 
-        // Use Satya's batch validation for maximum performance
+        // Use dhi's batch validation for maximum performance
         validator.call_method1(py, "validate_batch", (data_list,))
     }
 
-    /// Validate JSON bytes directly using Satya's streaming capabilities
+    /// Validate JSON bytes directly using dhi's streaming capabilities
     pub fn validate_json_bytes(
         &mut self,
         py: Python,
@@ -127,7 +127,7 @@ impl ValidationBridge {
     }
 }
 
-/// Helper function to convert RequestView to Python dict for Satya validation
+/// Helper function to convert RequestView to Python dict for dhi validation
 pub fn request_to_dict(py: Python, request: &RequestView) -> PyResult<PyObject> {
     let dict = PyDict::new(py);
     

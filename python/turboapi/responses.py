@@ -27,6 +27,7 @@ class Response:
         self.headers = headers or {}
         if media_type is not None:
             self.media_type = media_type
+        self._content = content  # Store original content for model_dump
         self.body = self._render(content)
 
     def _render(self, content: Any) -> bytes:
@@ -35,6 +36,16 @@ class Response:
         if isinstance(content, bytes):
             return content
         return content.encode(self.charset)
+
+    def model_dump(self) -> Any:
+        """Return the content for JSON serialization (used by Rust SIMD JSON)."""
+        # Decode body back to content
+        if isinstance(self.body, bytes):
+            try:
+                return json.loads(self.body.decode('utf-8'))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return self.body.decode('utf-8')
+        return self._content
 
     def set_cookie(
         self,
