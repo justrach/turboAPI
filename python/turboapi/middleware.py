@@ -171,14 +171,12 @@ class GZipMiddleware(Middleware):
             return response
         
         # Check if response is large enough to compress
-        if hasattr(response, 'content'):
-            content = response.content
-            if isinstance(content, str):
-                content = content.encode('utf-8')
-            
+        if hasattr(response, 'body'):
+            content = response.body
+
             if len(content) < self.minimum_size:
                 return response
-            
+
             # Compress content
             compressed = gzip.compress(content, compresslevel=self.compresslevel)
             response.content = compressed

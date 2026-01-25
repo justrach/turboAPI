@@ -1,8 +1,8 @@
-use std::sync::{Arc, Mutex};
-use std::thread;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use pyo3::prelude::*;
 use pyo3::types::PyAnyMethods;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 /// High-performance work-stealing thread pool for Python handler execution
 #[pyclass]
@@ -23,7 +23,7 @@ impl Worker {
     fn new(id: usize, receiver: Arc<Mutex<Receiver<Job>>>) -> Worker {
         let thread = thread::spawn(move || loop {
             let job = receiver.lock().unwrap().recv();
-            
+
             match job {
                 Ok(job) => {
                     // Execute the job
@@ -65,7 +65,11 @@ impl WorkStealingPool {
     }
 
     /// Execute a Python callable in the thread pool (free-threading compatible)
-    pub fn execute_python(&self, callable: Bound<'_, PyAny>, args: Bound<'_, PyAny>) -> PyResult<()> {
+    pub fn execute_python(
+        &self,
+        callable: Bound<'_, PyAny>,
+        args: Bound<'_, PyAny>,
+    ) -> PyResult<()> {
         // Convert to unbound objects that can be sent across threads
         let callable_unbound = callable.unbind();
         let args_unbound = args.unbind();
@@ -76,7 +80,7 @@ impl WorkStealingPool {
             Python::with_gil(|py| {
                 let callable_bound = callable_unbound.bind(py);
                 let args_bound = args_unbound.bind(py);
-                
+
                 if let Err(e) = callable_bound.call1((args_bound,)) {
                     // Log errors only in debug mode to reduce production overhead
                     if cfg!(debug_assertions) {
@@ -87,9 +91,9 @@ impl WorkStealingPool {
             });
         });
 
-        self.sender.send(job).map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err("Thread pool is shut down")
-        })?;
+        self.sender
+            .send(job)
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Thread pool is shut down"))?;
 
         Ok(())
     }
@@ -133,17 +137,26 @@ impl CpuPool {
     #[new]
     pub fn new(threads: Option<usize>) -> PyResult<Self> {
         let threads = threads.unwrap_or_else(num_cpus::get);
-        
+
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create thread pool: {}", e)))?;
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to create thread pool: {}",
+                    e
+                ))
+            })?;
 
         Ok(CpuPool { pool })
     }
 
     /// Execute CPU-intensive work in parallel
-    pub fn execute_parallel(&self, py: Python, work_items: Vec<PyObject>) -> PyResult<Vec<PyObject>> {
+    pub fn execute_parallel(
+        &self,
+        py: Python,
+        work_items: Vec<PyObject>,
+    ) -> PyResult<Vec<PyObject>> {
         use rayon::prelude::*;
 
         let results: Result<Vec<_>, _> = work_items
@@ -180,7 +193,12 @@ impl AsyncExecutor {
             .worker_threads(num_cpus::get())
             .enable_all()
             .build()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create async runtime: {}", e)))?;
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to create async runtime: {}",
+                    e
+                ))
+            })?;
 
         Ok(AsyncExecutor { runtime })
     }
@@ -211,10 +229,7 @@ pub struct ConcurrencyManager {
 #[pymethods]
 impl ConcurrencyManager {
     #[new]
-    pub fn new(
-        work_threads: Option<usize>,
-        cpu_threads: Option<usize>
-    ) -> PyResult<Self> {
+    pub fn new(work_threads: Option<usize>, cpu_threads: Option<usize>) -> PyResult<Self> {
         Ok(ConcurrencyManager {
             work_stealing_pool: WorkStealingPool::new(work_threads),
             cpu_pool: CpuPool::new(cpu_threads)?,
@@ -227,7 +242,7 @@ impl ConcurrencyManager {
         &self,
         handler_type: &str,
         callable: Bound<'_, PyAny>,
-        args: Bound<'_, PyAny>
+        args: Bound<'_, PyAny>,
     ) -> PyResult<()> {
         match handler_type {
             "sync" => self.work_stealing_pool.execute_python(callable, args),
@@ -247,41 +262,67 @@ impl ConcurrencyManager {
     }
 
     /// Get comprehensive concurrency statistics
-    pub fn get_stats(&self) -> std::collections::HashMap<String, std::collections::HashMap<String, usize>> {
+    pub fn get_stats(
+        &self,
+    ) -> std::collections::HashMap<String, std::collections::HashMap<String, usize>> {
         let mut stats = std::collections::HashMap::new();
         stats.insert("work_stealing".to_string(), self.work_stealing_pool.stats());
         stats.insert("async_executor".to_string(), self.async_executor.stats());
-        
+
         let mut cpu_stats = std::collections::HashMap::new();
         cpu_stats.insert("thread_count".to_string(), self.cpu_pool.thread_count());
         stats.insert("cpu_pool".to_string(), cpu_stats);
-        
+
         stats
     }
 
     /// Optimize thread pool sizes based on workload
-    pub fn optimize_for_workload(&self, workload_type: &str) -> std::collections::HashMap<String, String> {
+    pub fn optimize_for_workload(
+        &self,
+        workload_type: &str,
+    ) -> std::collections::HashMap<String, String> {
         let mut recommendations = std::collections::HashMap::new();
-        
+
         match workload_type {
             "cpu_intensive" => {
-                recommendations.insert("strategy".to_string(), "Use CPU pool for parallel processing".to_string());
-                recommendations.insert("threads".to_string(), format!("{} (CPU cores)", num_cpus::get()));
+                recommendations.insert(
+                    "strategy".to_string(),
+                    "Use CPU pool for parallel processing".to_string(),
+                );
+                recommendations.insert(
+                    "threads".to_string(),
+                    format!("{} (CPU cores)", num_cpus::get()),
+                );
             }
             "io_intensive" => {
-                recommendations.insert("strategy".to_string(), "Use async executor with high concurrency".to_string());
-                recommendations.insert("threads".to_string(), format!("{} (2x CPU cores)", num_cpus::get() * 2));
+                recommendations.insert(
+                    "strategy".to_string(),
+                    "Use async executor with high concurrency".to_string(),
+                );
+                recommendations.insert(
+                    "threads".to_string(),
+                    format!("{} (2x CPU cores)", num_cpus::get() * 2),
+                );
             }
             "mixed" => {
-                recommendations.insert("strategy".to_string(), "Use work-stealing pool for balanced load".to_string());
-                recommendations.insert("threads".to_string(), format!("{} (CPU cores)", num_cpus::get()));
+                recommendations.insert(
+                    "strategy".to_string(),
+                    "Use work-stealing pool for balanced load".to_string(),
+                );
+                recommendations.insert(
+                    "threads".to_string(),
+                    format!("{} (CPU cores)", num_cpus::get()),
+                );
             }
             _ => {
-                recommendations.insert("strategy".to_string(), "Default work-stealing configuration".to_string());
+                recommendations.insert(
+                    "strategy".to_string(),
+                    "Default work-stealing configuration".to_string(),
+                );
                 recommendations.insert("threads".to_string(), format!("{}", num_cpus::get()));
             }
         }
-        
+
         recommendations
     }
 }

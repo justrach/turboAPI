@@ -4,9 +4,11 @@ FastAPI-compatible application with revolutionary performance
 """
 
 import asyncio
+import contextlib
 import inspect
-from collections.abc import Callable
-from typing import Any
+import json
+from collections.abc import AsyncGenerator, Callable
+from typing import Any, Optional
 
 from .routing import Router
 from .version_check import CHECK_MARK, ROCKET
@@ -20,6 +22,10 @@ class TurboAPI(Router):
         title: str = "TurboAPI",
         version: str = "0.1.0",
         description: str = "A revolutionary Python web framework",
+        docs_url: Optional[str] = "/docs",
+        redoc_url: Optional[str] = "/redoc",
+        openapi_url: Optional[str] = "/openapi.json",
+        lifespan: Optional[Callable] = None,
         **kwargs
     ):
         super().__init__()
@@ -29,6 +35,14 @@ class TurboAPI(Router):
         self.middleware_stack = []
         self.startup_handlers = []
         self.shutdown_handlers = []
+        self.docs_url = docs_url
+        self.redoc_url = redoc_url
+        self.openapi_url = openapi_url
+        self._lifespan = lifespan
+        self._mounts: dict[str, Any] = {}
+        self._websocket_routes: dict[str, Callable] = {}
+        self._exception_handlers: dict[type, Callable] = {}
+        self._openapi_schema: Optional[dict] = None
 
         print(f"{ROCKET} TurboAPI application created: {title} v{version}")
 
@@ -65,8 +79,49 @@ class TurboAPI(Router):
         super().include_router(router, prefix, tags)
         print(f"[ROUTER] Included router with prefix: {prefix}")
 
-    # FastAPI-like decorators for better developer experience (inherits from Router)
-    # The decorators are already available from the Router base class
+    def mount(self, path: str, app: Any, name: Optional[str] = None) -> None:
+        """Mount a sub-application or static files at a path.
+
+        Usage:
+            app.mount("/static", StaticFiles(directory="static"), name="static")
+        """
+        self._mounts[path] = {"app": app, "name": name}
+        print(f"[MOUNT] Mounted {name or 'app'} at {path}")
+
+    def websocket(self, path: str):
+        """Register a WebSocket endpoint.
+
+        Usage:
+            @app.websocket("/ws")
+            async def websocket_endpoint(websocket: WebSocket):
+                await websocket.accept()
+                data = await websocket.receive_text()
+                await websocket.send_text(f"Echo: {data}")
+        """
+        def decorator(func: Callable):
+            self._websocket_routes[path] = func
+            return func
+        return decorator
+
+    def exception_handler(self, exc_class: type):
+        """Register a custom exception handler.
+
+        Usage:
+            @app.exception_handler(ValueError)
+            async def value_error_handler(request, exc):
+                return JSONResponse(status_code=400, content={"detail": str(exc)})
+        """
+        def decorator(func: Callable):
+            self._exception_handlers[exc_class] = func
+            return func
+        return decorator
+
+    def openapi(self) -> dict:
+        """Get the OpenAPI schema for this application."""
+        if self._openapi_schema is None:
+            from .openapi import generate_openapi_schema
+            self._openapi_schema = generate_openapi_schema(self)
+        return self._openapi_schema
 
     async def _run_startup_handlers(self):
         """Run all startup event handlers."""

@@ -10,7 +10,7 @@ import time
 import threading
 import requests
 from turboapi import TurboAPI
-from satya import Model, Field
+from dhi import BaseModel, Field
 
 
 def test_single_dict_parameter():
@@ -142,13 +142,13 @@ def test_large_json_payload():
     print(f"✅ PASSED: Large payload (42K items) works in {elapsed:.2f}s!")
 
 
-def test_satya_model_validation():
-    """Test Pattern 2: Satya Model validation"""
+def test_dhi_model_validation():
+    """Test Pattern 2: Dhi Model validation"""
     print("\n" + "="*70)
-    print("TEST 4: Satya Model validation")
+    print("TEST 4: Dhi Model validation")
     print("="*70)
     
-    class Candle(Model):
+    class Candle(BaseModel):
         timestamp: int = Field(ge=0)
         open: float = Field(gt=0)
         high: float = Field(gt=0)
@@ -156,17 +156,17 @@ def test_satya_model_validation():
         close: float = Field(gt=0)
         volume: float = Field(ge=0)
     
-    class BacktestRequest(Model):
+    class BacktestRequest(BaseModel):
         symbol: str = Field(min_length=1)
         candles: list  # List[Candle] would be ideal but let's keep it simple
         initial_capital: float = Field(gt=0)
         position_size: float = Field(gt=0, le=1)
     
-    app = TurboAPI(title="Test Satya Model")
+    app = TurboAPI(title="Test Dhi Model")
     
     @app.post("/backtest")
     def backtest(request: BacktestRequest):
-        # Use model_dump() to get actual values (Satya quirk: attributes return Field objects)
+        # Use model_dump() to get actual values (Dhi quirk: attributes return Field objects)
         data = request.model_dump()
         return {
             "symbol": data["symbol"],
@@ -201,7 +201,7 @@ def test_satya_model_validation():
     result = response.json()
     assert result["symbol"] == "BTCUSDT"
     assert result["candles_count"] == 1
-    print("✅ PASSED: Satya Model validation works!")
+    print("✅ PASSED: Dhi Model validation works!")
 
 
 def test_multiple_parameters():
@@ -248,7 +248,7 @@ def main():
         test_single_dict_parameter,
         test_single_list_parameter,
         test_large_json_payload,
-        test_satya_model_validation,
+        test_dhi_model_validation,
         test_multiple_parameters,
     ]
     

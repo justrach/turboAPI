@@ -1,15 +1,15 @@
 """
-Request and Response models for TurboAPI with Satya integration.
+Request and Response models for TurboAPI with Dhi integration.
 """
 
 import json
 from typing import Any
 
-from satya import Field, Model
+from dhi import BaseModel, Field
 
 
-class TurboRequest(Model):
-    """High-performance HTTP Request model powered by Satya."""
+class TurboRequest(BaseModel):
+    """High-performance HTTP Request model powered by Dhi."""
 
     method: str = Field(description="HTTP method")
     path: str = Field(description="Request path")
@@ -28,17 +28,17 @@ class TurboRequest(Model):
         return default
 
     def json(self) -> Any:
-        """Parse request body as JSON using Satya's fast parsing."""
+        """Parse request body as JSON."""
         if not self.body:
             return None
-        # Use Satya's streaming JSON parsing for performance
         return json.loads(self.body.decode('utf-8'))
 
     def validate_json(self, model_class: type) -> Any:
-        """Validate JSON body against a Satya model."""
+        """Validate JSON body against a Dhi model."""
         if not self.body:
             return None
-        return model_class.model_validate_json_bytes(self.body, streaming=True)
+        data = json.loads(self.body.decode('utf-8'))
+        return model_class.model_validate(data)
 
     def text(self) -> str:
         """Get request body as text."""
@@ -60,39 +60,21 @@ class TurboRequest(Model):
 Request = TurboRequest
 
 
-class TurboResponse(Model):
-    """High-performance HTTP Response model powered by Satya."""
+class TurboResponse(BaseModel):
+    """High-performance HTTP Response model powered by Dhi."""
 
     status_code: int = Field(ge=100, le=599, default=200, description="HTTP status code")
     headers: dict[str, str] = Field(default={}, description="HTTP headers")
     content: Any = Field(default="", description="Response content")
 
-    def __init__(self, **data):
-        # Handle content serialization before validation
-        if 'content' in data:
-            content = data['content']
-            if isinstance(content, dict):
-                # Serialize dict to JSON
-                data['content'] = json.dumps(content)
-                if 'headers' not in data:
-                    data['headers'] = {}
-                data['headers']['content-type'] = 'application/json'
-            elif isinstance(content, (str, int, float, bool)):
-                # Keep as-is, will be converted to string
-                pass
-            elif isinstance(content, bytes):
-                # Convert bytes to string for storage
-                data['content'] = content.decode('utf-8')
-            else:
-                # Convert other types to string
-                data['content'] = str(content)
-
-        super().__init__(**data)
-
     @property
     def body(self) -> bytes:
         """Get response body as bytes."""
-        if isinstance(self.content, str):
+        if isinstance(self.content, dict):
+            return json.dumps(self.content).encode('utf-8')
+        elif isinstance(self.content, (list, tuple)):
+            return json.dumps(self.content).encode('utf-8')
+        elif isinstance(self.content, str):
             return self.content.encode('utf-8')
         elif isinstance(self.content, bytes):
             return self.content

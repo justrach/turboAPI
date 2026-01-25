@@ -61,7 +61,10 @@ impl ResponseView {
 
     /// Set text response with automatic content-type header
     pub fn text(&mut self, data: String) -> PyResult<()> {
-        self.set_header("content-type".to_string(), "text/plain; charset=utf-8".to_string());
+        self.set_header(
+            "content-type".to_string(),
+            "text/plain; charset=utf-8".to_string(),
+        );
         self.set_body(data);
         Ok(())
     }

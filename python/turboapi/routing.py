@@ -104,9 +104,10 @@ class RouteRegistry:
 class Router:
     """FastAPI-compatible router with decorators."""
 
-    def __init__(self, prefix: str = "", tags: list[str] = None):
+    def __init__(self, prefix: str = "", tags: list[str] = None, dependencies: list = None):
         self.prefix = prefix
         self.tags = tags or []
+        self.dependencies = dependencies or []
         self.registry = RouteRegistry()
 
     def _create_route_decorator(self, method: HTTPMethod):

@@ -1,5 +1,5 @@
 """Quick test for body parsing"""
-from satya import Model, Field
+from dhi import BaseModel, Field
 from turboapi import TurboAPI
 
 app = TurboAPI(title="Body Test", version="1.0.0")
@@ -9,8 +9,8 @@ app = TurboAPI(title="Body Test", version="1.0.0")
 def simple_handler(name: str, age: int = 25):
     return {"name": name, "age": age}
 
-# Test 2: Satya model
-class User(Model):
+# Test 2: Dhi model
+class User(BaseModel):
     name: str = Field(min_length=1)
     email: str
 

@@ -5,13 +5,24 @@ Ensures query params and headers don't cause performance regression
 
 Baseline: v0.4.13 - 180K+ RPS
 Target: v0.4.14 - Maintain 180K+ RPS (< 5% regression allowed)
+
+NOTE: These tests are skipped in CI environments as shared CI runners
+have unpredictable performance that doesn't reflect actual benchmarks.
 """
 
+import os
 import time
 import threading
 import requests
 import statistics
+import pytest
 from turboapi import TurboAPI
+
+# Skip performance tests in CI environments
+CI_SKIP = pytest.mark.skipif(
+    os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true",
+    reason="Performance tests are skipped in CI (unreliable on shared runners)"
+)
 
 
 def benchmark_endpoint(url, num_requests=1000, warmup=100):
@@ -54,6 +65,7 @@ def benchmark_endpoint(url, num_requests=1000, warmup=100):
     }
 
 
+@CI_SKIP
 def test_baseline_performance():
     """Test baseline performance without query params or headers"""
     print("\n" + "="*70)
@@ -112,6 +124,7 @@ def test_baseline_performance():
     return True
 
 
+@CI_SKIP
 def test_query_param_performance():
     """Test performance with query parameters"""
     print("\n" + "="*70)
@@ -148,6 +161,7 @@ def test_query_param_performance():
     return True
 
 
+@CI_SKIP
 def test_header_performance():
     """Test performance with header parsing"""
     print("\n" + "="*70)
@@ -219,6 +233,7 @@ def test_header_performance():
     return True
 
 
+@CI_SKIP
 def test_combined_performance():
     """Test performance with query params + headers + body"""
     print("\n" + "="*70)

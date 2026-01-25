@@ -1,25 +1,24 @@
+use bytes::{BufMut, Bytes, BytesMut};
 use pyo3::prelude::*;
-use std::sync::Arc;
-use bytes::{Bytes, BytesMut, BufMut};
 use std::collections::VecDeque;
-use tokio::sync::Mutex;
+use std::sync::Arc;
 use std::sync::OnceLock;
+use tokio::sync::Mutex;
 
 // Singleton runtime for zerocopy operations
 static ZEROCOPY_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 fn get_runtime() -> &'static tokio::runtime::Runtime {
-    ZEROCOPY_RUNTIME.get_or_init(|| {
-        tokio::runtime::Runtime::new().expect("Failed to create zerocopy runtime")
-    })
+    ZEROCOPY_RUNTIME
+        .get_or_init(|| tokio::runtime::Runtime::new().expect("Failed to create zerocopy runtime"))
 }
 
 /// Zero-copy buffer pool for efficient memory management
 #[pyclass]
 pub struct ZeroCopyBufferPool {
-    small_buffers: Arc<Mutex<VecDeque<BytesMut>>>,  // 4KB buffers
+    small_buffers: Arc<Mutex<VecDeque<BytesMut>>>, // 4KB buffers
     medium_buffers: Arc<Mutex<VecDeque<BytesMut>>>, // 64KB buffers
-    large_buffers: Arc<Mutex<VecDeque<BytesMut>>>,  // 1MB buffers
+    large_buffers: Arc<Mutex<VecDeque<BytesMut>>>, // 1MB buffers
     pool_stats: Arc<Mutex<PoolStats>>,
 }
 
@@ -63,10 +62,10 @@ impl ZeroCopyBufferPool {
     /// Get a buffer from the pool or allocate a new one
     pub fn get_buffer(&self, size_hint: usize) -> PyResult<ZeroCopyBuffer> {
         let rt = get_runtime();
-        
+
         rt.block_on(async {
             let mut stats = self.pool_stats.lock().await;
-            
+
             match size_hint {
                 0..=4096 => {
                     let mut pool = self.small_buffers.lock().await;
@@ -111,16 +110,17 @@ impl ZeroCopyBufferPool {
     /// Return a buffer to the pool for reuse
     pub fn return_buffer(&self, buffer: &ZeroCopyBuffer) -> PyResult<()> {
         let rt = get_runtime();
-        
+
         rt.block_on(async {
             let inner = buffer.inner.clone();
             let capacity = inner.capacity();
-            
+
             // Only return buffers that are reasonably sized to avoid memory bloat
             match capacity {
                 4096 => {
                     let mut pool = self.small_buffers.lock().await;
-                    if pool.len() < 100 { // Limit pool size
+                    if pool.len() < 100 {
+                        // Limit pool size
                         pool.push_back(inner);
                     }
                 }
@@ -130,7 +130,8 @@ impl ZeroCopyBufferPool {
                         pool.push_back(inner);
                     }
                 }
-                1048576 => { // 1MB
+                1048576 => {
+                    // 1MB
                     let mut pool = self.large_buffers.lock().await;
                     if pool.len() < 20 {
                         pool.push_back(inner);
@@ -140,7 +141,7 @@ impl ZeroCopyBufferPool {
                     // Don't pool unusual sizes
                 }
             }
-            
+
             Ok(())
         })
     }
@@ -148,22 +149,28 @@ impl ZeroCopyBufferPool {
     /// Get pool statistics
     pub fn stats(&self) -> PyResult<String> {
         let rt = get_runtime();
-        
+
         rt.block_on(async {
             let stats = self.pool_stats.lock().await;
             let small_pool_size = self.small_buffers.lock().await.len();
             let medium_pool_size = self.medium_buffers.lock().await.len();
             let large_pool_size = self.large_buffers.lock().await.len();
-            
+
             Ok(format!(
                 "BufferPool Stats:\n\
                 Small (4KB): {} allocated, {} reused, {} pooled\n\
                 Medium (64KB): {} allocated, {} reused, {} pooled\n\
                 Large (1MB): {} allocated, {} reused, {} pooled\n\
                 Total bytes saved: {:.2} MB",
-                stats.small_allocated, stats.small_reused, small_pool_size,
-                stats.medium_allocated, stats.medium_reused, medium_pool_size,
-                stats.large_allocated, stats.large_reused, large_pool_size,
+                stats.small_allocated,
+                stats.small_reused,
+                small_pool_size,
+                stats.medium_allocated,
+                stats.medium_reused,
+                medium_pool_size,
+                stats.large_allocated,
+                stats.large_reused,
+                large_pool_size,
                 stats.total_bytes_saved as f64 / 1024.0 / 1024.0
             ))
         })
@@ -172,7 +179,7 @@ impl ZeroCopyBufferPool {
     /// Clear all pools and reset stats
     pub fn clear(&self) -> PyResult<()> {
         let rt = get_runtime();
-        
+
         rt.block_on(async {
             self.small_buffers.lock().await.clear();
             self.medium_buffers.lock().await.clear();
@@ -276,9 +283,11 @@ impl ZeroCopyBytes {
     /// Slice the bytes (zero-copy)
     pub fn slice(&self, start: usize, end: usize) -> PyResult<ZeroCopyBytes> {
         if start > end || end > self.inner.len() {
-            return Err(pyo3::exceptions::PyIndexError::new_err("Invalid slice range"));
+            return Err(pyo3::exceptions::PyIndexError::new_err(
+                "Invalid slice range",
+            ));
         }
-        
+
         Ok(ZeroCopyBytes {
             inner: self.inner.slice(start..end),
         })
@@ -312,10 +321,10 @@ impl StringInterner {
     /// Intern a string (returns static reference for common strings)
     pub fn intern(&self, s: String) -> PyResult<String> {
         let rt = get_runtime();
-        
+
         rt.block_on(async {
             let mut strings = self.strings.lock().await;
-            
+
             if let Some(&interned) = strings.get(&s) {
                 // Return the interned string
                 Ok(interned.to_string())
@@ -323,12 +332,11 @@ impl StringInterner {
                 // Add to arena and intern
                 let mut arena = self.arena.lock().await;
                 arena.push(s.clone());
-                
+
                 // Get a static reference (this is safe because we keep the string in arena)
-                let static_ref: &'static str = unsafe {
-                    std::mem::transmute(arena.last().unwrap().as_str())
-                };
-                
+                let static_ref: &'static str =
+                    unsafe { std::mem::transmute(arena.last().unwrap().as_str()) };
+
                 strings.insert(s.clone(), static_ref);
                 Ok(s)
             }
@@ -338,11 +346,11 @@ impl StringInterner {
     /// Get interning statistics
     pub fn stats(&self) -> PyResult<String> {
         let rt = get_runtime();
-        
+
         rt.block_on(async {
             let strings = self.strings.lock().await;
             let arena = self.arena.lock().await;
-            
+
             Ok(format!(
                 "String Interner Stats:\n\
                 Interned strings: {}\n\
@@ -373,16 +381,18 @@ impl ZeroCopyFileReader {
     pub fn read_file(&self) -> PyResult<ZeroCopyBytes> {
         use std::fs::File;
         use std::io::Read;
-        
+
         // For now, use regular file reading
         // In production, this would use memory mapping
-        let mut file = File::open(&self.file_path)
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("Failed to open file: {}", e)))?;
-        
+        let mut file = File::open(&self.file_path).map_err(|e| {
+            pyo3::exceptions::PyIOError::new_err(format!("Failed to open file: {}", e))
+        })?;
+
         let mut contents = Vec::new();
-        file.read_to_end(&mut contents)
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("Failed to read file: {}", e)))?;
-        
+        file.read_to_end(&mut contents).map_err(|e| {
+            pyo3::exceptions::PyIOError::new_err(format!("Failed to read file: {}", e))
+        })?;
+
         Ok(ZeroCopyBytes {
             inner: Bytes::from(contents),
         })
@@ -391,10 +401,11 @@ impl ZeroCopyFileReader {
     /// Get file size
     pub fn file_size(&self) -> PyResult<u64> {
         use std::fs;
-        
-        let metadata = fs::metadata(&self.file_path)
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("Failed to get file metadata: {}", e)))?;
-        
+
+        let metadata = fs::metadata(&self.file_path).map_err(|e| {
+            pyo3::exceptions::PyIOError::new_err(format!("Failed to get file metadata: {}", e))
+        })?;
+
         Ok(metadata.len())
     }
 }
@@ -417,7 +428,7 @@ impl SIMDProcessor {
         if a.len() != b.len() {
             return false;
         }
-        
+
         // For now, use standard comparison
         // In production, this would use SIMD instructions
         a == b
@@ -432,7 +443,8 @@ impl SIMDProcessor {
     /// Fast checksum calculation
     pub fn fast_checksum(&self, data: &[u8]) -> u32 {
         // Simple checksum for now
-        data.iter().fold(0u32, |acc, &byte| acc.wrapping_add(byte as u32))
+        data.iter()
+            .fold(0u32, |acc, &byte| acc.wrapping_add(byte as u32))
     }
 }
 
@@ -486,28 +498,28 @@ impl ZeroCopyResponse {
 
     /// Build the response into a zero-copy buffer
     pub fn build(&self) -> PyResult<ZeroCopyBytes> {
-        let estimated_size = 200 + self.headers.len() * 50 + 
-            self.body.as_ref().map(|b| b.len()).unwrap_or(0);
-        
+        let estimated_size =
+            200 + self.headers.len() * 50 + self.body.as_ref().map(|b| b.len()).unwrap_or(0);
+
         let buffer = self.buffer_pool.get_buffer(estimated_size)?;
         let mut buffer = buffer;
-        
+
         // Write status line
         buffer.write_str(&format!("HTTP/1.1 {} OK\r\n", self.status_code))?;
-        
+
         // Write headers
         for (name, value) in &self.headers {
             buffer.write_str(&format!("{}: {}\r\n", name, value))?;
         }
-        
+
         // End headers
         buffer.write_str("\r\n")?;
-        
+
         // Write body if present
         if let Some(ref body) = self.body {
             buffer.write_bytes(&body.as_bytes())?;
         }
-        
+
         Ok(buffer.freeze())
     }
 
