@@ -97,7 +97,10 @@ fn write_value(py: Python, obj: &Bound<'_, PyAny>, buf: &mut Vec<u8>) -> PyResul
                 // Try to parse body as JSON first
                 if let Ok(json_str) = String::from_utf8(body_bytes.clone()) {
                     // If it's valid JSON, use it directly
-                    if json_str.starts_with('{') || json_str.starts_with('[') || json_str.starts_with('"') {
+                    if json_str.starts_with('{')
+                        || json_str.starts_with('[')
+                        || json_str.starts_with('"')
+                    {
                         buf.extend_from_slice(json_str.as_bytes());
                         return Ok(());
                     }

@@ -78,18 +78,23 @@ impl RadixRouter {
 
     /// Add a route to the router
     /// path examples: "/users", "/users/{id}", "/files/*path"
-    pub fn add_route(&mut self, _method: &str, path: &str, handler_key: String) -> Result<(), String> {
+    pub fn add_route(
+        &mut self,
+        _method: &str,
+        path: &str,
+        handler_key: String,
+    ) -> Result<(), String> {
         if path.is_empty() || !path.starts_with('/') {
             return Err("Path must start with '/'".to_string());
         }
 
         let segments = self.parse_path(path);
         let current = Arc::clone(&self.root);
-        
+
         // We need to rebuild the tree since Arc<RouteNode> is immutable
         // In a production version, we'd use interior mutability or a different approach
         self.root = Arc::new(self.insert_route(current, &segments, 0, &handler_key)?);
-        
+
         Ok(())
     }
 
@@ -104,7 +109,7 @@ impl RadixRouter {
             .map(|segment| {
                 if segment.starts_with('{') && segment.ends_with('}') {
                     // Parameter: {id} -> id
-                    let param_name = segment[1..segment.len()-1].to_string();
+                    let param_name = segment[1..segment.len() - 1].to_string();
                     PathSegment::Param(param_name)
                 } else if segment.starts_with('*') {
                     // Wildcard: *path -> path
@@ -143,12 +148,16 @@ impl RadixRouter {
         match segment {
             PathSegment::Static(name) => {
                 if let Some(child) = new_node.children.get(name) {
-                    let updated_child = self.insert_route(Arc::clone(child), segments, index + 1, handler_key)?;
-                    new_node.children.insert(name.to_owned(), Arc::new(updated_child));
+                    let updated_child =
+                        self.insert_route(Arc::clone(child), segments, index + 1, handler_key)?;
+                    new_node
+                        .children
+                        .insert(name.to_owned(), Arc::new(updated_child));
                 } else {
                     let mut child = RouteNode::new(name.to_owned());
                     if index + 1 < segments.len() {
-                        child = self.insert_route(Arc::new(child), segments, index + 1, handler_key)?;
+                        child =
+                            self.insert_route(Arc::new(child), segments, index + 1, handler_key)?;
                     } else {
                         child.handler = Some(handler_key.to_owned());
                     }
@@ -157,12 +166,18 @@ impl RadixRouter {
             }
             PathSegment::Param(param_name) => {
                 if let Some(param_child) = &new_node.param_child {
-                    let updated_child = self.insert_route(Arc::clone(param_child), segments, index + 1, handler_key)?;
+                    let updated_child = self.insert_route(
+                        Arc::clone(param_child),
+                        segments,
+                        index + 1,
+                        handler_key,
+                    )?;
                     new_node.param_child = Some(Arc::new(updated_child));
                 } else {
                     let mut child = RouteNode::new_param(param_name.clone());
                     if index + 1 < segments.len() {
-                        child = self.insert_route(Arc::new(child), segments, index + 1, handler_key)?;
+                        child =
+                            self.insert_route(Arc::new(child), segments, index + 1, handler_key)?;
                     } else {
                         child.handler = Some(handler_key.to_string());
                     }
@@ -257,11 +272,11 @@ impl RadixRouter {
 
     fn count_nodes(&self, node: &RouteNode, stats: &mut RouterStats) {
         stats.total_nodes += 1;
-        
+
         if node.handler.is_some() {
             stats.route_count += 1;
         }
-        
+
         if node.is_param {
             stats.param_nodes += 1;
         }
@@ -301,8 +316,12 @@ mod tests {
     #[test]
     fn test_static_routes() {
         let mut router = RadixRouter::new();
-        router.add_route("GET", "/users", "GET /users".to_string()).unwrap();
-        router.add_route("POST", "/users", "POST /users".to_string()).unwrap();
+        router
+            .add_route("GET", "/users", "GET /users".to_string())
+            .unwrap();
+        router
+            .add_route("POST", "/users", "POST /users".to_string())
+            .unwrap();
 
         let result = router.find_route("GET", "/users");
         assert!(result.is_some());
@@ -319,7 +338,9 @@ mod tests {
     #[test]
     fn test_param_routes() {
         let mut router = RadixRouter::new();
-        router.add_route("GET", "/users/{id}", "GET /users/{id}".to_string()).unwrap();
+        router
+            .add_route("GET", "/users/{id}", "GET /users/{id}".to_string())
+            .unwrap();
 
         let result = router.find_route("GET", "/users/123");
         assert!(result.is_some());
@@ -331,19 +352,30 @@ mod tests {
     #[test]
     fn test_wildcard_routes() {
         let mut router = RadixRouter::new();
-        router.add_route("GET", "/files/*path", "GET /files/*path".to_string()).unwrap();
+        router
+            .add_route("GET", "/files/*path", "GET /files/*path".to_string())
+            .unwrap();
 
         let result = router.find_route("GET", "/files/docs/readme.txt");
         assert!(result.is_some());
         let route_match = result.unwrap();
         assert_eq!(route_match.handler_key, "GET /files/*path");
-        assert_eq!(route_match.params.get("path"), Some(&"docs/readme.txt".to_string()));
+        assert_eq!(
+            route_match.params.get("path"),
+            Some(&"docs/readme.txt".to_string())
+        );
     }
 
     #[test]
     fn test_complex_routes() {
         let mut router = RadixRouter::new();
-        router.add_route("GET", "/api/v1/users/{id}/posts/{post_id}", "GET /api/v1/users/{id}/posts/{post_id}".to_string()).unwrap();
+        router
+            .add_route(
+                "GET",
+                "/api/v1/users/{id}/posts/{post_id}",
+                "GET /api/v1/users/{id}/posts/{post_id}".to_string(),
+            )
+            .unwrap();
 
         let result = router.find_route("GET", "/api/v1/users/123/posts/456");
         assert!(result.is_some());

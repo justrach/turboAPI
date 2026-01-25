@@ -95,18 +95,18 @@ def create_user(request):
     # ... more validation ...
 """)
 
-print("✅ AFTER (Satya automatic validation):")
+print("✅ AFTER (Dhi automatic validation):")
 print("""
-from satya import Model, Field
+from dhi import BaseModel, Field
 
-class User(Model):
+class User(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     email: str = Field(pattern=r'^[\\w\\.-]+@[\\w\\.-]+\\.\\w+$')
     age: int = Field(ge=0, le=150)
 
 @app.post("/users")
 def create_user(user: User):
-    '''Automatic validation with Satya!'''
+    '''Automatic validation with Dhi!'''
     return {"created": user.model_dump()}, 201
 """)
 
@@ -117,7 +117,7 @@ def create_user(user: User):
 print("\n⚡ PERFORMANCE BENEFITS:\n")
 
 print("✅ Automatic body parsing: Faster than manual json.loads()")
-print("✅ Satya validation: ~2x faster than Pydantic")
+print("✅ Dhi validation: ~2x faster than Pydantic")
 print("✅ Type conversion: Zero overhead with Rust core")
 print("✅ Overall: Same FastAPI syntax, 5-10x performance!")
 
@@ -132,7 +132,7 @@ print("=" * 70)
 improvements = [
     ("Automatic JSON body parsing", "✅ No more manual request.json()"),
     ("Tuple returns for status codes", "✅ return data, 404 works!"),
-    ("Satya model validation", "✅ Faster than Pydantic"),
+    ("Dhi model validation", "✅ Faster than Pydantic"),
     ("Startup/shutdown events", "✅ @app.on_event() supported"),
     ("Type-safe parameters", "✅ Automatic conversion"),
     ("100% FastAPI compatible", "✅ Drop-in replacement"),
@@ -145,6 +145,6 @@ for feature, status in improvements:
 print("\n" + "=" * 70)
 print("🎉 TurboAPI v0.3.0+ is production-ready!")
 print("=" * 70)
-print("\nInstall: pip install satya && pip install -e python/")
+print("\nInstall: pip install dhi && pip install -e python/")
 print("Docs: See FASTAPI_COMPATIBILITY.md")
 print("\n")

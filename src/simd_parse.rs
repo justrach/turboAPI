@@ -351,10 +351,7 @@ fn set_simd_object_into_dict<'py>(
 /// Parse JSON body using simd-json and return as a Python dict.
 /// This is used for model validation where we need the full dict.
 #[inline]
-pub fn parse_json_to_pydict<'py>(
-    py: Python<'py>,
-    body: &[u8],
-) -> PyResult<Bound<'py, PyDict>> {
+pub fn parse_json_to_pydict<'py>(py: Python<'py>, body: &[u8]) -> PyResult<Bound<'py, PyDict>> {
     if body.is_empty() {
         return Ok(PyDict::new(py));
     }
@@ -372,7 +369,9 @@ pub fn parse_json_to_pydict<'py>(
             set_simd_value_into_dict(py, key.as_ref(), value, &dict)?;
         }
     } else {
-        return Err(pyo3::exceptions::PyValueError::new_err("Expected JSON object"));
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Expected JSON object",
+        ));
     }
 
     Ok(dict)
@@ -387,11 +386,21 @@ fn set_simd_value_into_dict<'py>(
 ) -> PyResult<()> {
     match value {
         simd_json::BorrowedValue::String(s) => dict.set_item(key, s.as_ref())?,
-        simd_json::BorrowedValue::Static(simd_json::StaticNode::I64(n)) => dict.set_item(key, *n)?,
-        simd_json::BorrowedValue::Static(simd_json::StaticNode::U64(n)) => dict.set_item(key, *n)?,
-        simd_json::BorrowedValue::Static(simd_json::StaticNode::F64(n)) => dict.set_item(key, *n)?,
-        simd_json::BorrowedValue::Static(simd_json::StaticNode::Bool(b)) => dict.set_item(key, *b)?,
-        simd_json::BorrowedValue::Static(simd_json::StaticNode::Null) => dict.set_item(key, py.None())?,
+        simd_json::BorrowedValue::Static(simd_json::StaticNode::I64(n)) => {
+            dict.set_item(key, *n)?
+        }
+        simd_json::BorrowedValue::Static(simd_json::StaticNode::U64(n)) => {
+            dict.set_item(key, *n)?
+        }
+        simd_json::BorrowedValue::Static(simd_json::StaticNode::F64(n)) => {
+            dict.set_item(key, *n)?
+        }
+        simd_json::BorrowedValue::Static(simd_json::StaticNode::Bool(b)) => {
+            dict.set_item(key, *b)?
+        }
+        simd_json::BorrowedValue::Static(simd_json::StaticNode::Null) => {
+            dict.set_item(key, py.None())?
+        }
         simd_json::BorrowedValue::Array(arr) => {
             let list = pyo3::types::PyList::empty(py);
             for item in arr.iter() {
@@ -484,10 +493,7 @@ mod tests {
 
     #[test]
     fn test_extract_multiple_path_params() {
-        let params = extract_path_params(
-            "/users/{user_id}/posts/{post_id}",
-            "/users/42/posts/99",
-        );
+        let params = extract_path_params("/users/{user_id}/posts/{post_id}", "/users/42/posts/99");
         assert_eq!(params.get("user_id"), Some(&"42"));
         assert_eq!(params.get("post_id"), Some(&"99"));
     }

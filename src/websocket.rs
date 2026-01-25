@@ -1,13 +1,11 @@
+use futures_util::{SinkExt, StreamExt};
 use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
-use tokio_tungstenite::{
-    accept_async, tungstenite::protocol::Message,
-};
 use tokio::net::{TcpListener, TcpStream};
-use futures_util::{SinkExt, StreamExt};
+use tokio::sync::{Mutex, RwLock};
+use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
 
 type ConnectionId = u64;
 type WebSocketSender = tokio::sync::mpsc::UnboundedSender<Message>;
@@ -39,7 +37,7 @@ impl WebSocketServer {
     pub fn add_handler(&mut self, message_type: String, handler: PyObject) -> PyResult<()> {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let handlers = Arc::clone(&self.message_handlers);
-        
+
         rt.block_on(async {
             let mut handlers_guard = handlers.lock().await;
             handlers_guard.insert(message_type, Arc::new(handler));
@@ -51,30 +49,35 @@ impl WebSocketServer {
     pub fn run(&self, py: Python) -> PyResult<()> {
         let addr: SocketAddr = format!("{}:{}", self.host, self.port)
             .parse()
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid address: {}", e)))?;
+            .map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("Invalid address: {}", e))
+            })?;
 
         let connections = Arc::clone(&self.connections);
         let handlers = Arc::clone(&self.message_handlers);
         let next_id = Arc::clone(&self.next_connection_id);
-        
+
         py.allow_threads(|| {
             // Create multi-threaded Tokio runtime for WebSockets
             let worker_threads = std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4);
-            
+
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(worker_threads)
                 .enable_all()
                 .build()
                 .unwrap();
-            
+
             rt.block_on(async {
                 let listener = TcpListener::bind(addr).await.unwrap();
                 // Production WebSocket server - minimal startup logging
                 if cfg!(debug_assertions) {
                     println!("🌐 TurboAPI WebSocket server starting on ws://{}", addr);
-                    println!("🧵 Using {} worker threads for real-time processing", worker_threads);
+                    println!(
+                        "🧵 Using {} worker threads for real-time processing",
+                        worker_threads
+                    );
                     println!("⚡ Features: Bidirectional streaming, broadcast, multiplexing");
                 }
 
@@ -92,7 +95,9 @@ impl WebSocketServer {
                             connections_clone,
                             handlers_clone,
                             next_id_clone,
-                        ).await {
+                        )
+                        .await
+                        {
                             eprintln!("WebSocket connection error: {:?}", e);
                         }
                     });
@@ -107,17 +112,17 @@ impl WebSocketServer {
     pub fn broadcast(&self, message: String) -> PyResult<usize> {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let connections = Arc::clone(&self.connections);
-        
+
         rt.block_on(async {
             let connections_guard = connections.read().await;
             let mut sent_count = 0;
-            
+
             for sender in connections_guard.values() {
                 if sender.send(Message::Text(message.clone())).is_ok() {
                     sent_count += 1;
                 }
             }
-            
+
             Ok(sent_count)
         })
     }
@@ -126,10 +131,10 @@ impl WebSocketServer {
     pub fn send_to(&self, connection_id: u64, message: String) -> PyResult<bool> {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let connections = Arc::clone(&self.connections);
-        
+
         rt.block_on(async {
             let connections_guard = connections.read().await;
-            
+
             if let Some(sender) = connections_guard.get(&connection_id) {
                 Ok(sender.send(Message::Text(message)).is_ok())
             } else {
@@ -142,7 +147,7 @@ impl WebSocketServer {
     pub fn connection_count(&self) -> usize {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let connections = Arc::clone(&self.connections);
-        
+
         rt.block_on(async {
             let connections_guard = connections.read().await;
             connections_guard.len()
@@ -153,7 +158,7 @@ impl WebSocketServer {
     pub fn info(&self) -> String {
         format!(
             "WebSocket Server on {}:{} ({} connections)",
-            self.host, 
+            self.host,
             self.port,
             self.connection_count()
         )
@@ -311,7 +316,10 @@ async fn handle_websocket_connection(
 
     // Only log connections in debug mode
     if cfg!(debug_assertions) {
-        println!("🔗 New WebSocket connection: {} (ID: {})", client_addr, connection_id);
+        println!(
+            "🔗 New WebSocket connection: {} (ID: {})",
+            client_addr, connection_id
+        );
     }
 
     // Accept WebSocket handshake
@@ -346,11 +354,11 @@ async fn handle_websocket_connection(
                     if cfg!(debug_assertions) {
                         println!("📨 Received text from {}: {}", connection_id, text);
                     }
-                    
+
                     // Echo the message back (for now)
                     // TODO: Route to Python handlers
                     let echo_response = format!("Echo: {}", text);
-                    
+
                     // Send echo back through the connection
                     let connections_guard = connections_for_cleanup.read().await;
                     if let Some(sender) = connections_guard.get(&connection_id) {
@@ -360,9 +368,13 @@ async fn handle_websocket_connection(
                 Ok(Message::Binary(data)) => {
                     // Debug logging only
                     if cfg!(debug_assertions) {
-                        println!("📦 Received binary from {}: {} bytes", connection_id, data.len());
+                        println!(
+                            "📦 Received binary from {}: {} bytes",
+                            connection_id,
+                            data.len()
+                        );
                     }
-                    
+
                     // Echo binary data back
                     let connections_guard = connections_for_cleanup.read().await;
                     if let Some(sender) = connections_guard.get(&connection_id) {
@@ -429,7 +441,7 @@ impl BroadcastManager {
     pub fn create_channel(&self, channel_name: String) -> PyResult<()> {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let channels = Arc::clone(&self.channels);
-        
+
         rt.block_on(async {
             let mut channels_guard = channels.write().await;
             channels_guard.insert(channel_name, Vec::new());
@@ -441,11 +453,11 @@ impl BroadcastManager {
     pub fn broadcast_to_channel(&self, channel_name: String, message: String) -> PyResult<usize> {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let channels = Arc::clone(&self.channels);
-        
+
         rt.block_on(async {
             let channels_guard = channels.read().await;
             let mut sent_count = 0;
-            
+
             if let Some(senders) = channels_guard.get(&channel_name) {
                 for sender in senders {
                     if sender.send(Message::Text(message.clone())).is_ok() {
@@ -453,7 +465,7 @@ impl BroadcastManager {
                     }
                 }
             }
-            
+
             Ok(sent_count)
         })
     }
@@ -462,15 +474,15 @@ impl BroadcastManager {
     pub fn channel_stats(&self) -> PyResult<String> {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let channels = Arc::clone(&self.channels);
-        
+
         rt.block_on(async {
             let channels_guard = channels.read().await;
             let mut stats = Vec::new();
-            
+
             for (name, senders) in channels_guard.iter() {
                 stats.push(format!("{}: {} connections", name, senders.len()));
             }
-            
+
             Ok(format!("Channels: [{}]", stats.join(", ")))
         })
     }

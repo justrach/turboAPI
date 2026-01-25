@@ -1,9 +1,9 @@
 """
 Test FastAPI Compatibility Features in TurboAPI v0.3.0+
-Demonstrates automatic body parsing, Satya validation, and tuple returns
+Demonstrates automatic body parsing, Dhi validation, and tuple returns
 """
 
-from satya import Field, Model
+from dhi import BaseModel, Field
 
 from turboapi import TurboAPI
 
@@ -42,14 +42,14 @@ def search(query: str, top_k: int = 10):
 # 2. SATYA MODEL VALIDATION
 # ============================================================================
 
-class UserCreate(Model):
-    """User creation model with Satya validation."""
+class UserCreate(BaseModel):
+    """User creation model with Dhi validation."""
     name: str = Field(min_length=1, max_length=100)
     email: str = Field(pattern=r'^[\w\.-]+@[\w\.-]+\.\w+$')
     age: int = Field(ge=0, le=150)
 
 
-class UserResponse(Model):
+class UserResponse(BaseModel):
     """User response model."""
     id: int
     name: str
@@ -60,7 +60,7 @@ class UserResponse(Model):
 @app.post("/users/validate")
 def create_validated_user(user: UserCreate):
     """
-    Automatic Satya validation!
+    Automatic Dhi validation!
     
     Test with:
     curl -X POST http://localhost:8000/users/validate \
@@ -176,7 +176,7 @@ def shutdown():
 # 7. COMPLEX NESTED MODELS
 # ============================================================================
 
-class Address(Model):
+class Address(BaseModel):
     """Address model."""
     street: str = Field(min_length=1)
     city: str = Field(min_length=1)
@@ -184,7 +184,7 @@ class Address(Model):
     zip_code: str = Field(pattern=r'^\d{5}$')
 
 
-class UserWithAddress(Model):
+class UserWithAddress(BaseModel):
     """User with nested address."""
     name: str = Field(min_length=1, max_length=100)
     email: str = Field(pattern=r'^[\w\.-]+@[\w\.-]+\.\w+$')
@@ -194,7 +194,7 @@ class UserWithAddress(Model):
 @app.post("/users/with-address")
 def create_user_with_address(user: UserWithAddress):
     """
-    Nested Satya model validation!
+    Nested Dhi model validation!
     
     Test with:
     curl -X POST http://localhost:8000/users/with-address \
@@ -252,7 +252,7 @@ def root():
         "version": "1.0.0",
         "features": [
             "Automatic JSON body parsing",
-            "Satya model validation",
+            "Dhi model validation",
             "Tuple return for status codes",
             "Startup/shutdown events",
             "Type-safe parameters"
