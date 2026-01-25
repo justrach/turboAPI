@@ -6,7 +6,7 @@ validation powered by Zig/C native extensions.
 """
 
 import pytest
-from dhi import BaseModel, Field, ValidationError, field_validator
+from dhi import BaseModel, Field, ValidationError
 from turboapi.models import TurboRequest, TurboResponse
 
 
@@ -251,17 +251,17 @@ class TestDhiFeatures:
         assert "alice@example.com" in json_str
 
     def test_field_validator(self):
-        """Test field_validator decorator."""
-        class User(BaseModel):
-            name: str
-            email: str
+        """Test string transformation with StripWhitespace.
 
-            @field_validator('name')
-            @classmethod
-            def name_must_not_be_empty(cls, v):
-                if not v.strip():
-                    raise ValueError('name cannot be empty')
-                return v.strip()
+        Note: dhi 1.1.15+ uses built-in string transformers like StripWhitespace
+        instead of field_validator decorators for common string operations.
+        """
+        from typing import Annotated
+        from dhi import StripWhitespace
+
+        class User(BaseModel):
+            name: Annotated[str, StripWhitespace()]
+            email: str
 
         user = User(name="  Alice  ", email="a@b.com")
         assert user.name == "Alice"
