@@ -2,6 +2,9 @@
 target/
 Cargo.lock
 
+# Conductor workspace
+.context/
+
 # Python artifacts
 __pycache__/
 *.py[cod]
