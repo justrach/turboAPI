@@ -527,16 +527,45 @@ def get_password_hash(password: str) -> str:
 class Depends:
     """
     Dependency injection marker (compatible with FastAPI).
-    
+
     Usage:
         def get_current_user(token: str = Depends(oauth2_scheme)):
             return decode_token(token)
-        
+
         @app.get("/users/me")
         def read_users_me(user = Depends(get_current_user)):
             return user
     """
-    
+
     def __init__(self, dependency: Optional[Callable] = None, *, use_cache: bool = True):
         self.dependency = dependency
         self.use_cache = use_cache
+
+
+class Security(Depends):
+    """
+    Security dependency with scopes (compatible with FastAPI).
+
+    Similar to Depends but adds OAuth2 scope support.
+
+    Usage:
+        oauth2_scheme = OAuth2PasswordBearer(
+            tokenUrl="token",
+            scopes={"read": "Read access", "write": "Write access"}
+        )
+
+        @app.get("/items/")
+        async def read_items(token: str = Security(oauth2_scheme, scopes=["read"])):
+            return {"token": token}
+    """
+
+    def __init__(
+        self,
+        dependency: Optional[Callable] = None,
+        *,
+        scopes: Optional[List[str]] = None,
+        use_cache: bool = True,
+    ):
+        super().__init__(dependency=dependency, use_cache=use_cache)
+        self.scopes = scopes or []
+        self.security_scopes = SecurityScopes(scopes=self.scopes)
