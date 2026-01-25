@@ -77,13 +77,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install maturin pytest pytest-asyncio requests
 
-      - name: Build and install
-        run: maturin build --release -i python --out dist && pip install dist/*.whl
-
-      - name: Install turboapi and dhi
+      - name: Build and install turboapi
         run: |
-          pip install "dhi>=1.1.0"
-          pip install -e $GITHUB_WORKSPACE/python
+          maturin build --release -i python --out dist
+          pip install dist/*.whl
+          # dhi is installed as a dependency automatically
 
       - name: Run tests
         run: python -m pytest $GITHUB_WORKSPACE/tests/ -v --tb=short
@@ -116,13 +114,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install maturin pytest pytest-asyncio requests
 
-      - name: Build and install (free-threaded)
-        run: maturin build --release -i python --out dist && pip install dist/*.whl
-
-      - name: Install turboapi and dhi
+      - name: Build and install turboapi (free-threaded)
         run: |
-          pip install "dhi>=1.1.0"
-          pip install -e $GITHUB_WORKSPACE/python
+          maturin build --release -i python --out dist
+          pip install dist/*.whl
+          # dhi is installed as a dependency automatically
 
       - name: Run tests (free-threaded)
         run: python -m pytest $GITHUB_WORKSPACE/tests/ -v --tb=short
