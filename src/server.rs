@@ -1152,7 +1152,8 @@ fn create_zero_copy_response(data: &str) -> Bytes {
 fn initialize_tokio_runtime() -> PyResult<TokioRuntime> {
     eprintln!("🚀 PHASE D: Initializing Pure Rust Async Runtime with Tokio...");
 
-    pyo3::prepare_freethreaded_python();
+    // Note: No need to call prepare_freethreaded_python() since we're a Python extension
+    // Python is already initialized when our module is loaded
 
     // Create single Python event loop for pyo3-async-runtimes
     // This is only used for Python asyncio primitives (asyncio.sleep, etc.)
@@ -1450,7 +1451,7 @@ fn spawn_loop_shards(num_shards: usize) -> Vec<LoopShard> {
                 rt.block_on(local.run_until(async move {
                     eprintln!("🚀 Loop shard {} starting...", shard_id);
 
-                    pyo3::prepare_freethreaded_python();
+                    // Note: Python is already initialized (extension module)
 
                     // PHASE B: Create event loop with semaphore limiter for this shard
                     let (task_locals, json_dumps_fn, event_loop_handle, limiter) =
@@ -1938,8 +1939,7 @@ fn spawn_python_workers(num_workers: usize) -> Vec<mpsc::Sender<PythonRequest>> 
                 rt.block_on(local.run_until(async move {
                     eprintln!("🚀 Python worker {} starting...", worker_id);
 
-                    // Initialize Python ONCE on this thread
-                    pyo3::prepare_freethreaded_python();
+                    // Note: Python is already initialized (extension module)
 
                     // OPTIMIZATION: Create persistent asyncio event loop and cache TaskLocals + callables!
                     let (task_locals, json_dumps_fn, event_loop_handle) =

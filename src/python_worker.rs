@@ -95,8 +95,7 @@ pub fn spawn_python_worker(queue_capacity: usize) -> PythonWorkerHandle {
 
 /// Main Python worker loop - runs on dedicated thread
 async fn run_python_worker(mut rx: mpsc::Receiver<PythonRequest>) -> PyResult<()> {
-    // Initialize Python interpreter (if not already initialized)
-    pyo3::prepare_freethreaded_python();
+    // Note: Python is already initialized (extension module)
 
     // Set up persistent asyncio event loop and TaskLocals
     let (task_locals, json_module) = Python::with_gil(|py| -> PyResult<_> {

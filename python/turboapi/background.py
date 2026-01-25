@@ -21,6 +21,11 @@ class BackgroundTasks:
     def __init__(self):
         self._tasks: list[tuple[Callable, tuple, dict]] = []
 
+    @property
+    def tasks(self) -> list[tuple[Callable, tuple, dict]]:
+        """Return the list of tasks (FastAPI compatibility)."""
+        return self._tasks
+
     def add_task(self, func: Callable, *args: Any, **kwargs: Any) -> None:
         """Add a task to be run in the background after the response is sent."""
         self._tasks.append((func, args, kwargs))
