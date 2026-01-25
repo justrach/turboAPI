@@ -2,6 +2,8 @@ use pyo3::prelude::*;
 
 pub mod http2;
 pub mod micro_bench;
+#[cfg(any(feature = "tls-rustls", feature = "tls-openssl"))]
+pub mod tls;
 pub mod middleware;
 pub mod python_worker;
 mod request;
