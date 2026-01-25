@@ -17,10 +17,9 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::thread;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::RwLock;
 
 type Handler = Arc<PyObject>;
 
@@ -33,8 +32,14 @@ enum HandlerType {
     BodySyncFast,
     /// Model sync: Rust parses JSON with simd-json, validates with dhi model in Python.
     ModelSyncFast,
+    /// Simple async: no body, just path/query params. Rust parses, calls async handler via Tokio.
+    SimpleAsyncFast,
+    /// Async body: Rust parses body with simd-json, calls async handler via Tokio.
+    BodyAsyncFast,
     /// Needs full Python enhanced wrapper (async, dependencies, etc.)
     Enhanced,
+    /// WebSocket: HTTP upgrade to WebSocket protocol
+    WebSocket,
 }
 
 // Metadata struct with fast dispatch info
@@ -55,40 +60,8 @@ struct HandlerResponse {
     status_code: u16,
 }
 
-// MULTI-WORKER: Request structure for worker communication
-struct PythonRequest {
-    handler: Handler,
-    is_async: bool, // Cached from HandlerMetadata - no need to check at runtime!
-    method: String,
-    path: String,
-    query_string: String,
-    body: Bytes,
-    response_tx: oneshot::Sender<Result<HandlerResponse, String>>,
-}
-
-// LOOP SHARDING: Structure for each event loop shard
-struct LoopShard {
-    shard_id: usize,
-    task_locals: pyo3_async_runtimes::TaskLocals,
-    json_dumps_fn: PyObject,
-    limiter: PyObject, // PHASE B: Semaphore limiter for gating
-    tx: mpsc::Sender<PythonRequest>,
-}
-
-impl Clone for LoopShard {
-    fn clone(&self) -> Self {
-        Python::with_gil(|py| Self {
-            shard_id: self.shard_id,
-            task_locals: self.task_locals.clone_ref(py),
-            json_dumps_fn: self.json_dumps_fn.clone_ref(py),
-            limiter: self.limiter.clone_ref(py),
-            tx: self.tx.clone(),
-        })
-    }
-}
-
-// PHASE D: Pure Rust Async Runtime with Tokio
-// This replaces Python event loop shards with Tokio's work-stealing scheduler
+// Pure Rust Async Runtime with Tokio
+// Uses work-stealing scheduler across all CPU cores for maximum throughput
 struct TokioRuntime {
     task_locals: pyo3_async_runtimes::TaskLocals,
     json_dumps_fn: PyObject,
@@ -111,15 +84,15 @@ static CACHED_BUILTINS_MODULE: OnceLock<PyObject> = OnceLock::new();
 static CACHED_TYPES_MODULE: OnceLock<PyObject> = OnceLock::new();
 
 /// TurboServer - Main HTTP server class with radix trie routing
+/// Uses pure Tokio runtime for high-performance async processing
 #[pyclass]
 pub struct TurboServer {
-    handlers: Arc<RwLock<HashMap<String, HandlerMetadata>>>, // HYBRID: Store metadata with is_async cached!
+    handlers: Arc<RwLock<HashMap<String, HandlerMetadata>>>,
     router: Arc<RwLock<RadixRouter>>,
     host: String,
     port: u16,
     worker_threads: usize,
-    buffer_pool: Arc<ZeroCopyBufferPool>, // PHASE 2: Zero-copy buffer pool
-    loop_shards: Option<Vec<LoopShard>>, // LOOP SHARDING: Multiple event loop shards for parallel processing
+    buffer_pool: Arc<ZeroCopyBufferPool>,
 }
 
 #[pymethods]
@@ -138,13 +111,12 @@ impl TurboServer {
         let worker_threads = ((cpu_cores * 3).min(24)).max(8);
 
         TurboServer {
-            handlers: Arc::new(RwLock::new(HashMap::with_capacity(128))), // Increased capacity
+            handlers: Arc::new(RwLock::new(HashMap::with_capacity(128))),
             router: Arc::new(RwLock::new(RadixRouter::new())),
             host: host.unwrap_or_else(|| "127.0.0.1".to_string()),
             port: port.unwrap_or(8000),
             worker_threads,
-            buffer_pool: Arc::new(ZeroCopyBufferPool::new()), // PHASE 2: Initialize buffer pool
-            loop_shards: None,                                // LOOP SHARDING: Initialized in run()
+            buffer_pool: Arc::new(ZeroCopyBufferPool::new()),
         }
     }
 
@@ -312,106 +284,128 @@ impl TurboServer {
         Ok(())
     }
 
-    /// Start the HTTP server with multi-threading support
-    pub fn run(&self, py: Python) -> PyResult<()> {
-        // Optimize: Use pre-allocated string for address parsing (cold path)
-        let mut addr_str = String::with_capacity(self.host.len() + 10);
-        addr_str.push_str(&self.host);
-        addr_str.push(':');
-        addr_str.push_str(&self.port.to_string());
+    /// Register an async route with fast dispatch metadata (Phase 4: async fast paths).
+    ///
+    /// handler_type: "simple_async" | "body_async"
+    /// param_types_json: JSON string of {"param_name": "type_hint", ...}
+    /// original_handler: The unwrapped Python async function
+    pub fn add_route_async_fast(
+        &self,
+        method: String,
+        path: String,
+        handler: PyObject,
+        handler_type: String,
+        param_types_json: String,
+        original_handler: PyObject,
+    ) -> PyResult<()> {
+        let route_key = format!("{} {}", method.to_uppercase(), path);
 
-        let addr: SocketAddr = addr_str
-            .parse()
-            .map_err(|_| pyo3::exceptions::PyValueError::new_err("Invalid address"))?;
+        let ht = match handler_type.as_str() {
+            "simple_async" => HandlerType::SimpleAsyncFast,
+            "body_async" => HandlerType::BodyAsyncFast,
+            _ => HandlerType::Enhanced, // Fallback to Enhanced for unknown types
+        };
+
+        // Parse param types from JSON
+        let param_types: HashMap<String, String> =
+            serde_json::from_str(&param_types_json).unwrap_or_default();
 
         let handlers = Arc::clone(&self.handlers);
         let router = Arc::clone(&self.router);
+        let path_clone = path.clone();
 
-        // LOOP SHARDING: Spawn K event loop shards for parallel processing!
-        // Each shard has its own event loop thread - eliminates global contention!
-        let cpu_cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(8);
+        Python::with_gil(|py| {
+            py.allow_threads(|| {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    let mut handlers_guard = handlers.write().await;
+                    handlers_guard.insert(
+                        route_key.clone(),
+                        HandlerMetadata {
+                            handler: Arc::new(handler),
+                            is_async: true, // Async handlers
+                            handler_type: ht,
+                            route_pattern: path_clone,
+                            param_types,
+                            original_handler: Some(Arc::new(original_handler)),
+                            model_info: None,
+                        },
+                    );
+                    drop(handlers_guard);
 
-        // Optimal: 8-16 shards (tune based on CPU cores)
-        let num_shards = cpu_cores.min(16).max(8);
-
-        eprintln!(
-            "🚀 Spawning {} event loop shards for parallel async processing!",
-            num_shards
-        );
-        let loop_shards = spawn_loop_shards(num_shards);
-        eprintln!("✅ All {} loop shards ready!", num_shards);
-
-        py.allow_threads(|| {
-            // PHASE 2: Optimized runtime with advanced thread management
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(self.worker_threads) // Intelligently calculated worker threads
-                .thread_name("turbo-worker")
-                .thread_keep_alive(std::time::Duration::from_secs(60)) // Keep threads alive longer
-                .thread_stack_size(2 * 1024 * 1024) // 2MB stack for deep call stacks
-                .enable_all()
-                .build()
-                .unwrap();
-
-            rt.block_on(async {
-                let listener = TcpListener::bind(addr).await.unwrap();
-
-                // PHASE 2: Adaptive connection management with backpressure tuning
-                let base_connections = self.worker_threads * 50;
-                let max_connections = (base_connections * 110) / 100; // 10% headroom for bursts
-                let connection_semaphore = Arc::new(tokio::sync::Semaphore::new(max_connections));
-
-                loop {
-                    let (stream, _) = listener.accept().await.unwrap();
-
-                    // Acquire connection permit (backpressure control)
-                    let permit = match connection_semaphore.clone().try_acquire_owned() {
-                        Ok(permit) => permit,
-                        Err(_) => {
-                            // Too many connections, drop this one
-                            drop(stream);
-                            continue;
-                        }
-                    };
-
-                    let io = TokioIo::new(stream);
-                    let handlers_clone = Arc::clone(&handlers);
-                    let router_clone = Arc::clone(&router);
-                    let loop_shards_clone = loop_shards.clone(); // LOOP SHARDING: Clone shards Vec
-
-                    // Spawn optimized connection handler
-                    tokio::task::spawn(async move {
-                        let _permit = permit; // Keep permit until connection closes
-
-                        let _ = http1::Builder::new()
-                            .keep_alive(true) // Enable keep-alive
-                            .half_close(true) // Better connection handling
-                            .pipeline_flush(true) // PHASE 2: Enable response pipelining
-                            .max_buf_size(16384) // PHASE 2: Optimize buffer size for HTTP/2 compatibility
-                            .serve_connection(
-                                io,
-                                service_fn(move |req| {
-                                    let handlers = Arc::clone(&handlers_clone);
-                                    let router = Arc::clone(&router_clone);
-                                    let loop_shards = loop_shards_clone.clone(); // LOOP SHARDING
-                                    handle_request(req, handlers, router, loop_shards)
-                                }),
-                            )
-                            .await;
-                        // Connection automatically cleaned up when task ends
-                    });
-                }
+                    let mut router_guard = router.write().await;
+                    let _ =
+                        router_guard.add_route(&method.to_uppercase(), &path, route_key.clone());
+                });
             })
         });
 
         Ok(())
     }
 
-    /// PHASE D: Start the HTTP server with Pure Rust Async Runtime (Tokio)
-    /// Expected: 3-5x performance improvement (10-18K RPS target!)
-    pub fn run_tokio(&self, py: Python) -> PyResult<()> {
-        eprintln!("🚀 PHASE D: Starting TurboAPI with Pure Rust Async Runtime!");
+    /// Register a WebSocket route handler
+    /// WebSocket routes are handled with HTTP upgrade protocol
+    pub fn add_route_websocket(
+        &self,
+        path: String,
+        on_connect: PyObject,
+        on_message: PyObject,
+        on_disconnect: PyObject,
+    ) -> PyResult<()> {
+        let route_key = format!("WEBSOCKET {}", path);
+        let handlers = Arc::clone(&self.handlers);
+        let router = Arc::clone(&self.router);
+        let path_clone = path.clone();
+
+        // Clone PyObjects inside GIL before releasing threads
+        Python::with_gil(|py| {
+            let on_message_clone = on_message.clone_ref(py);
+            let on_connect_clone = on_connect.clone_ref(py);
+            let on_disconnect_clone = on_disconnect.clone_ref(py);
+
+            py.allow_threads(|| {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    let mut handlers_guard = handlers.write().await;
+                    handlers_guard.insert(
+                        route_key.clone(),
+                        HandlerMetadata {
+                            handler: Arc::new(on_message_clone),
+                            is_async: true, // WebSocket handlers are inherently async
+                            handler_type: HandlerType::WebSocket,
+                            route_pattern: path_clone.clone(),
+                            param_types: HashMap::new(),
+                            original_handler: Some(Arc::new(on_connect_clone)),
+                            model_info: Some(("on_disconnect".to_string(), Arc::new(on_disconnect_clone))),
+                        },
+                    );
+                    drop(handlers_guard);
+
+                    // Also register as GET for upgrade detection
+                    let mut router_guard = router.write().await;
+                    let _ = router_guard.add_route("GET", &path_clone, route_key.clone());
+                });
+            })
+        });
+
+        eprintln!("🌐 WebSocket route registered: {}", path);
+        Ok(())
+    }
+
+    /// Legacy HTTP server method (DEPRECATED)
+    /// This now delegates to run() for backwards compatibility
+    #[deprecated(since = "0.5.0", note = "Use run() instead - same performance, cleaner API")]
+    pub fn run_legacy(&self, py: Python) -> PyResult<()> {
+        eprintln!("⚠️  WARNING: run_legacy() is deprecated and now delegates to run().");
+        eprintln!("   Please update your code to use run() directly.");
+        self.run(py)
+    }
+
+    /// Start the HTTP server with Pure Rust Async Runtime (Tokio)
+    /// High-performance mode with work-stealing scheduler across all CPU cores
+    /// Expected: 10-18K RPS (3-5x improvement over legacy loop shards)
+    pub fn run(&self, py: Python) -> PyResult<()> {
+        eprintln!("🚀 Starting TurboAPI with Pure Rust Async Runtime!");
 
         // Parse address
         let mut addr_str = String::with_capacity(self.host.len() + 10);
@@ -426,22 +420,23 @@ impl TurboServer {
         let handlers = Arc::clone(&self.handlers);
         let router = Arc::clone(&self.router);
 
-        // PHASE D: Initialize Tokio runtime (replaces loop shards!)
+        // Initialize Tokio runtime with optimized settings
         let tokio_runtime = initialize_tokio_runtime()?;
         eprintln!("✅ Tokio runtime initialized successfully!");
 
         py.allow_threads(|| {
-            // PHASE D: Create Tokio multi-threaded runtime
-            // Uses work-stealing scheduler across all CPU cores!
+            // Create Tokio multi-threaded runtime with work-stealing scheduler
             let cpu_cores = num_cpus::get();
             eprintln!(
-                "🚀 Creating Tokio runtime with {} worker threads",
+                "🧵 Creating Tokio runtime with {} worker threads",
                 cpu_cores
             );
 
             let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(cpu_cores) // Use all CPU cores
-                .thread_name("tokio-worker")
+                .worker_threads(cpu_cores)
+                .thread_name("turbo-worker")
+                .thread_keep_alive(std::time::Duration::from_secs(60))
+                .thread_stack_size(2 * 1024 * 1024) // 2MB stack
                 .enable_all()
                 .build()
                 .unwrap();
@@ -451,14 +446,14 @@ impl TurboServer {
                 eprintln!("✅ Server listening on {}", addr);
                 eprintln!("🎯 Target: 10-18K RPS with Tokio work-stealing scheduler!");
 
-                // Connection management
-                let max_connections = cpu_cores * 100; // Higher capacity with Tokio
+                // Optimized connection management (2x capacity)
+                let max_connections = cpu_cores * 200;
                 let connection_semaphore = Arc::new(tokio::sync::Semaphore::new(max_connections));
 
                 loop {
                     let (stream, _) = listener.accept().await.unwrap();
 
-                    // Acquire connection permit
+                    // Acquire connection permit with backpressure
                     let permit = match connection_semaphore.clone().try_acquire_owned() {
                         Ok(permit) => permit,
                         Err(_) => {
@@ -472,7 +467,7 @@ impl TurboServer {
                     let router_clone = Arc::clone(&router);
                     let tokio_runtime_clone = tokio_runtime.clone();
 
-                    // PHASE D: Spawn Tokio task (work-stealing across all cores!)
+                    // Spawn Tokio task (work-stealing across all cores)
                     tokio::task::spawn(async move {
                         let _permit = permit;
 
@@ -487,8 +482,7 @@ impl TurboServer {
                                     let handlers = Arc::clone(&handlers_clone);
                                     let router = Arc::clone(&router_clone);
                                     let runtime = tokio_runtime_clone.clone();
-                                    // PHASE D: Use Tokio-based request handler!
-                                    handle_request_tokio(req, handlers, router, runtime)
+                                    handle_request(req, handlers, router, runtime)
                                 }),
                             )
                             .await;
@@ -520,425 +514,7 @@ impl TurboServer {
     }
 }
 
-async fn handle_request(
-    req: Request<IncomingBody>,
-    handlers: Arc<RwLock<HashMap<String, HandlerMetadata>>>, // HYBRID: HandlerMetadata with is_async cached!
-    router: Arc<RwLock<RadixRouter>>,
-    loop_shards: Vec<LoopShard>, // LOOP SHARDING: Multiple shards for parallel processing!
-) -> Result<Response<Full<Bytes>>, Infallible> {
-    // Extract parts first before borrowing
-    let (parts, body) = req.into_parts();
-    let method_str = parts.method.as_str();
-    let path = parts.uri.path();
-    let query_string = parts.uri.query().unwrap_or("");
-    let body_bytes = match body.collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(e) => {
-            eprintln!("Failed to read request body: {}", e);
-            Bytes::new()
-        }
-    };
-
-    // Extract headers into HashMap for Python
-    let mut headers_map = std::collections::HashMap::new();
-    for (name, value) in parts.headers.iter() {
-        if let Ok(value_str) = value.to_str() {
-            headers_map.insert(name.as_str().to_string(), value_str.to_string());
-        }
-    }
-
-    // PHASE 2+: Basic rate limiting check (DISABLED BY DEFAULT FOR BENCHMARKING)
-    // Rate limiting is completely disabled by default to ensure accurate benchmarks
-    // Users can explicitly enable it in production if needed
-    let rate_config = RATE_LIMIT_CONFIG.get();
-    if let Some(config) = rate_config {
-        if config.enabled {
-            // Extract client IP from headers
-            let client_ip = parts
-                .headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.split(',').next())
-                .map(|s| s.trim().to_string())
-                .or_else(|| {
-                    parts
-                        .headers
-                        .get("x-real-ip")
-                        .and_then(|v| v.to_str().ok())
-                        .map(|s| s.to_string())
-                });
-
-            if let Some(ip) = client_ip {
-                if !check_rate_limit(&ip) {
-                    let rate_limit_json = format!(
-                        r#"{{"error": "RateLimitExceeded", "message": "Too many requests", "retry_after": 60}}"#
-                    );
-                    return Ok(Response::builder()
-                        .status(429)
-                        .header("content-type", "application/json")
-                        .header("retry-after", "60")
-                        .body(Full::new(Bytes::from(rate_limit_json)))
-                        .unwrap());
-                }
-            }
-        }
-    }
-    // If no config is set, rate limiting is completely disabled (default behavior)
-
-    // PHASE 2: Zero-allocation route key using static buffer
-    let mut route_key_buffer = [0u8; 256];
-    let route_key = create_route_key_fast(method_str, path, &mut route_key_buffer);
-
-    // OPTIMIZED: Single read lock acquisition for handler lookup
-    let handlers_guard = handlers.read().await;
-    let metadata = handlers_guard.get(&route_key).cloned();
-    drop(handlers_guard); // Immediate lock release
-
-    // Process handler if found
-    if let Some(metadata) = metadata {
-        // PHASE 3: Fast dispatch based on handler type classification
-        let response_result = match &metadata.handler_type {
-            // FAST PATH: Simple sync handlers (GET with path/query params only)
-            // Rust parses everything, calls original handler, serializes response with SIMD
-            HandlerType::SimpleSyncFast => {
-                if let Some(ref orig) = metadata.original_handler {
-                    call_python_handler_fast(
-                        orig,
-                        &metadata.route_pattern,
-                        path,
-                        query_string,
-                        &metadata.param_types,
-                    )
-                } else {
-                    call_python_handler_sync_direct(
-                        &metadata.handler,
-                        method_str,
-                        path,
-                        query_string,
-                        &body_bytes,
-                        &headers_map,
-                    )
-                }
-            }
-            // FAST PATH: Body sync handlers (POST/PUT with JSON body)
-            // Rust parses body with simd-json, calls original handler, serializes with SIMD
-            HandlerType::BodySyncFast => {
-                if let Some(ref orig) = metadata.original_handler {
-                    call_python_handler_fast_body(
-                        orig,
-                        &metadata.route_pattern,
-                        path,
-                        query_string,
-                        &body_bytes,
-                        &metadata.param_types,
-                    )
-                } else {
-                    call_python_handler_sync_direct(
-                        &metadata.handler,
-                        method_str,
-                        path,
-                        query_string,
-                        &body_bytes,
-                        &headers_map,
-                    )
-                }
-            }
-            // FAST PATH: Model sync handlers (POST/PUT with dhi model validation)
-            // Rust parses JSON with simd-json, validates with model in Python
-            HandlerType::ModelSyncFast => {
-                if let (Some(ref orig), Some((ref param_name, ref model_class))) =
-                    (&metadata.original_handler, &metadata.model_info)
-                {
-                    call_python_handler_fast_model(
-                        orig,
-                        &metadata.route_pattern,
-                        path,
-                        query_string,
-                        &body_bytes,
-                        param_name,
-                        model_class,
-                    )
-                } else {
-                    call_python_handler_sync_direct(
-                        &metadata.handler,
-                        method_str,
-                        path,
-                        query_string,
-                        &body_bytes,
-                        &headers_map,
-                    )
-                }
-            }
-            // ENHANCED PATH: Full Python wrapper (async, dependencies, etc.)
-            HandlerType::Enhanced => {
-                if metadata.is_async {
-                    // ASYNC: shard dispatch
-                    let shard_id = hash_route_key(&route_key) % loop_shards.len();
-                    let shard = &loop_shards[shard_id];
-                    let shard_tx = &shard.tx;
-
-                    let (resp_tx, resp_rx) = oneshot::channel();
-                    let python_req = PythonRequest {
-                        handler: metadata.handler.clone(),
-                        is_async: true,
-                        method: method_str.to_string(),
-                        path: path.to_string(),
-                        query_string: query_string.to_string(),
-                        body: body_bytes.clone(),
-                        response_tx: resp_tx,
-                    };
-
-                    match shard_tx.send(python_req).await {
-                        Ok(_) => match resp_rx.await {
-                            Ok(result) => result,
-                            Err(_) => Err("Loop shard died".to_string()),
-                        },
-                        Err(_) => {
-                            return Ok(Response::builder()
-                                .status(503)
-                                .body(Full::new(Bytes::from(r#"{"error": "Service Unavailable", "message": "Server overloaded"}"#)))
-                                .unwrap());
-                        }
-                    }
-                } else {
-                    // SYNC Enhanced: call with Python wrapper
-                    call_python_handler_sync_direct(
-                        &metadata.handler,
-                        method_str,
-                        path,
-                        query_string,
-                        &body_bytes,
-                        &headers_map,
-                    )
-                }
-            }
-        };
-
-        match response_result {
-            Ok(handler_response) => {
-                let content_length = handler_response.body.len().to_string();
-
-                // PHASE 2: Use zero-copy buffers for large responses
-                let response_body = if method_str.to_ascii_uppercase() == "HEAD" {
-                    Full::new(Bytes::new())
-                } else if handler_response.body.len() > 1024 {
-                    // Use zero-copy buffer for large responses (>1KB)
-                    Full::new(create_zero_copy_response(&handler_response.body))
-                } else {
-                    // Small responses: direct conversion
-                    Full::new(Bytes::from(handler_response.body))
-                };
-
-                return Ok(Response::builder()
-                    .status(handler_response.status_code)
-                    .header("content-type", "application/json")
-                    .header("content-length", content_length)
-                    .body(response_body)
-                    .unwrap());
-            }
-            Err(e) => {
-                // PHASE 2+: Enhanced error handling with recovery attempts
-                eprintln!("Handler error for {} {}: {}", method_str, path, e);
-
-                // Try to determine error type for better response
-                let (status_code, error_type) = match e.to_string() {
-                    err_str if err_str.contains("validation") => (400, "ValidationError"),
-                    err_str if err_str.contains("timeout") => (408, "TimeoutError"),
-                    err_str if err_str.contains("not found") => (404, "NotFoundError"),
-                    _ => (500, "InternalServerError"),
-                };
-
-                let error_json = format!(
-                    r#"{{"error": "{}", "message": "Request failed: {}", "method": "{}", "path": "{}", "timestamp": {}}}"#,
-                    error_type,
-                    e.to_string().chars().take(200).collect::<String>(),
-                    method_str,
-                    path,
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                );
-
-                return Ok(Response::builder()
-                    .status(status_code)
-                    .header("content-type", "application/json")
-                    .header("x-error-recovery", "attempted")
-                    .body(Full::new(Bytes::from(error_json)))
-                    .unwrap());
-            }
-        }
-    }
-
-    // Check router for path parameters as fallback
-    let router_guard = router.read().await;
-    let route_match = router_guard.find_route(&method_str, &path);
-    drop(router_guard);
-
-    if let Some(route_match) = route_match {
-        // Found a parameterized route - look up handler using the pattern key
-        let handlers_guard = handlers.read().await;
-        let metadata = handlers_guard.get(&route_match.handler_key).cloned();
-        drop(handlers_guard);
-
-        if let Some(metadata) = metadata {
-            // Dispatch to handler based on type (same logic as static routes)
-            let response_result = match &metadata.handler_type {
-                HandlerType::SimpleSyncFast => {
-                    if let Some(ref orig) = metadata.original_handler {
-                        call_python_handler_fast(
-                            orig,
-                            &metadata.route_pattern,
-                            path,
-                            query_string,
-                            &metadata.param_types,
-                        )
-                    } else {
-                        call_python_handler_sync_direct(
-                            &metadata.handler,
-                            method_str,
-                            path,
-                            query_string,
-                            &body_bytes,
-                            &headers_map,
-                        )
-                    }
-                }
-                HandlerType::BodySyncFast => {
-                    if let Some(ref orig) = metadata.original_handler {
-                        call_python_handler_fast_body(
-                            orig,
-                            &metadata.route_pattern,
-                            path,
-                            query_string,
-                            &body_bytes,
-                            &metadata.param_types,
-                        )
-                    } else {
-                        call_python_handler_sync_direct(
-                            &metadata.handler,
-                            method_str,
-                            path,
-                            query_string,
-                            &body_bytes,
-                            &headers_map,
-                        )
-                    }
-                }
-                HandlerType::ModelSyncFast => {
-                    if let (Some(ref orig), Some((ref param_name, ref model_class))) =
-                        (&metadata.original_handler, &metadata.model_info)
-                    {
-                        call_python_handler_fast_model(
-                            orig,
-                            &metadata.route_pattern,
-                            path,
-                            query_string,
-                            &body_bytes,
-                            param_name,
-                            model_class,
-                        )
-                    } else {
-                        call_python_handler_sync_direct(
-                            &metadata.handler,
-                            method_str,
-                            path,
-                            query_string,
-                            &body_bytes,
-                            &headers_map,
-                        )
-                    }
-                }
-                HandlerType::Enhanced => {
-                    if metadata.is_async {
-                        let shard_id = hash_route_key(&route_match.handler_key) % loop_shards.len();
-                        let shard = &loop_shards[shard_id];
-                        let shard_tx = &shard.tx;
-
-                        let (resp_tx, resp_rx) = oneshot::channel();
-                        let python_req = PythonRequest {
-                            handler: metadata.handler.clone(),
-                            is_async: true,
-                            method: method_str.to_string(),
-                            path: path.to_string(),
-                            query_string: query_string.to_string(),
-                            body: body_bytes.clone(),
-                            response_tx: resp_tx,
-                        };
-
-                        match shard_tx.send(python_req).await {
-                            Ok(_) => match resp_rx.await {
-                                Ok(result) => result,
-                                Err(_) => Err("Loop shard died".to_string()),
-                            },
-                            Err(_) => {
-                                return Ok(Response::builder()
-                                    .status(503)
-                                    .body(Full::new(Bytes::from(r#"{"error": "Service Unavailable", "message": "Server overloaded"}"#)))
-                                    .unwrap());
-                            }
-                        }
-                    } else {
-                        call_python_handler_sync_direct(
-                            &metadata.handler,
-                            method_str,
-                            path,
-                            query_string,
-                            &body_bytes,
-                            &headers_map,
-                        )
-                    }
-                }
-            };
-
-            match response_result {
-                Ok(handler_response) => {
-                    let content_length = handler_response.body.len().to_string();
-                    let response_body = if method_str.to_ascii_uppercase() == "HEAD" {
-                        Full::new(Bytes::new())
-                    } else if handler_response.body.len() > 1024 {
-                        Full::new(create_zero_copy_response(&handler_response.body))
-                    } else {
-                        Full::new(Bytes::from(handler_response.body))
-                    };
-
-                    return Ok(Response::builder()
-                        .status(handler_response.status_code)
-                        .header("content-type", "application/json")
-                        .header("content-length", content_length)
-                        .body(response_body)
-                        .unwrap());
-                }
-                Err(e) => {
-                    eprintln!("Handler error for {} {}: {}", method_str, path, e);
-                    let error_json = format!(
-                        r#"{{"error": "InternalServerError", "message": "Request failed: {}", "method": "{}", "path": "{}"}}"#,
-                        e.to_string().chars().take(200).collect::<String>(),
-                        method_str,
-                        path
-                    );
-                    return Ok(Response::builder()
-                        .status(500)
-                        .header("content-type", "application/json")
-                        .body(Full::new(Bytes::from(error_json)))
-                        .unwrap());
-                }
-            }
-        }
-    }
-
-    // No registered handler found, return 404
-    let not_found_json = format!(
-        r#"{{"error": "Not Found", "message": "No handler registered for {} {}", "method": "{}", "path": "{}", "available_routes": "Check registered routes"}}"#,
-        method_str, path, method_str, path
-    );
-
-    Ok(Response::builder()
-        .status(404)
-        .header("content-type", "application/json")
-        .body(Full::new(Bytes::from(not_found_json)))
-        .unwrap())
-}
+// Old loop shard-based handle_request removed - using Tokio-based handler instead
 
 /// PHASE 2: Fast route key creation without allocations
 fn create_route_key_fast(method: &str, path: &str, buffer: &mut [u8]) -> String {
@@ -1147,10 +723,10 @@ fn create_zero_copy_response(data: &str) -> Bytes {
 // ============================================================================
 
 /// Initialize Tokio runtime for pure Rust async execution
-/// This replaces Python event loop shards with Tokio's work-stealing scheduler
-/// Expected: 3-5x performance improvement (10-18K RPS target!)
+/// Initialize Tokio runtime with optimized settings for high-throughput
+/// Uses work-stealing scheduler across all CPU cores
 fn initialize_tokio_runtime() -> PyResult<TokioRuntime> {
-    eprintln!("🚀 PHASE D: Initializing Pure Rust Async Runtime with Tokio...");
+    eprintln!("🚀 Initializing Tokio Async Runtime...");
 
     // Note: No need to call prepare_freethreaded_python() since we're a Python extension
     // Python is already initialized when our module is loaded
@@ -1183,13 +759,13 @@ fn initialize_tokio_runtime() -> PyResult<TokioRuntime> {
         });
     });
 
-    // Create Tokio semaphore for rate limiting
-    // Total capacity: 512 * num_cpus (e.g., 7,168 for 14 cores)
+    // Create Tokio semaphore for rate limiting with increased capacity
+    // Total capacity: 1024 * num_cpus (e.g., 14,336 for 14 cores)
     let num_cpus = num_cpus::get();
-    let total_capacity = 512 * num_cpus;
+    let total_capacity = 1024 * num_cpus;
     let semaphore = Arc::new(tokio::sync::Semaphore::new(total_capacity));
 
-    eprintln!("✅ Tokio semaphore created (capacity: {})", total_capacity);
+    eprintln!("✅ Semaphore capacity: {} concurrent requests", total_capacity);
     eprintln!("✅ Tokio runtime ready with {} worker threads", num_cpus);
 
     Ok(TokioRuntime {
@@ -1225,6 +801,7 @@ async fn process_request_tokio(
 
             // Convert Python coroutine to Rust Future using pyo3-async-runtimes
             // This allows Tokio to manage the async execution!
+            // Note: call0() returns Bound<'py, PyAny> which can be passed directly
             pyo3_async_runtimes::into_future_with_locals(&runtime.task_locals, coroutine)
                 .map_err(|e| format!("Failed to convert coroutine: {}", e))
         })?;
@@ -1248,9 +825,9 @@ async fn process_request_tokio(
     }
 }
 
-/// Handle HTTP request using Tokio runtime (PHASE D)
-/// This replaces the loop shard approach with pure Tokio task spawning
-async fn handle_request_tokio(
+/// Handle HTTP request using pure Tokio runtime
+/// Uses work-stealing scheduler for high-throughput async processing
+async fn handle_request(
     req: Request<IncomingBody>,
     handlers: Arc<RwLock<HashMap<String, HandlerMetadata>>>,
     router: Arc<RwLock<RadixRouter>>,
@@ -1303,14 +880,62 @@ async fn handle_request_tokio(
         }
     }
 
+    // Check for WebSocket upgrade request
+    let is_websocket_upgrade = method_str == "GET"
+        && parts
+            .headers
+            .get("upgrade")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_lowercase() == "websocket")
+            .unwrap_or(false)
+        && parts
+            .headers
+            .get("connection")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_lowercase().contains("upgrade"))
+            .unwrap_or(false);
+
     // Zero-allocation route key
     let mut route_key_buffer = [0u8; 256];
-    let route_key = create_route_key_fast(method_str, path, &mut route_key_buffer);
+    let route_key = if is_websocket_upgrade {
+        // For WebSocket, look up the WEBSOCKET route
+        format!("WEBSOCKET {}", path)
+    } else {
+        create_route_key_fast(method_str, path, &mut route_key_buffer)
+    };
 
     // Single read lock acquisition for handler lookup
     let handlers_guard = handlers.read().await;
     let metadata = handlers_guard.get(&route_key).cloned();
     drop(handlers_guard);
+
+    // Handle WebSocket upgrade if detected
+    if is_websocket_upgrade {
+        if let Some(ref metadata) = metadata {
+            if metadata.handler_type == HandlerType::WebSocket {
+                // Return WebSocket upgrade response (101 Switching Protocols)
+                // Note: Full WebSocket handling requires hyper-tungstenite integration
+                // which needs access to the raw connection. For now, we return a
+                // placeholder that indicates WebSocket support is available.
+                let upgrade_response = format!(
+                    r#"{{"status": "websocket_upgrade_detected", "path": "{}", "message": "Use dedicated WebSocket server on separate port for now"}}"#,
+                    path
+                );
+                return Ok(Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(Full::new(Bytes::from(upgrade_response)))
+                    .unwrap());
+            }
+        }
+        // No WebSocket handler registered for this path
+        let error_json = r#"{"error": "WebSocket upgrade not supported", "message": "No WebSocket handler registered for this path"}"#;
+        return Ok(Response::builder()
+            .status(400)
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from(error_json)))
+            .unwrap());
+    }
 
     // Extract headers for Enhanced path
     let mut headers_map = std::collections::HashMap::new();
@@ -1389,9 +1014,49 @@ async fn handle_request_tokio(
                     )
                 }
             }
+            HandlerType::SimpleAsyncFast => {
+                // Async fast path for handlers without body (GET requests with path/query params)
+                if let Some(ref orig) = metadata.original_handler {
+                    call_python_handler_async_fast(
+                        orig,
+                        &metadata.route_pattern,
+                        path,
+                        query_string,
+                        &metadata.param_types,
+                        &tokio_runtime,
+                    )
+                    .await
+                } else {
+                    process_request_tokio(metadata.handler.clone(), true, &tokio_runtime)
+                        .await
+                }
+            }
+            HandlerType::BodyAsyncFast => {
+                // Async fast path for handlers with body (POST/PUT with JSON body)
+                if let Some(ref orig) = metadata.original_handler {
+                    call_python_handler_async_fast_body(
+                        orig,
+                        &metadata.route_pattern,
+                        path,
+                        query_string,
+                        &body_bytes,
+                        &metadata.param_types,
+                        &tokio_runtime,
+                    )
+                    .await
+                } else {
+                    process_request_tokio(metadata.handler.clone(), true, &tokio_runtime)
+                        .await
+                }
+            }
             HandlerType::Enhanced => {
                 process_request_tokio(metadata.handler.clone(), metadata.is_async, &tokio_runtime)
                     .await
+            }
+            HandlerType::WebSocket => {
+                // WebSocket requests should have been handled earlier in the function
+                // This case shouldn't be reached for WebSocket upgrade requests
+                Err("WebSocket handler should not be called directly".to_string())
             }
         };
 
@@ -1429,193 +1094,8 @@ async fn handle_request_tokio(
 // LOOP SHARDING - Phase A Implementation (OLD - will be replaced by Phase D)
 // ============================================================================
 
-/// Spawn N dedicated event loop shards for parallel async execution
-/// Each shard has its own event loop thread - eliminates global contention!
-/// This is the KEY optimization for reaching 5-6K RPS!
-fn spawn_loop_shards(num_shards: usize) -> Vec<LoopShard> {
-    eprintln!("🚀 Spawning {} event loop shards...", num_shards);
-
-    (0..num_shards)
-        .map(|shard_id| {
-            let (tx, mut rx) = mpsc::channel::<PythonRequest>(20000); // High capacity channel
-
-            // Spawn dedicated thread for this shard
-            thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("Failed to create shard runtime");
-
-                let local = tokio::task::LocalSet::new();
-
-                rt.block_on(local.run_until(async move {
-                    eprintln!("🚀 Loop shard {} starting...", shard_id);
-
-                    // Note: Python is already initialized (extension module)
-
-                    // PHASE B: Create event loop with semaphore limiter for this shard
-                    let (task_locals, json_dumps_fn, event_loop_handle, limiter) =
-                        Python::with_gil(|py| -> PyResult<_> {
-                            let asyncio = py.import("asyncio")?;
-                            let event_loop = asyncio.call_method0("new_event_loop")?;
-                            asyncio.call_method1("set_event_loop", (&event_loop,))?;
-
-                            eprintln!("✅ Shard {} - event loop created", shard_id);
-
-                            let task_locals =
-                                pyo3_async_runtimes::TaskLocals::new(event_loop.clone());
-                            let json_module = py.import("json")?;
-                            let json_dumps_fn: PyObject = json_module.getattr("dumps")?.into();
-                            let event_loop_handle: PyObject = event_loop.unbind();
-
-                            // PHASE B: Create AsyncLimiter for semaphore gating (512 concurrent tasks max)
-                            let limiter_module = py.import("turboapi.async_limiter")?;
-                            let limiter = limiter_module.call_method1("get_limiter", (512,))?;
-                            let limiter_obj: PyObject = limiter.into();
-
-                            eprintln!(
-                                "✅ Shard {} - semaphore limiter created (512 max concurrent)",
-                                shard_id
-                            );
-
-                            Ok((task_locals, json_dumps_fn, event_loop_handle, limiter_obj))
-                        })
-                        .expect("Failed to initialize shard");
-
-                    // Start event loop on separate thread
-                    let event_loop_for_runner =
-                        Python::with_gil(|py| event_loop_handle.clone_ref(py));
-                    std::thread::spawn(move || {
-                        Python::with_gil(|py| {
-                            let loop_obj = event_loop_for_runner.bind(py);
-                            let _ = loop_obj.call_method0("run_forever");
-                        });
-                    });
-
-                    eprintln!("✅ Shard {} ready!", shard_id);
-
-                    // PHASE C: ULTRA-AGGRESSIVE batching (256 requests!)
-                    let mut batch = Vec::with_capacity(256);
-
-                    while let Some(req) = rx.recv().await {
-                        batch.push(req);
-
-                        // PHASE C: Collect up to 256 requests for maximum throughput!
-                        while batch.len() < 256 {
-                            match rx.try_recv() {
-                                Ok(req) => batch.push(req),
-                                Err(_) => break,
-                            }
-                        }
-
-                        // Separate and process
-                        let mut async_batch = Vec::new();
-                        let mut sync_batch = Vec::new();
-
-                        for req in batch.drain(..) {
-                            if req.is_async {
-                                async_batch.push(req);
-                            } else {
-                                sync_batch.push(req);
-                            }
-                        }
-
-                        // Process sync
-                        for req in sync_batch {
-                            let PythonRequest {
-                                handler,
-                                is_async,
-                                method: _,
-                                path: _,
-                                query_string: _,
-                                body: _,
-                                response_tx,
-                            } = req;
-                            let result = process_request_optimized(
-                                handler,
-                                is_async,
-                                &task_locals,
-                                &json_dumps_fn,
-                                &limiter,
-                            )
-                            .await;
-                            let _ = response_tx.send(result);
-                        }
-
-                        // PHASE B: Process async concurrently with semaphore gating
-                        if !async_batch.is_empty() {
-                            let futures: Vec<_> = async_batch
-                                .iter()
-                                .map(|req| {
-                                    process_request_optimized(
-                                        req.handler.clone(),
-                                        req.is_async,
-                                        &task_locals,
-                                        &json_dumps_fn,
-                                        &limiter, // PHASE B: Pass limiter for semaphore gating
-                                    )
-                                })
-                                .collect();
-
-                            let results = futures::future::join_all(futures).await;
-
-                            for (req, result) in async_batch.into_iter().zip(results) {
-                                let _ = req.response_tx.send(result);
-                            }
-                        }
-                    }
-                }));
-            });
-
-            // Return shard handle - create a dummy event loop for the handle
-            // The actual event loop is running in the spawned thread
-            // These handles are only used for cloning, not actual execution
-            let (task_locals_handle, json_dumps_fn_handle, limiter_handle) =
-                Python::with_gil(|py| -> PyResult<_> {
-                    // Create a temporary event loop just for the handle
-                    let asyncio = py.import("asyncio")?;
-                    let temp_loop = asyncio.call_method0("new_event_loop")?;
-                    let task_locals = pyo3_async_runtimes::TaskLocals::new(temp_loop);
-                    let json_module = py.import("json")?;
-                    let json_dumps_fn: PyObject = json_module.getattr("dumps")?.into();
-
-                    // Create limiter for handle
-                    let limiter_module = py.import("turboapi.async_limiter")?;
-                    let limiter = limiter_module.call_method1("get_limiter", (512,))?;
-                    let limiter_obj: PyObject = limiter.into();
-
-                    Ok((task_locals, json_dumps_fn, limiter_obj))
-                })
-                .expect("Failed to create shard handle");
-
-            LoopShard {
-                shard_id,
-                task_locals: task_locals_handle,
-                json_dumps_fn: json_dumps_fn_handle,
-                limiter: limiter_handle,
-                tx,
-            }
-        })
-        .collect()
-}
-
 // ============================================================================
-// UTILITIES
-// ============================================================================
-
-/// Simple hash function for shard selection (FNV-1a hash)
-/// Hash-based distribution keeps same handler on same shard (hot caches!)
-fn hash_route_key(route_key: &str) -> usize {
-    let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
-    for byte in route_key.bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3); // FNV prime
-    }
-    hash as usize
-}
-
-// ============================================================================
-// HYBRID APPROACH - Direct Sync Calls + Worker for Async
+// DIRECT SYNC CALLS - High-performance Python handler invocation
 // ============================================================================
 
 /// HYBRID: Direct synchronous Python handler call (NO channel overhead!)
@@ -1910,237 +1390,169 @@ fn call_python_handler_fast_model(
 }
 
 // ============================================================================
-// MULTI-WORKER PATTERN - Multiple Python Workers for Parallel Async Execution
+// PHASE 4: ASYNC FAST PATHS - Tokio + pyo3-async-runtimes for async handlers
 // ============================================================================
 
-/// Spawn N dedicated Python worker threads for parallel async execution
-/// Each worker has its own current_thread runtime + PERSISTENT asyncio event loop!
-/// This enables TRUE parallelism for async handlers with ZERO event loop creation overhead!
-fn spawn_python_workers(num_workers: usize) -> Vec<mpsc::Sender<PythonRequest>> {
-    eprintln!(
-        "🚀 Spawning {} Python workers with persistent event loops...",
-        num_workers
-    );
-
-    (0..num_workers)
-        .map(|worker_id| {
-            let (tx, mut rx) = mpsc::channel::<PythonRequest>(20000); // INCREASED: 20K capacity for high throughput!
-
-            thread::spawn(move || {
-                // Create single-threaded Tokio runtime for this worker
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("Failed to create worker runtime");
-
-                // Use LocalSet for !Send futures (Python objects)
-                let local = tokio::task::LocalSet::new();
-
-                rt.block_on(local.run_until(async move {
-                    eprintln!("🚀 Python worker {} starting...", worker_id);
-
-                    // Note: Python is already initialized (extension module)
-
-                    // OPTIMIZATION: Create persistent asyncio event loop and cache TaskLocals + callables!
-                    let (task_locals, json_dumps_fn, event_loop_handle) =
-                        Python::with_gil(|py| -> PyResult<_> {
-                            // Import asyncio and create new event loop
-                            let asyncio = py.import("asyncio")?;
-                            let event_loop = asyncio.call_method0("new_event_loop")?;
-                            asyncio.call_method1("set_event_loop", (&event_loop,))?;
-
-                            eprintln!("✅ Worker {} - asyncio event loop created", worker_id);
-
-                            // Create TaskLocals with the event loop
-                            let task_locals =
-                                pyo3_async_runtimes::TaskLocals::new(event_loop.clone());
-
-                            eprintln!("✅ Worker {} - TaskLocals cached", worker_id);
-
-                            // PRE-BIND json.dumps callable (avoid repeated getattr!)
-                            let json_module = py.import("json")?;
-                            let json_dumps_fn: PyObject = json_module.getattr("dumps")?.into();
-
-                            eprintln!("✅ Worker {} - json.dumps pre-bound", worker_id);
-
-                            // Keep a handle to the event loop for running it
-                            let event_loop_handle: PyObject = event_loop.unbind();
-
-                            Ok((task_locals, json_dumps_fn, event_loop_handle))
-                        })
-                        .expect("Failed to initialize Python worker");
-
-                    // Start the event loop in run_forever mode on a SEPARATE OS THREAD!
-                    // This is CRITICAL - run_forever() blocks, so it needs its own thread!
-                    let event_loop_for_runner =
-                        Python::with_gil(|py| event_loop_handle.clone_ref(py));
-                    std::thread::spawn(move || {
-                        Python::with_gil(|py| {
-                            let loop_obj = event_loop_for_runner.bind(py);
-                            // This will block forever, processing scheduled tasks
-                            // But that's OK because it's on a dedicated thread!
-                            let _ = loop_obj.call_method0("run_forever");
-                        });
-                    });
-
-                    eprintln!(
-                        "✅ Python worker {} ready with running event loop!",
-                        worker_id
-                    );
-
-                    // Process requests with BATCHING for better throughput!
-                    let mut batch = Vec::with_capacity(32);
-
-                    while let Some(req) = rx.recv().await {
-                        batch.push(req);
-
-                        // Collect up to 32 requests or until no more immediately available
-                        while batch.len() < 32 {
-                            match rx.try_recv() {
-                                Ok(req) => batch.push(req),
-                                Err(_) => break, // No more requests ready
-                            }
-                        }
-
-                        // Separate async and sync requests for batch processing
-                        let mut async_batch = Vec::new();
-                        let mut sync_batch = Vec::new();
-
-                        for req in batch.drain(..) {
-                            if req.is_async {
-                                async_batch.push(req);
-                            } else {
-                                sync_batch.push(req);
-                            }
-                        }
-
-                        // Process sync requests sequentially (fast anyway)
-                        for req in sync_batch {
-                            let PythonRequest {
-                                handler,
-                                is_async,
-                                method: _,
-                                path: _,
-                                query_string: _,
-                                body: _,
-                                response_tx,
-                            } = req;
-                            // Note: This old worker function doesn't have limiter, using dummy
-                            let dummy_limiter = Python::with_gil(|py| {
-                                py.import("turboapi.async_limiter")
-                                    .unwrap()
-                                    .call_method1("get_limiter", (512,))
-                                    .unwrap()
-                                    .into()
-                            });
-                            let result = process_request_optimized(
-                                handler,
-                                is_async,
-                                &task_locals,
-                                &json_dumps_fn,
-                                &dummy_limiter,
-                            )
-                            .await;
-                            let _ = response_tx.send(result);
-                        }
-
-                        // Process async requests CONCURRENTLY with gather!
-                        if !async_batch.is_empty() {
-                            let dummy_limiter = Python::with_gil(|py| {
-                                py.import("turboapi.async_limiter")
-                                    .unwrap()
-                                    .call_method1("get_limiter", (512,))
-                                    .unwrap()
-                                    .into()
-                            });
-                            let futures: Vec<_> = async_batch
-                                .iter()
-                                .map(|req| {
-                                    process_request_optimized(
-                                        req.handler.clone(),
-                                        req.is_async,
-                                        &task_locals,
-                                        &json_dumps_fn,
-                                        &dummy_limiter,
-                                    )
-                                })
-                                .collect();
-
-                            // Await all futures concurrently!
-                            let results = futures::future::join_all(futures).await;
-
-                            // Send results back
-                            for (req, result) in async_batch.into_iter().zip(results) {
-                                let _ = req.response_tx.send(result);
-                            }
-                        }
-                    }
-
-                    eprintln!("⚠️  Python worker {} shutting down", worker_id);
-                }));
-            });
-
-            tx
-        })
-        .collect()
-}
-
-/// Process request with cached TaskLocals - OPTIMIZED VERSION!
-/// This eliminates event loop creation overhead by reusing the persistent loop!
-/// NO GIL CHECK - is_async is cached at registration time!
-/// Uses PRE-BOUND json.dumps callable to avoid repeated getattr!
-/// PHASE B: Semaphore gating for async handlers to prevent overload!
-async fn process_request_optimized(
-    handler: Handler,
-    is_async: bool, // Pre-cached from HandlerMetadata!
-    task_locals: &pyo3_async_runtimes::TaskLocals,
-    json_dumps_fn: &PyObject, // Pre-bound callable!
-    limiter: &PyObject,       // PHASE B: Semaphore limiter for gating!
+/// ASYNC FAST PATH for simple async handlers (GET with path/query params only).
+/// Rust parses query string and path params, calls Python async handler via Tokio,
+/// then serializes the response with SIMD JSON — minimal FFI crossings!
+async fn call_python_handler_async_fast(
+    handler: &PyObject,
+    route_pattern: &str,
+    path: &str,
+    query_string: &str,
+    param_types: &HashMap<String, String>,
+    runtime: &TokioRuntime,
 ) -> Result<HandlerResponse, String> {
-    // No need to check is_async - it's passed in from cached metadata!
+    // Acquire semaphore permit for rate limiting
+    let _permit = runtime
+        .semaphore
+        .acquire()
+        .await
+        .map_err(|e| format!("Semaphore error: {}", e))?;
 
-    if is_async {
-        // PHASE B: Async handler with semaphore gating!
-        // Wrap coroutine with limiter to prevent event loop overload
-        let future = Python::with_gil(|py| {
-            // Call async handler to get coroutine
-            let coroutine = handler
-                .bind(py)
-                .call0()
-                .map_err(|e| format!("Handler error: {}", e))?;
+    // Build kwargs and call async handler in Python GIL context
+    let future = Python::with_gil(|py| {
+        let kwargs = PyDict::new(py);
 
-            // PHASE B: Wrap coroutine with semaphore limiter
-            // The limiter returns a coroutine that wraps the original with semaphore gating
-            let limited_coro = limiter
-                .bind(py)
-                .call1((coroutine,))
-                .map_err(|e| format!("Limiter error: {}", e))?;
+        // Parse path params in Rust (SIMD-accelerated)
+        simd_parse::set_path_params_into_pydict(py, route_pattern, path, &kwargs, param_types)
+            .map_err(|e| format!("Path param error: {}", e))?;
 
-            // Convert Python coroutine to Rust future using cached TaskLocals
-            // This schedules it on the event loop WITHOUT blocking!
-            pyo3_async_runtimes::into_future_with_locals(task_locals, limited_coro.clone())
-                .map_err(|e| format!("Failed to convert coroutine: {}", e))
-        })?;
+        // Parse query string in Rust (SIMD-accelerated)
+        simd_parse::parse_query_into_pydict(py, query_string, &kwargs, param_types)
+            .map_err(|e| format!("Query param error: {}", e))?;
 
-        // Await the Rust future (non-blocking!)
-        let result = future
-            .await
-            .map_err(|e| format!("Async execution error: {}", e))?;
+        // Call async handler to get coroutine
+        let coroutine = handler
+            .call(py, (), Some(&kwargs))
+            .map_err(|e| format!("Handler error: {}", e))?;
 
-        // Serialize result
-        Python::with_gil(|py| serialize_result_optimized(py, result, json_dumps_fn))
-    } else {
-        // Sync handler - direct call with single GIL acquisition
-        Python::with_gil(|py| {
-            let result = handler
-                .bind(py)
-                .call0()
-                .map_err(|e| format!("Handler error: {}", e))?;
-            // Convert Bound to Py for serialization
-            serialize_result_optimized(py, result.unbind(), json_dumps_fn)
-        })
-    }
+        // Convert Python coroutine to Rust Future using pyo3-async-runtimes
+        // Note: call() returns Py<PyAny>, bind().clone() converts to owned Bound<'py, PyAny>
+        pyo3_async_runtimes::into_future_with_locals(&runtime.task_locals, coroutine.bind(py).clone())
+            .map_err(|e| format!("Failed to convert coroutine: {}", e))
+    })?;
+
+    // Await the Rust future on Tokio runtime (non-blocking!)
+    let result = future
+        .await
+        .map_err(|e| format!("Async execution error: {}", e))?;
+
+    // Serialize result with SIMD JSON
+    Python::with_gil(|py| {
+        let bound = result.bind(py);
+        let status_code = if let Ok(status_attr) = bound.getattr("status_code") {
+            status_attr
+                .extract::<i64>()
+                .ok()
+                .and_then(|v| u16::try_from(v).ok())
+                .unwrap_or(200)
+        } else {
+            200
+        };
+
+        let body = match result.extract::<String>(py) {
+            Ok(s) => s,
+            Err(_) => simd_json::serialize_pyobject_to_json(py, bound)
+                .map_err(|e| format!("SIMD JSON error: {}", e))?,
+        };
+
+        Ok(HandlerResponse { body, status_code })
+    })
 }
+
+/// ASYNC FAST PATH for async handlers with body (POST/PUT with JSON body).
+/// Rust parses body with simd-json, path/query params, calls async handler via Tokio,
+/// then serializes response with SIMD JSON — minimal FFI crossings!
+async fn call_python_handler_async_fast_body(
+    handler: &PyObject,
+    route_pattern: &str,
+    path: &str,
+    query_string: &str,
+    body_bytes: &Bytes,
+    param_types: &HashMap<String, String>,
+    runtime: &TokioRuntime,
+) -> Result<HandlerResponse, String> {
+    // Acquire semaphore permit for rate limiting
+    let _permit = runtime
+        .semaphore
+        .acquire()
+        .await
+        .map_err(|e| format!("Semaphore error: {}", e))?;
+
+    // Build kwargs with parsed body and call async handler in Python GIL context
+    let future = Python::with_gil(|py| {
+        let kwargs = PyDict::new(py);
+
+        // Parse path params in Rust
+        simd_parse::set_path_params_into_pydict(py, route_pattern, path, &kwargs, param_types)
+            .map_err(|e| format!("Path param error: {}", e))?;
+
+        // Parse query string in Rust
+        simd_parse::parse_query_into_pydict(py, query_string, &kwargs, param_types)
+            .map_err(|e| format!("Query param error: {}", e))?;
+
+        // Parse JSON body with simd-json (SIMD-accelerated!)
+        if !body_bytes.is_empty() {
+            let parsed = simd_parse::parse_json_body_into_pydict(
+                py,
+                body_bytes.as_ref(),
+                &kwargs,
+                param_types,
+            )
+            .map_err(|e| format!("Body parse error: {}", e))?;
+
+            if !parsed {
+                // Couldn't parse as simple JSON object, pass raw body
+                kwargs
+                    .set_item("body", body_bytes.as_ref())
+                    .map_err(|e| format!("Body set error: {}", e))?;
+            }
+        }
+
+        // Call async handler to get coroutine
+        let coroutine = handler
+            .call(py, (), Some(&kwargs))
+            .map_err(|e| format!("Handler error: {}", e))?;
+
+        // Convert Python coroutine to Rust Future using pyo3-async-runtimes
+        // Note: call() returns Py<PyAny>, bind().clone() converts to owned Bound<'py, PyAny>
+        pyo3_async_runtimes::into_future_with_locals(&runtime.task_locals, coroutine.bind(py).clone())
+            .map_err(|e| format!("Failed to convert coroutine: {}", e))
+    })?;
+
+    // Await the Rust future on Tokio runtime (non-blocking!)
+    let result = future
+        .await
+        .map_err(|e| format!("Async execution error: {}", e))?;
+
+    // Serialize result with SIMD JSON
+    Python::with_gil(|py| {
+        let bound = result.bind(py);
+        let status_code = if let Ok(status_attr) = bound.getattr("status_code") {
+            status_attr
+                .extract::<i64>()
+                .ok()
+                .and_then(|v| u16::try_from(v).ok())
+                .unwrap_or(200)
+        } else {
+            200
+        };
+
+        let body = match result.extract::<String>(py) {
+            Ok(s) => s,
+            Err(_) => simd_json::serialize_pyobject_to_json(py, bound)
+                .map_err(|e| format!("SIMD JSON error: {}", e))?,
+        };
+
+        Ok(HandlerResponse { body, status_code })
+    })
+}
+
+// ============================================================================
+// MULTI-WORKER PATTERN - Multiple Python Workers for Parallel Async Execution
+// ============================================================================
 
 /// Serialize Python result to JSON string - SIMD-optimized version
 /// Phase 1: Uses Rust SIMD serializer instead of Python json.dumps
