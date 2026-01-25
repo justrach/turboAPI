@@ -10,14 +10,17 @@ import tempfile
 import pytest
 
 from turboapi import (
-    TurboAPI, APIRouter,
+    TurboAPI, APIRouter, Request,
     Body, Cookie, File, Form, Header, Path, Query, UploadFile,
     FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
     RedirectResponse, Response, StreamingResponse,
-    Depends, HTTPException, HTTPBasic, HTTPBearer, HTTPBasicCredentials,
+    Depends, Security, HTTPException, HTTPBasic, HTTPBearer, HTTPBasicCredentials,
     OAuth2PasswordBearer, OAuth2AuthorizationCodeBearer,
     APIKeyHeader, APIKeyQuery, APIKeyCookie, SecurityScopes,
     BackgroundTasks, WebSocket, WebSocketDisconnect,
+    RequestValidationError, WebSocketException,
+    CORSMiddleware, GZipMiddleware, TrustedHostMiddleware, HTTPSRedirectMiddleware, Middleware,
+    jsonable_encoder, status,
 )
 from turboapi.testclient import TestClient
 from turboapi.staticfiles import StaticFiles
@@ -719,3 +722,359 @@ class TestAsyncHandlers:
         response = client.post("/async-create", json={"name": "Bob"})
         assert response.status_code == 200
         assert response.json()["name"] == "Bob"
+
+
+# ============================================================
+# Test: FastAPI 1:1 Export Parity
+# ============================================================
+
+class TestFastAPIExportParity:
+    """Verify TurboAPI has all FastAPI exports for 1:1 compatibility."""
+
+    # FastAPI core exports (from fastapi import X)
+    FASTAPI_CORE_EXPORTS = {
+        # Core - map FastAPI names to TurboAPI equivalents
+        "FastAPI": "TurboAPI",
+        "APIRouter": "APIRouter",
+        "Request": "Request",
+        "Response": "Response",
+        "WebSocket": "WebSocket",
+        "WebSocketDisconnect": "WebSocketDisconnect",
+        # Parameters
+        "Body": "Body",
+        "Cookie": "Cookie",
+        "Depends": "Depends",
+        "File": "File",
+        "Form": "Form",
+        "Header": "Header",
+        "Path": "Path",
+        "Query": "Query",
+        "Security": "Security",
+        # Utilities
+        "BackgroundTasks": "BackgroundTasks",
+        "UploadFile": "UploadFile",
+        # Exceptions
+        "HTTPException": "HTTPException",
+        "WebSocketException": "WebSocketException",
+        # Status
+        "status": "status",
+    }
+
+    def test_all_fastapi_core_exports_available(self):
+        """Verify all FastAPI core exports exist in TurboAPI."""
+        import turboapi
+
+        missing = []
+        for fastapi_name, turbo_name in self.FASTAPI_CORE_EXPORTS.items():
+            if not hasattr(turboapi, turbo_name):
+                missing.append(f"{fastapi_name} -> {turbo_name}")
+
+        assert not missing, f"Missing FastAPI exports: {missing}"
+
+    def test_security_dependency_with_scopes(self):
+        """Test Security works like FastAPI's Security with scopes."""
+        oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+        sec = Security(oauth2_scheme, scopes=["read", "write"])
+
+        assert sec.dependency == oauth2_scheme
+        assert sec.scopes == ["read", "write"]
+        assert sec.security_scopes.scopes == ["read", "write"]
+        assert sec.security_scopes.scope_str == "read write"
+
+    def test_request_validation_error(self):
+        """Test RequestValidationError matches FastAPI."""
+        errors = [
+            {"loc": ["body", "name"], "msg": "field required", "type": "value_error.missing"},
+            {"loc": ["query", "page"], "msg": "must be > 0", "type": "value_error"},
+        ]
+        exc = RequestValidationError(errors=errors, body={"incomplete": "data"})
+
+        assert exc.errors() == errors
+        assert exc.body == {"incomplete": "data"}
+
+    def test_websocket_exception(self):
+        """Test WebSocketException matches FastAPI."""
+        exc = WebSocketException(code=1008, reason="Policy violation")
+        assert exc.code == 1008
+        assert exc.reason == "Policy violation"
+
+    def test_status_module_http_codes(self):
+        """Test status module has all standard HTTP codes."""
+        # Informational
+        assert status.HTTP_100_CONTINUE == 100
+        assert status.HTTP_101_SWITCHING_PROTOCOLS == 101
+
+        # Success
+        assert status.HTTP_200_OK == 200
+        assert status.HTTP_201_CREATED == 201
+        assert status.HTTP_202_ACCEPTED == 202
+        assert status.HTTP_204_NO_CONTENT == 204
+
+        # Redirection
+        assert status.HTTP_301_MOVED_PERMANENTLY == 301
+        assert status.HTTP_302_FOUND == 302
+        assert status.HTTP_304_NOT_MODIFIED == 304
+        assert status.HTTP_307_TEMPORARY_REDIRECT == 307
+        assert status.HTTP_308_PERMANENT_REDIRECT == 308
+
+        # Client errors
+        assert status.HTTP_400_BAD_REQUEST == 400
+        assert status.HTTP_401_UNAUTHORIZED == 401
+        assert status.HTTP_403_FORBIDDEN == 403
+        assert status.HTTP_404_NOT_FOUND == 404
+        assert status.HTTP_405_METHOD_NOT_ALLOWED == 405
+        assert status.HTTP_409_CONFLICT == 409
+        assert status.HTTP_422_UNPROCESSABLE_ENTITY == 422
+        assert status.HTTP_429_TOO_MANY_REQUESTS == 429
+
+        # Server errors
+        assert status.HTTP_500_INTERNAL_SERVER_ERROR == 500
+        assert status.HTTP_502_BAD_GATEWAY == 502
+        assert status.HTTP_503_SERVICE_UNAVAILABLE == 503
+        assert status.HTTP_504_GATEWAY_TIMEOUT == 504
+
+    def test_jsonable_encoder_basic_types(self):
+        """Test jsonable_encoder handles basic types."""
+        from datetime import datetime, date
+        from uuid import UUID
+        from enum import Enum
+
+        class Color(Enum):
+            RED = "red"
+
+        data = {
+            "string": "hello",
+            "int": 42,
+            "float": 3.14,
+            "bool": True,
+            "date": date(2024, 1, 15),
+            "datetime": datetime(2024, 1, 15, 10, 30, 0),
+            "uuid": UUID("12345678-1234-5678-1234-567812345678"),
+            "enum": Color.RED,
+            "bytes": b"binary",
+        }
+
+        result = jsonable_encoder(data)
+
+        assert result["string"] == "hello"
+        assert result["int"] == 42
+        assert result["date"] == "2024-01-15"
+        assert result["datetime"] == "2024-01-15T10:30:00"
+        assert result["uuid"] == "12345678-1234-5678-1234-567812345678"
+        assert result["enum"] == "red"
+        assert result["bytes"] == "binary"
+
+    def test_jsonable_encoder_with_model(self):
+        """Test jsonable_encoder with dhi BaseModel."""
+        from dhi import BaseModel
+
+        class User(BaseModel):
+            name: str
+            age: int
+
+        user = User(name="Alice", age=30)
+        result = jsonable_encoder(user)
+
+        assert result["name"] == "Alice"
+        assert result["age"] == 30
+
+    def test_jsonable_encoder_exclude_none(self):
+        """Test jsonable_encoder exclude_none parameter."""
+        data = {"name": "Alice", "email": None, "age": 30}
+        result = jsonable_encoder(data, exclude_none=True)
+
+        assert "name" in result
+        assert "email" not in result
+        assert "age" in result
+
+
+class TestMiddlewareExportParity:
+    """Test middleware exports match FastAPI/Starlette."""
+
+    def test_middleware_classes_available(self):
+        """Test all middleware classes are exported."""
+        import turboapi
+
+        middleware_classes = [
+            "Middleware",
+            "CORSMiddleware",
+            "GZipMiddleware",
+            "TrustedHostMiddleware",
+            "HTTPSRedirectMiddleware",
+        ]
+
+        missing = []
+        for name in middleware_classes:
+            if not hasattr(turboapi, name):
+                missing.append(name)
+
+        assert not missing, f"Missing middleware: {missing}"
+
+    def test_cors_middleware_params(self):
+        """Test CORSMiddleware has FastAPI-compatible parameters."""
+        cors = CORSMiddleware(
+            allow_origins=["http://localhost:3000"],
+            allow_credentials=True,
+            allow_methods=["GET", "POST"],
+            allow_headers=["Authorization"],
+            expose_headers=["X-Custom-Header"],
+            max_age=600,
+        )
+
+        assert cors.allow_origins == ["http://localhost:3000"]
+        assert cors.allow_credentials is True
+        assert "GET" in cors.allow_methods
+        assert cors.max_age == 600
+
+    def test_gzip_middleware_params(self):
+        """Test GZipMiddleware has FastAPI-compatible parameters."""
+        gzip = GZipMiddleware(minimum_size=1000, compresslevel=6)
+
+        assert gzip.minimum_size == 1000
+        assert gzip.compresslevel == 6
+
+    def test_trusted_host_middleware_params(self):
+        """Test TrustedHostMiddleware has FastAPI-compatible parameters."""
+        trusted = TrustedHostMiddleware(
+            allowed_hosts=["example.com", "*.example.com"],
+            www_redirect=True,
+        )
+
+        assert "example.com" in trusted.allowed_hosts
+        assert trusted.www_redirect is True
+
+
+class TestResponseTypesParity:
+    """Test response types match FastAPI."""
+
+    RESPONSE_TYPES = [
+        "Response",
+        "JSONResponse",
+        "HTMLResponse",
+        "PlainTextResponse",
+        "RedirectResponse",
+        "StreamingResponse",
+        "FileResponse",
+    ]
+
+    def test_all_response_types_available(self):
+        """Test all response types are available."""
+        import turboapi
+
+        missing = []
+        for name in self.RESPONSE_TYPES:
+            if not hasattr(turboapi, name):
+                missing.append(name)
+
+        assert not missing, f"Missing response types: {missing}"
+
+
+class TestSecurityExportsParity:
+    """Test security exports match FastAPI."""
+
+    SECURITY_CLASSES = [
+        "OAuth2PasswordBearer",
+        "OAuth2AuthorizationCodeBearer",
+        "HTTPBasic",
+        "HTTPBasicCredentials",
+        "HTTPBearer",
+        "APIKeyHeader",
+        "APIKeyQuery",
+        "APIKeyCookie",
+        "SecurityScopes",
+        "Security",
+        "Depends",
+    ]
+
+    def test_all_security_classes_available(self):
+        """Test all security classes are available."""
+        import turboapi
+
+        missing = []
+        for name in self.SECURITY_CLASSES:
+            if not hasattr(turboapi, name):
+                missing.append(name)
+
+        assert not missing, f"Missing security classes: {missing}"
+
+
+class TestCompleteExportCount:
+    """Test total export count and list all exports."""
+
+    def test_export_count(self):
+        """Verify we have comprehensive exports."""
+        import turboapi
+
+        # Get all public exports (excluding private ones starting with _)
+        exports = [x for x in dir(turboapi) if not x.startswith("_")]
+
+        # FastAPI has ~20 core exports, we should have at least that many
+        # Plus responses, security, middleware, encoders = ~40+
+        assert len(exports) >= 35, f"Expected 35+ exports, got {len(exports)}: {exports}"
+
+        # Print exports for visibility
+        print(f"\n\nTurboAPI exports ({len(exports)} total):")
+        for name in sorted(exports):
+            print(f"  - {name}")
+
+    def test_all_imports_work(self):
+        """Test comprehensive import statement works."""
+        # This is the typical FastAPI-style import
+        from turboapi import (
+            # Core (FastAPI equivalent)
+            TurboAPI,
+            APIRouter,
+            Request,
+            Response,
+            # Parameters
+            Body,
+            Cookie,
+            Depends,
+            File,
+            Form,
+            Header,
+            Path,
+            Query,
+            Security,
+            # Utilities
+            BackgroundTasks,
+            UploadFile,
+            # Exceptions
+            HTTPException,
+            RequestValidationError,
+            WebSocketException,
+            # WebSocket
+            WebSocket,
+            WebSocketDisconnect,
+            # Responses
+            JSONResponse,
+            HTMLResponse,
+            PlainTextResponse,
+            RedirectResponse,
+            StreamingResponse,
+            FileResponse,
+            # Security classes
+            OAuth2PasswordBearer,
+            OAuth2AuthorizationCodeBearer,
+            HTTPBasic,
+            HTTPBasicCredentials,
+            HTTPBearer,
+            APIKeyHeader,
+            APIKeyQuery,
+            APIKeyCookie,
+            SecurityScopes,
+            # Middleware
+            Middleware,
+            CORSMiddleware,
+            GZipMiddleware,
+            TrustedHostMiddleware,
+            HTTPSRedirectMiddleware,
+            # Encoders
+            jsonable_encoder,
+            # Status module
+            status,
+        )
+
+        # All imports successful
+        assert TurboAPI is not None
+        assert status.HTTP_200_OK == 200

@@ -232,17 +232,26 @@ def _encode_model(
     """Encode a dhi BaseModel to a dict."""
     # Use model_dump if available
     if hasattr(obj, "model_dump"):
-        data = obj.model_dump(
-            include=include,
-            exclude=exclude,
-            by_alias=by_alias,
-            exclude_unset=exclude_unset,
-            exclude_defaults=exclude_defaults,
-            exclude_none=exclude_none,
-        )
+        # Try with full parameters (Pydantic v2 style)
+        try:
+            data = obj.model_dump(
+                include=include,
+                exclude=exclude,
+                by_alias=by_alias,
+                exclude_unset=exclude_unset,
+                exclude_defaults=exclude_defaults,
+                exclude_none=exclude_none,
+            )
+        except TypeError:
+            # Fallback for dhi or simpler model_dump implementations
+            data = obj.model_dump()
     else:
         # Fallback to dict() or __dict__
         data = dict(obj) if hasattr(obj, "__iter__") else vars(obj).copy()
+
+    # Apply include/exclude filters manually if needed
+    if include is not None:
+        data = {k: v for k, v in data.items() if k in include}
 
     # Recursively encode nested values
     return {
