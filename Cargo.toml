@@ -17,8 +17,10 @@ name = "turbonet"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["python"]
+default = ["python", "tls-rustls"]
 python = ["pyo3"]
+tls-rustls = ["rustls", "tokio-rustls", "rustls-pemfile"]
+tls-openssl = ["openssl", "tokio-openssl"]
 
 [dependencies]
 pyo3 = { version = "0.26.0", features = ["extension-module"], optional = true }
@@ -29,6 +31,7 @@ hyper-util = { version = "0.1.10", features = ["full", "http2"] }
 http-body-util = "0.1.2"
 pin-project-lite = "0.2.15"
 tokio-tungstenite = "0.24"
+hyper-tungstenite = "0.15"
 futures-util = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -44,6 +47,13 @@ memchr = "2.7"
 simd-json = "0.14"
 itoa = "1.0"
 ryu = "1.0"
+
+# TLS support (rustls is default, openssl is optional)
+rustls = { version = "0.23", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+rustls-pemfile = { version = "2.0", optional = true }
+openssl = { version = "0.10", optional = true }
+tokio-openssl = { version = "0.6", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

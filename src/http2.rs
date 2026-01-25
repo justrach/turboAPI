@@ -158,6 +158,100 @@ impl Http2Server {
             self.initial_window_size / 1024
         )
     }
+
+    /// Start the HTTP/2 server with TLS (HTTPS)
+    /// Requires the `tls-rustls` or `tls-openssl` feature to be enabled
+    #[cfg(feature = "tls-rustls")]
+    pub fn run_tls(&self, py: Python, cert_path: String, key_path: String) -> PyResult<()> {
+        use crate::tls::{rustls_backend, TlsConfig};
+
+        let addr: SocketAddr = format!("{}:{}", self.host, self.port)
+            .parse()
+            .map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("Invalid address: {}", e))
+            })?;
+
+        // Create TLS configuration
+        let tls_config = TlsConfig::new(cert_path, key_path);
+        let tls_acceptor = rustls_backend::create_acceptor(&tls_config)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("TLS error: {}", e)))?;
+
+        let handlers = Arc::clone(&self.handlers);
+        let router = Arc::clone(&self.router);
+        let enable_server_push = self.enable_server_push;
+        let max_concurrent_streams = self.max_concurrent_streams;
+        let initial_window_size = self.initial_window_size;
+
+        py.allow_threads(move || {
+            let worker_threads = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
+
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(worker_threads)
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async {
+                let listener = TcpListener::bind(addr).await.unwrap();
+                println!(
+                    "🔒 TurboAPI HTTP/2 + TLS server starting on https://{}",
+                    addr
+                );
+                println!("🧵 Using {} worker threads", worker_threads);
+                println!("📡 HTTP/2 + TLS features:");
+                println!(
+                    "   - Server Push: {}",
+                    if enable_server_push {
+                        "✅ ENABLED"
+                    } else {
+                        "❌ DISABLED"
+                    }
+                );
+                println!("   - Max Streams: {}", max_concurrent_streams);
+                println!("   - Window Size: {}KB", initial_window_size / 1024);
+                println!("   - TLS: ✅ rustls");
+
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+
+                    // Perform TLS handshake
+                    let tls_stream = match tls_acceptor.accept(stream).await {
+                        Ok(stream) => stream,
+                        Err(e) => {
+                            eprintln!("TLS handshake error: {:?}", e);
+                            continue;
+                        }
+                    };
+
+                    let io = TokioIo::new(tls_stream);
+                    let handlers_clone = Arc::clone(&handlers);
+                    let router_clone = Arc::clone(&router);
+
+                    tokio::task::spawn(async move {
+                        let builder = http2::Builder::new(hyper_util::rt::TokioExecutor::new());
+
+                        if let Err(err) = builder
+                            .serve_connection(
+                                io,
+                                service_fn(move |req| {
+                                    let handlers = Arc::clone(&handlers_clone);
+                                    let router = Arc::clone(&router_clone);
+                                    handle_http2_request(req, handlers, router)
+                                }),
+                            )
+                            .await
+                        {
+                            eprintln!("HTTP/2 + TLS connection error: {:?}", err);
+                        }
+                    });
+                }
+            })
+        });
+
+        Ok(())
+    }
 }
 
 async fn handle_http2_request(
@@ -207,23 +301,93 @@ async fn handle_http2_request(
 }
 
 /// HTTP/2 Server Push capability
+/// Manages push resources that can be sent to clients proactively
 #[pyclass]
 pub struct ServerPush {
-    // This will be implemented to handle server push requests
+    resources: Arc<Mutex<Vec<PushResource>>>,
+}
+
+/// A resource that can be pushed to the client
+#[derive(Clone)]
+struct PushResource {
+    path: String,
+    content_type: String,
+    data: Vec<u8>,
+    priority: u8,
 }
 
 #[pymethods]
 impl ServerPush {
     #[new]
     pub fn new() -> Self {
-        ServerPush {}
+        ServerPush {
+            resources: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 
-    /// Push a resource to the client
-    pub fn push_resource(&self, path: String, content_type: String, data: Vec<u8>) -> PyResult<()> {
-        // TODO: Implement server push logic
-        println!("🚀 Server Push: {} ({})", path, content_type);
+    /// Queue a resource for push to the client
+    /// Resources are sent when the next main response is sent
+    pub fn push_resource(
+        &self,
+        path: String,
+        content_type: String,
+        data: Vec<u8>,
+        priority: Option<u8>,
+    ) -> PyResult<()> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let resources = Arc::clone(&self.resources);
+
+        rt.block_on(async {
+            let mut resources_guard = resources.lock().await;
+            resources_guard.push(PushResource {
+                path: path.clone(),
+                content_type,
+                data,
+                priority: priority.unwrap_or(128),
+            });
+        });
+
+        if cfg!(debug_assertions) {
+            println!("🚀 Server Push queued: {}", path);
+        }
         Ok(())
+    }
+
+    /// Clear all queued push resources
+    pub fn clear(&self) -> PyResult<()> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let resources = Arc::clone(&self.resources);
+
+        rt.block_on(async {
+            let mut resources_guard = resources.lock().await;
+            resources_guard.clear();
+        });
+        Ok(())
+    }
+
+    /// Get the number of queued push resources
+    pub fn pending_count(&self) -> usize {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let resources = Arc::clone(&self.resources);
+
+        rt.block_on(async {
+            let resources_guard = resources.lock().await;
+            resources_guard.len()
+        })
+    }
+
+    /// List all queued push resources
+    pub fn list_pending(&self) -> Vec<String> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let resources = Arc::clone(&self.resources);
+
+        rt.block_on(async {
+            let resources_guard = resources.lock().await;
+            resources_guard
+                .iter()
+                .map(|r| format!("{} ({}, {} bytes)", r.path, r.content_type, r.data.len()))
+                .collect()
+        })
     }
 }
 

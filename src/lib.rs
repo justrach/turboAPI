@@ -11,6 +11,8 @@ pub mod server;
 pub mod simd_json;
 pub mod simd_parse;
 pub mod threadpool;
+#[cfg(any(feature = "tls-rustls", feature = "tls-openssl"))]
+pub mod tls;
 pub mod validation;
 pub mod websocket;
 pub mod zerocopy;
