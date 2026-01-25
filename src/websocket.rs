@@ -344,8 +344,9 @@ async fn handle_websocket_connection(
         }
     });
 
-    // Handle incoming messages
+    // Handle incoming messages with Python handler routing
     let connections_for_cleanup = Arc::clone(&connections);
+    let handlers_for_messages = Arc::clone(&_handlers);
     let message_handler = tokio::task::spawn(async move {
         while let Some(message) = ws_receiver.next().await {
             match message {
@@ -355,14 +356,42 @@ async fn handle_websocket_connection(
                         println!("📨 Received text from {}: {}", connection_id, text);
                     }
 
-                    // Echo the message back (for now)
-                    // TODO: Route to Python handlers
-                    let echo_response = format!("Echo: {}", text);
+                    // Route to Python handlers if registered
+                    let handlers_guard = handlers_for_messages.lock().await;
+                    let response = if let Some(handler) = handlers_guard.get("text") {
+                        // Call Python handler with the message
+                        let handler_clone = handler.clone();
+                        drop(handlers_guard);
 
-                    // Send echo back through the connection
-                    let connections_guard = connections_for_cleanup.read().await;
-                    if let Some(sender) = connections_guard.get(&connection_id) {
-                        let _ = sender.send(Message::Text(echo_response));
+                        let result = Python::with_gil(|py| {
+                            let handler_bound = handler_clone.bind(py);
+                            match handler_bound.call1((connection_id, &text)) {
+                                Ok(result) => {
+                                    if let Ok(response_str) = result.extract::<String>() {
+                                        Some(response_str)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Python handler error: {:?}", e);
+                                    None
+                                }
+                            }
+                        });
+                        result
+                    } else {
+                        drop(handlers_guard);
+                        // Default echo behavior if no handler registered
+                        Some(format!("Echo: {}", text))
+                    };
+
+                    // Send response back through the connection
+                    if let Some(response_text) = response {
+                        let connections_guard = connections_for_cleanup.read().await;
+                        if let Some(sender) = connections_guard.get(&connection_id) {
+                            let _ = sender.send(Message::Text(response_text));
+                        }
                     }
                 }
                 Ok(Message::Binary(data)) => {
@@ -375,14 +404,44 @@ async fn handle_websocket_connection(
                         );
                     }
 
-                    // Echo binary data back
-                    let connections_guard = connections_for_cleanup.read().await;
-                    if let Some(sender) = connections_guard.get(&connection_id) {
-                        let _ = sender.send(Message::Binary(data));
+                    // Route to Python binary handler if registered
+                    let handlers_guard = handlers_for_messages.lock().await;
+                    if let Some(handler) = handlers_guard.get("binary") {
+                        let handler_clone = handler.clone();
+                        drop(handlers_guard);
+
+                        Python::with_gil(|py| {
+                            let handler_bound = handler_clone.bind(py);
+                            if let Err(e) = handler_bound.call1((connection_id, &data[..])) {
+                                eprintln!("Python binary handler error: {:?}", e);
+                            }
+                        });
+                    } else {
+                        drop(handlers_guard);
+                        // Echo binary data back if no handler
+                        let connections_guard = connections_for_cleanup.read().await;
+                        if let Some(sender) = connections_guard.get(&connection_id) {
+                            let _ = sender.send(Message::Binary(data));
+                        }
                     }
                 }
                 Ok(Message::Close(_)) => {
-                    println!("👋 Connection {} closed", connection_id);
+                    // Call disconnect handler if registered
+                    let handlers_guard = handlers_for_messages.lock().await;
+                    if let Some(handler) = handlers_guard.get("close") {
+                        let handler_clone = handler.clone();
+                        drop(handlers_guard);
+
+                        Python::with_gil(|py| {
+                            let handler_bound = handler_clone.bind(py);
+                            if let Err(e) = handler_bound.call1((connection_id,)) {
+                                eprintln!("Python close handler error: {:?}", e);
+                            }
+                        });
+                    }
+                    if cfg!(debug_assertions) {
+                        println!("👋 Connection {} closed", connection_id);
+                    }
                     break;
                 }
                 Ok(Message::Ping(data)) => {
