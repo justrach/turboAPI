@@ -1,6 +1,5 @@
 # Rust build artifacts
 target/
-Cargo.lock
 
 # Conductor workspace
 .context/
@@ -14,6 +13,8 @@ __pycache__/
 build/
 dist/
 .eggs/
+*.egg
+pip-wheel-metadata/
 
 # Virtual environments
 .env
@@ -30,24 +31,28 @@ turbo-freethreaded/
 .idea/
 *.swp
 *.swo
+*~
 
 # macOS
 .DS_Store
+.AppleDouble
+.LSOverride
 
 # Benchmark and test outputs
 benchmark_graphs/
-*.json
 archive/
+*.bench.json
+benchmark_results*.json
 
 # Temporary files
 *.tmp
 *.temp
 *.log
+*.bak
 
 # Documentation build
 docs/_build/
+site/
 
 # PyO3/maturin build artifacts
 *.whl
-target/wheels/
-benchmark_graphs/
