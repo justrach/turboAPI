@@ -1,11 +1,15 @@
 <p align="center">
-  <img src="assets/architecture.png" alt="TurboAPI Architecture" width="600"/>
+  <img src="assets/turbito.png" alt="Turbito - TurboAPI Mascot" width="260"/>
 </p>
 
 <h1 align="center">TurboAPI</h1>
 
 <p align="center">
   <strong>The FastAPI you know. The speed you deserve.</strong>
+</p>
+
+<p align="center">
+  <em>Meet Turbito — the tiny Rust-powered engine that makes your FastAPI fly.</em>
 </p>
 
 <p align="center">
@@ -18,10 +22,10 @@
 <p align="center">
   <a href="#the-problem">The Problem</a> •
   <a href="#the-solution">The Solution</a> •
+  <a href="#meet-turbito">Meet Turbito</a> •
   <a href="#quick-start">Quick Start</a> •
-  <a href="#benchmarks">Benchmarks</a> •
-  <a href="#async-support">Async Support</a> •
-  <a href="#migration-guide">Migration Guide</a>
+  <a href="#whats-new">What's New</a> •
+  <a href="#benchmarks">Benchmarks</a>
 </p>
 
 ---
@@ -62,6 +66,46 @@ Everything else stays exactly the same.
 | Async via asyncio | Async via Tokio work-stealing | 1.2x |
 
 The result? Your existing FastAPI code runs faster without changing a single line of business logic.
+
+---
+
+## Meet Turbito
+
+<p align="center">
+  <img src="assets/turbito.png" alt="Turbito" width="180"/>
+</p>
+
+Turbito is the little engine inside TurboAPI.
+
+While you write normal FastAPI code, Turbito is:
+- Parsing HTTP in Rust (Hyper/Tokio)
+- Serializing JSON with SIMD acceleration
+- Scheduling async work with Tokio's work-stealing scheduler
+- Dodging the GIL like a speed demon
+
+You never see Turbito. You just feel the speed.
+
+---
+
+## What's New
+
+### v0.5.21 — Free-Threading Stability Release
+
+This release fixes critical issues when running with **free-threaded Python (3.13t)** and **Metal/MLX GPU frameworks**:
+
+| Fix | Description |
+|-----|-------------|
+| **Memory Corruption** | Fixed race condition where request body bytes were corrupted when using async handlers with MLX models loaded |
+| **Response Serialization** | Response objects now properly serialize their content instead of string representation |
+| **Async BaseModel** | Async handlers with BaseModel parameters now correctly receive the validated model instance |
+| **JSON Parsing** | Added Python fallback for edge cases where simd-json is too strict |
+
+**Technical Deep Dive:** When running free-threaded Python with Metal GPU frameworks, memory can be accessed concurrently by the CPU and GPU. We now use defensive copying (`PyBytes::new()` in Rust, `bytes(bytearray())` in Python) to ensure request data is isolated before processing.
+
+```bash
+# Upgrade to get the fixes
+pip install --upgrade turboapi
+```
 
 ---
 
@@ -115,15 +159,15 @@ app.run()
 
 Async handlers are automatically detected and routed through Tokio's work-stealing scheduler for optimal concurrency.
 
-### For Maximum Performance
+### Let Turbito Off the Leash
 
-Run with Python's free-threading mode:
+For maximum performance, run with Python's free-threading mode:
 
 ```bash
 PYTHON_GIL=0 python app.py
 ```
 
-This unlocks the full power of TurboAPI's Rust core by removing the GIL bottleneck.
+This unlocks Turbito's full power by removing the GIL bottleneck. True parallelism, finally.
 
 ---
 
@@ -306,6 +350,7 @@ Everything you use in FastAPI works in TurboAPI:
 | GZip middleware | ✅ | Configurable |
 | Background tasks | ✅ | Async-compatible |
 | WebSocket | ✅ | HTTP upgrade support |
+| HTTP/2 | ✅ | With server push |
 | APIRouter | ✅ | Prefixes and tags |
 | HTTPException | ✅ | With custom headers |
 | Custom responses | ✅ | JSON, HTML, Redirect, etc. |
@@ -386,7 +431,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 ## Architecture
 
-TurboAPI's secret is a hybrid architecture:
+TurboAPI's secret is a hybrid architecture where Python meets Rust:
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -460,10 +505,10 @@ python tests/benchmark_comparison.py
 - [x] Handler classification for optimized fast paths
 - [x] **Async handler optimization (Tokio + pyo3-async-runtimes)**
 - [x] **WebSocket HTTP upgrade support**
+- [x] **HTTP/2 with server push**
 
 ### In Progress 🚧
 
-- [ ] HTTP/2 with server push
 - [ ] OpenAPI/Swagger auto-generation
 
 ### Planned 📋
@@ -491,7 +536,8 @@ MIT License. Use it, modify it, ship it.
 ---
 
 <p align="center">
-  <strong>Stop waiting for Python to be fast. Make it fast.</strong>
+  <strong>Built for developers who love FastAPI.</strong><br/>
+  <em>Powered by Turbito ⚡</em>
 </p>
 
 <p align="center">
