@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "turboapi"
-version = "0.5.0"
+version = "0.5.1"
 description = "FastAPI-compatible web framework with Rust HTTP core - 2-3x faster with Python 3.13 free-threading"
 readme = "README.md"
 requires-python = ">=3.13"
