@@ -43,6 +43,10 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
             if BaseModel is not None and inspect.isclass(annotation) and issubclass(annotation, BaseModel):
                 # Found a model parameter - use fast model path (sync only for now)
                 model_info = {"param_name": param_name, "model_class": annotation}
+                # For async handlers, model parsing needs the enhanced path
+                # since Rust-side model parsing only supports sync handlers
+                if is_async:
+                    needs_body = True
                 continue  # Don't add to param_types
         except TypeError:
             pass
