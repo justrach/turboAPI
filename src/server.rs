@@ -855,13 +855,19 @@ async fn call_python_handler_enhanced_async(
         .map_err(|e| format!("Semaphore error: {}", e))?;
 
     // Build kwargs and call async handler
-    let future = Python::with_gil(|py| {
+    // Make a defensive copy to own the data before the async boundary
+    let body_vec: Vec<u8> = body_bytes.to_vec();
+
+    // Use Python::attach (like sync handlers) instead of with_gil for better free-threading support
+    let future = Python::attach(|py| {
         use pyo3::types::PyDict;
         let kwargs = PyDict::new(py);
 
-        // Add body as bytes
+        // Add body as bytes - use PyBytes to copy into Python-managed memory
+        // (as_slice() would reference Rust memory that may be freed after closure ends)
+        let body_py = pyo3::types::PyBytes::new(py, body_vec.as_slice());
         kwargs
-            .set_item("body", body_bytes.as_ref())
+            .set_item("body", body_py)
             .map_err(|e| format!("Body set error: {}", e))?;
 
         // Add headers dict
