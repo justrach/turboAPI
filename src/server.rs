@@ -945,9 +945,8 @@ async fn call_python_handler_enhanced_async(
 
         // Check if content is raw bytes (binary response)
         let content_bound = content.bind(py);
-        if let Ok(bytes_content) = content_bound.downcast::<pyo3::types::PyBytes>() {
+        if let Ok(raw_bytes) = content_bound.extract::<Vec<u8>>() {
             // Binary response - return raw bytes without JSON serialization
-            let raw_bytes = bytes_content.as_bytes().to_vec();
             return Ok(HandlerResponse {
                 body: String::new(),
                 status_code,
@@ -1383,9 +1382,8 @@ fn call_python_handler_sync_direct(
 
         // Check if content is raw bytes (binary response)
         let content_bound = content.bind(py);
-        if let Ok(bytes_content) = content_bound.downcast::<pyo3::types::PyBytes>() {
+        if let Ok(raw_bytes) = content_bound.extract::<Vec<u8>>() {
             // Binary response - return raw bytes without JSON serialization
-            let raw_bytes = bytes_content.as_bytes().to_vec();
             return Ok(HandlerResponse {
                 body: String::new(),
                 status_code,
@@ -1458,15 +1456,17 @@ fn call_python_handler_fast(
 
         // If this is a Response object with body attribute, extract the body
         if let Ok(body_attr) = bound.getattr("body") {
-            // Check if body is bytes (binary response)
-            if let Ok(bytes_content) = body_attr.downcast::<pyo3::types::PyBytes>() {
-                let raw_bytes = bytes_content.as_bytes().to_vec();
-                return Ok(HandlerResponse {
-                    body: String::new(),
-                    status_code,
-                    content_type,
-                    raw_body: Some(raw_bytes),
-                });
+            // Try extracting as bytes using Vec<u8> (more reliable than downcast)
+            if let Ok(raw_bytes) = body_attr.extract::<Vec<u8>>() {
+                // Only return as binary if we have a content_type (Response object)
+                if content_type.is_some() {
+                    return Ok(HandlerResponse {
+                        body: String::new(),
+                        status_code,
+                        content_type,
+                        raw_body: Some(raw_bytes),
+                    });
+                }
             }
         }
 
@@ -1547,8 +1547,8 @@ fn call_python_handler_fast_body(
         // If this is a Response object with body attribute, extract the body
         if let Ok(body_attr) = bound.getattr("body") {
             // Check if body is bytes (binary response)
-            if let Ok(bytes_content) = body_attr.downcast::<pyo3::types::PyBytes>() {
-                let raw_bytes = bytes_content.as_bytes().to_vec();
+            if let Ok(raw_bytes) = body_attr.extract::<Vec<u8>>() {
+                // Binary response - return raw bytes directly
                 return Ok(HandlerResponse {
                     body: String::new(),
                     status_code,
@@ -1636,8 +1636,8 @@ fn call_python_handler_fast_model(
         // If this is a Response object with body attribute, extract the body
         if let Ok(body_attr) = bound.getattr("body") {
             // Check if body is bytes (binary response)
-            if let Ok(bytes_content) = body_attr.downcast::<pyo3::types::PyBytes>() {
-                let raw_bytes = bytes_content.as_bytes().to_vec();
+            if let Ok(raw_bytes) = body_attr.extract::<Vec<u8>>() {
+                // Binary response - return raw bytes directly
                 return Ok(HandlerResponse {
                     body: String::new(),
                     status_code,
@@ -1732,8 +1732,8 @@ async fn call_python_handler_async_fast(
         // If this is a Response object with body attribute, extract the body
         if let Ok(body_attr) = bound.getattr("body") {
             // Check if body is bytes (binary response)
-            if let Ok(bytes_content) = body_attr.downcast::<pyo3::types::PyBytes>() {
-                let raw_bytes = bytes_content.as_bytes().to_vec();
+            if let Ok(raw_bytes) = body_attr.extract::<Vec<u8>>() {
+                // Binary response - return raw bytes directly
                 return Ok(HandlerResponse {
                     body: String::new(),
                     status_code,
@@ -1842,8 +1842,8 @@ async fn call_python_handler_async_fast_body(
         // If this is a Response object with body attribute, extract the body
         if let Ok(body_attr) = bound.getattr("body") {
             // Check if body is bytes (binary response)
-            if let Ok(bytes_content) = body_attr.downcast::<pyo3::types::PyBytes>() {
-                let raw_bytes = bytes_content.as_bytes().to_vec();
+            if let Ok(raw_bytes) = body_attr.extract::<Vec<u8>>() {
+                // Binary response - return raw bytes directly
                 return Ok(HandlerResponse {
                     body: String::new(),
                     status_code,
@@ -1896,8 +1896,8 @@ fn serialize_result_optimized(
     // If this is a Response object with body attribute, extract the body
     if let Ok(body_attr) = bound.getattr("body") {
         // Check if body is bytes (binary response)
-        if let Ok(bytes_content) = body_attr.downcast::<pyo3::types::PyBytes>() {
-            let raw_bytes = bytes_content.as_bytes().to_vec();
+        if let Ok(raw_bytes) = body_attr.extract::<Vec<u8>>() {
+            // Binary response - return raw bytes directly
             return Ok(HandlerResponse {
                 body: String::new(),
                 status_code,
