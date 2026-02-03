@@ -229,9 +229,12 @@ class RequestBodyParser:
         """
         if not body:
             return {}
-            
+
         try:
-            json_data = json.loads(body.decode('utf-8'))
+            # CRITICAL: Make a defensive copy immediately using bytearray to force real copy
+            # Free-threaded Python with Metal/MLX can have concurrent memory access issues
+            body_copy = bytes(bytearray(body))
+            json_data = json.loads(body_copy.decode('utf-8'))
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise ValueError(f"Invalid JSON body: {e}")
         
@@ -348,9 +351,16 @@ class ResponseHandler:
                 try:
                     import json
                     body = json.loads(body.decode('utf-8'))
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    # Keep as string for HTML/Text responses
-                    body = body.decode('utf-8')
+                except json.JSONDecodeError:
+                    # Not JSON, try as plain text
+                    try:
+                        body = body.decode('utf-8')
+                    except UnicodeDecodeError:
+                        # Binary data (audio, image, etc.) - keep as bytes
+                        pass
+                except UnicodeDecodeError:
+                    # Binary data (audio, image, etc.) - keep as bytes
+                    pass
             return body, result.status_code
 
         # Handle tuple returns: (content, status_code)
@@ -394,6 +404,13 @@ class ResponseHandler:
         def make_serializable(obj):
             if isinstance(obj, Model):
                 return obj.model_dump()
+            elif isinstance(obj, bytes):
+                # Binary data - try to decode as UTF-8, otherwise base64 encode
+                try:
+                    return obj.decode('utf-8')
+                except UnicodeDecodeError:
+                    import base64
+                    return base64.b64encode(obj).decode('ascii')
             elif isinstance(obj, dict):
                 return {k: make_serializable(v) for k, v in obj.items()}
             elif isinstance(obj, (list, tuple)):
@@ -491,7 +508,7 @@ def create_enhanced_handler(original_handler, route_definition):
 
                 # Call original async handler and await it
                 result = await original_handler(**filtered_kwargs)
-                
+
                 # Normalize response
                 content, status_code = ResponseHandler.normalize_response(result)
                 
