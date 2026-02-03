@@ -350,31 +350,46 @@ fn set_simd_object_into_dict<'py>(
 
 /// Parse JSON body using simd-json and return as a Python dict.
 /// This is used for model validation where we need the full dict.
+/// Falls back to Python's json.loads if simd-json fails.
 #[inline]
 pub fn parse_json_to_pydict<'py>(py: Python<'py>, body: &[u8]) -> PyResult<Bound<'py, PyDict>> {
     if body.is_empty() {
         return Ok(PyDict::new(py));
     }
 
-    // Use simd-json for fast parsing
+    // Try simd-json first for fast parsing
     let mut body_copy = body.to_vec();
-    let parsed = simd_json::to_borrowed_value(&mut body_copy)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("JSON parse error: {}", e)))?;
+    let simd_result = simd_json::to_borrowed_value(&mut body_copy);
 
-    let dict = PyDict::new(py);
+    if let Ok(parsed) = simd_result {
+        let dict = PyDict::new(py);
 
-    // Only handle object (dict) bodies
-    if let simd_json::BorrowedValue::Object(map) = parsed {
-        for (key, value) in map.iter() {
-            set_simd_value_into_dict(py, key.as_ref(), value, &dict)?;
+        // Only handle object (dict) bodies
+        if let simd_json::BorrowedValue::Object(map) = parsed {
+            for (key, value) in map.iter() {
+                set_simd_value_into_dict(py, key.as_ref(), value, &dict)?;
+            }
+            return Ok(dict);
+        } else {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Expected JSON object",
+            ));
         }
-    } else {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "Expected JSON object",
-        ));
     }
 
-    Ok(dict)
+    // simd-json failed, fall back to Python's json.loads
+    let json_module = py.import("json")?;
+    let body_str = String::from_utf8_lossy(body);
+    let result = json_module.call_method1("loads", (body_str.as_ref(),))?;
+
+    // Check if result is a dict
+    if let Ok(dict) = result.downcast::<PyDict>() {
+        Ok(dict.clone())
+    } else {
+        Err(pyo3::exceptions::PyValueError::new_err(
+            "Expected JSON object",
+        ))
+    }
 }
 
 /// Set a single simd-json value into a PyDict at the given key.

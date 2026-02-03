@@ -88,48 +88,64 @@ fn write_value(py: Python, obj: &Bound<'_, PyAny>, buf: &mut Vec<u8>) -> PyResul
 
     // Fallback: try to convert to a serializable Python representation
 
-    // Check for Response objects (JSONResponse, HTMLResponse, etc.)
-    // These have a 'body' attribute that contains the serialized content
-    if let Ok(body_attr) = obj.getattr("body") {
-        if let Ok(status_attr) = obj.getattr("status_code") {
-            // This is a Response object - extract and serialize the body content
-            if let Ok(body_bytes) = body_attr.extract::<Vec<u8>>() {
-                // Try to parse body as JSON first
-                if let Ok(json_str) = String::from_utf8(body_bytes.clone()) {
-                    // If it's valid JSON, use it directly
-                    if json_str.starts_with('{')
-                        || json_str.starts_with('[')
-                        || json_str.starts_with('"')
-                    {
-                        buf.extend_from_slice(json_str.as_bytes());
-                        return Ok(());
-                    }
-                    // Otherwise treat as string
-                    buf.push(b'"');
-                    for byte in json_str.bytes() {
-                        match byte {
-                            b'"' => buf.extend_from_slice(b"\\\""),
-                            b'\\' => buf.extend_from_slice(b"\\\\"),
-                            b'\n' => buf.extend_from_slice(b"\\n"),
-                            b'\r' => buf.extend_from_slice(b"\\r"),
-                            b'\t' => buf.extend_from_slice(b"\\t"),
-                            b if b < 32 => {
-                                buf.extend_from_slice(format!("\\u{:04x}", b).as_bytes());
-                            }
-                            _ => buf.push(byte),
-                        }
-                    }
-                    buf.push(b'"');
-                    return Ok(());
-                }
+    // Check if it has a model_dump() method (dhi/Pydantic models AND Response objects)
+    // Response classes in turboapi have model_dump() that returns the decoded content
+    if let Ok(dump_method) = obj.getattr("model_dump") {
+        if dump_method.is_callable() {
+            if let Ok(dumped) = dump_method.call0() {
+                return write_value(py, &dumped, buf);
             }
         }
     }
 
-    // Check if it has a model_dump() method (dhi/Pydantic models)
-    if let Ok(dump_method) = obj.getattr("model_dump") {
-        if let Ok(dumped) = dump_method.call0() {
-            return write_value(py, &dumped, buf);
+    // Check for Response objects (JSONResponse, HTMLResponse, FileResponse, etc.)
+    // These have 'body' and 'status_code' attributes
+    if obj.hasattr("body")? && obj.hasattr("status_code")? {
+        // Try to get body as bytes first
+        if let Ok(body_attr) = obj.getattr("body") {
+            // Try extracting as bytes (Vec<u8>)
+            if let Ok(body_bytes) = body_attr.extract::<Vec<u8>>() {
+                // Try to parse body as JSON first
+                if let Ok(json_str) = String::from_utf8(body_bytes.clone()) {
+                    // If it looks like valid JSON, use it directly
+                    let trimmed = json_str.trim();
+                    if trimmed.starts_with('{')
+                        || trimmed.starts_with('[')
+                        || trimmed.starts_with('"')
+                        || trimmed == "null"
+                        || trimmed == "true"
+                        || trimmed == "false"
+                        || trimmed.parse::<f64>().is_ok()
+                    {
+                        buf.extend_from_slice(json_str.as_bytes());
+                        return Ok(());
+                    }
+                    // Otherwise treat as string content
+                    write_str_escaped(&json_str, buf);
+                    return Ok(());
+                }
+                // Binary content - encode as base64 or return error
+                // For now, just return the length as a placeholder
+                buf.extend_from_slice(b"\"<binary content>\"");
+                return Ok(());
+            }
+            // Try extracting as string
+            if let Ok(body_str) = body_attr.extract::<String>() {
+                let trimmed = body_str.trim();
+                if trimmed.starts_with('{')
+                    || trimmed.starts_with('[')
+                    || trimmed.starts_with('"')
+                    || trimmed == "null"
+                    || trimmed == "true"
+                    || trimmed == "false"
+                    || trimmed.parse::<f64>().is_ok()
+                {
+                    buf.extend_from_slice(body_str.as_bytes());
+                    return Ok(());
+                }
+                write_str_escaped(&body_str, buf);
+                return Ok(());
+            }
         }
     }
 
