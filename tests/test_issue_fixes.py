@@ -42,7 +42,8 @@ class TestResponseSerialization:
         """Test ResponseHandler.normalize_response() extracts Response body correctly."""
         # Test with Response object containing text
         resp = Response(content=b"hello world", media_type="text/plain")
-        content, status_code = ResponseHandler.normalize_response(resp)
+        result = ResponseHandler.normalize_response(resp)
+        content, status_code = result[0], result[1]
 
         assert status_code == 200
         assert content == "hello world"
@@ -51,7 +52,8 @@ class TestResponseSerialization:
     def test_json_response_normalize(self):
         """Test JSONResponse is properly normalized."""
         resp = JSONResponse(content={"key": "value"}, status_code=201)
-        content, status_code = ResponseHandler.normalize_response(resp)
+        result = ResponseHandler.normalize_response(resp)
+        content, status_code = result[0], result[1]
 
         assert status_code == 201
         assert content == {"key": "value"}
@@ -59,7 +61,8 @@ class TestResponseSerialization:
     def test_html_response_normalize(self):
         """Test HTMLResponse is properly normalized."""
         resp = HTMLResponse(content="<h1>Hello</h1>")
-        content, status_code = ResponseHandler.normalize_response(resp)
+        result = ResponseHandler.normalize_response(resp)
+        content, status_code = result[0], result[1]
 
         assert status_code == 200
         assert content == "<h1>Hello</h1>"
@@ -67,7 +70,8 @@ class TestResponseSerialization:
     def test_response_with_custom_status(self):
         """Test Response with custom status code."""
         resp = Response(content=b"Not Found", status_code=404)
-        content, status_code = ResponseHandler.normalize_response(resp)
+        result = ResponseHandler.normalize_response(resp)
+        content, status_code = result[0], result[1]
 
         assert status_code == 404
         assert content == "Not Found"
