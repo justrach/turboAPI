@@ -319,6 +319,25 @@ class RequestBodyParser:
         return parsed_params
 
 
+def _is_binary_content_type(content_type: str) -> bool:
+    """Check if the content type indicates binary data."""
+    if not content_type:
+        return False
+    ct_lower = content_type.lower()
+    # Binary content types that should not be JSON serialized
+    binary_prefixes = (
+        'audio/',
+        'video/',
+        'image/',
+        'application/octet-stream',
+        'application/pdf',
+        'application/zip',
+        'application/gzip',
+        'application/x-tar',
+    )
+    return ct_lower.startswith(binary_prefixes)
+
+
 class ResponseHandler:
     """Handle different response formats including FastAPI-style tuples."""
     
@@ -339,13 +358,20 @@ class ResponseHandler:
             result: Raw result from handler
 
         Returns:
-            Tuple of (content, status_code)
+            Tuple of (content, status_code) or (content, status_code, content_type)
         """
         # Handle Response objects (JSONResponse, HTMLResponse, etc.)
         from turboapi.responses import Response
         if isinstance(result, Response):
             # Extract content from Response object
             body = result.body
+            content_type = result.media_type
+
+            # For binary content types, return raw bytes
+            if content_type and _is_binary_content_type(content_type):
+                # Return raw bytes with content_type for binary responses
+                return body, result.status_code, content_type
+
             if isinstance(body, bytes):
                 # Try to decode as JSON for JSONResponse
                 try:
@@ -356,12 +382,12 @@ class ResponseHandler:
                     try:
                         body = body.decode('utf-8')
                     except UnicodeDecodeError:
-                        # Binary data (audio, image, etc.) - keep as bytes
-                        pass
+                        # Binary data - return with content_type
+                        return body, result.status_code, content_type
                 except UnicodeDecodeError:
-                    # Binary data (audio, image, etc.) - keep as bytes
-                    pass
-            return body, result.status_code
+                    # Binary data - return with content_type
+                    return body, result.status_code, content_type
+            return body, result.status_code, content_type
 
         # Handle tuple returns: (content, status_code)
         if isinstance(result, tuple):
@@ -385,27 +411,37 @@ class ResponseHandler:
         return result, 200
     
     @staticmethod
-    def format_json_response(content: Any, status_code: int) -> dict[str, Any]:
+    def format_response(content: Any, status_code: int, content_type: str | None = None) -> dict[str, Any]:
         """
-        Format content as JSON response.
-        
+        Format content as response. Handles both JSON and binary responses.
+
         Args:
-            content: Response content
+            content: Response content (can be dict, str, bytes, etc.)
             status_code: HTTP status code
-            
+            content_type: Optional content type (for binary responses)
+
         Returns:
             Dictionary with properly formatted response
         """
+        # For binary content (bytes with binary content_type), return directly
+        if isinstance(content, bytes) and content_type and _is_binary_content_type(content_type):
+            # Return bytes directly - Rust will handle as raw binary
+            return {
+                "content": content,  # Keep as bytes for Rust to extract
+                "status_code": status_code,
+                "content_type": content_type
+            }
+
         # Handle Satya models
         if isinstance(content, Model):
             content = content.model_dump()
-        
+
         # Recursively convert any nested Satya models in dicts/lists
         def make_serializable(obj):
             if isinstance(obj, Model):
                 return obj.model_dump()
             elif isinstance(obj, bytes):
-                # Binary data - try to decode as UTF-8, otherwise base64 encode
+                # Non-binary bytes - try to decode as UTF-8, otherwise base64 encode
                 try:
                     return obj.decode('utf-8')
                 except UnicodeDecodeError:
@@ -420,14 +456,19 @@ class ResponseHandler:
             else:
                 # Try to convert to string for unknown types
                 return str(obj)
-        
+
         content = make_serializable(content)
-        
+
         return {
             "content": content,
             "status_code": status_code,
-            "content_type": "application/json"
+            "content_type": content_type or "application/json"
         }
+
+    @staticmethod
+    def format_json_response(content: Any, status_code: int, content_type: str | None = None) -> dict[str, Any]:
+        """Alias for format_response for backwards compatibility."""
+        return ResponseHandler.format_response(content, status_code, content_type)
 
 
 def create_enhanced_handler(original_handler, route_definition):
@@ -509,10 +550,15 @@ def create_enhanced_handler(original_handler, route_definition):
                 # Call original async handler and await it
                 result = await original_handler(**filtered_kwargs)
 
-                # Normalize response
-                content, status_code = ResponseHandler.normalize_response(result)
-                
-                return ResponseHandler.format_json_response(content, status_code)
+                # Normalize response - may return (content, status) or (content, status, content_type)
+                normalized = ResponseHandler.normalize_response(result)
+                if len(normalized) == 3:
+                    content, status_code, content_type = normalized
+                else:
+                    content, status_code = normalized
+                    content_type = None
+
+                return ResponseHandler.format_json_response(content, status_code, content_type)
                 
             except ValueError as e:
                 # Validation or parsing error (400 Bad Request)
@@ -592,11 +638,16 @@ def create_enhanced_handler(original_handler, route_definition):
 
                 # Call original sync handler
                 result = original_handler(**filtered_kwargs)
-                
-                # Normalize response
-                content, status_code = ResponseHandler.normalize_response(result)
-                
-                return ResponseHandler.format_json_response(content, status_code)
+
+                # Normalize response - may return (content, status) or (content, status, content_type)
+                normalized = ResponseHandler.normalize_response(result)
+                if len(normalized) == 3:
+                    content, status_code, content_type = normalized
+                else:
+                    content, status_code = normalized
+                    content_type = None
+
+                return ResponseHandler.format_json_response(content, status_code, content_type)
                 
             except ValueError as e:
                 # Validation or parsing error (400 Bad Request)

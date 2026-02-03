@@ -54,10 +54,12 @@ struct HandlerMetadata {
     model_info: Option<(String, Handler)>, // (param_name, model_class) for ModelSyncFast
 }
 
-// Response data with status code support
+// Response data with status code and content type support
 struct HandlerResponse {
     body: String,
     status_code: u16,
+    content_type: Option<String>,
+    raw_body: Option<Vec<u8>>,  // For binary responses
 }
 
 // Pure Rust Async Runtime with Tokio
@@ -920,6 +922,7 @@ async fn call_python_handler_enhanced_async(
 
         // Enhanced handler returns {"content": ..., "status_code": ..., "content_type": ...}
         let mut status_code: u16 = 200;
+        let mut content_type: Option<String> = None;
         let content = if let Ok(dict) = bound.downcast::<pyo3::types::PyDict>() {
             if let Ok(Some(status_val)) = dict.get_item("status_code") {
                 status_code = status_val
@@ -927,6 +930,9 @@ async fn call_python_handler_enhanced_async(
                     .ok()
                     .and_then(|v| u16::try_from(v).ok())
                     .unwrap_or(200);
+            }
+            if let Ok(Some(ct_val)) = dict.get_item("content_type") {
+                content_type = ct_val.extract::<String>().ok();
             }
             if let Ok(Some(content_val)) = dict.get_item("content") {
                 content_val.unbind()
@@ -937,17 +943,34 @@ async fn call_python_handler_enhanced_async(
             result
         };
 
-        // Serialize to JSON
+        // Check if content is raw bytes (binary response)
+        let content_bound = content.bind(py);
+        if let Ok(bytes_content) = content_bound.downcast::<pyo3::types::PyBytes>() {
+            // Binary response - return raw bytes without JSON serialization
+            let raw_bytes = bytes_content.as_bytes().to_vec();
+            return Ok(HandlerResponse {
+                body: String::new(),
+                status_code,
+                content_type,
+                raw_body: Some(raw_bytes),
+            });
+        }
+
+        // Serialize to JSON for non-binary content
         let body = match content.extract::<String>(py) {
             Ok(json_str) => json_str,
             Err(_) => {
-                let bound = content.bind(py);
-                simd_json::serialize_pyobject_to_json(py, bound)
+                simd_json::serialize_pyobject_to_json(py, content_bound)
                     .map_err(|e| format!("SIMD JSON error: {}", e))?
             }
         };
 
-        Ok(HandlerResponse { body, status_code })
+        Ok(HandlerResponse {
+            body,
+            status_code,
+            content_type,
+            raw_body: None,
+        })
     })
 }
 
@@ -1216,11 +1239,28 @@ async fn handle_request(
         };
 
         match response_result {
-            Ok(handler_response) => Ok(Response::builder()
-                .status(handler_response.status_code)
-                .header("content-type", "application/json")
-                .body(Full::new(Bytes::from(handler_response.body)))
-                .unwrap()),
+            Ok(handler_response) => {
+                // Check for binary response (raw_body takes precedence)
+                if let Some(raw_bytes) = handler_response.raw_body {
+                    let content_type = handler_response
+                        .content_type
+                        .unwrap_or_else(|| "application/octet-stream".to_string());
+                    Ok(Response::builder()
+                        .status(handler_response.status_code)
+                        .header("content-type", content_type)
+                        .body(Full::new(Bytes::from(raw_bytes)))
+                        .unwrap())
+                } else {
+                    let content_type = handler_response
+                        .content_type
+                        .unwrap_or_else(|| "application/json".to_string());
+                    Ok(Response::builder()
+                        .status(handler_response.status_code)
+                        .header("content-type", content_type)
+                        .body(Full::new(Bytes::from(handler_response.body)))
+                        .unwrap())
+                }
+            }
             Err(e) => {
                 let error_json =
                     format!(r#"{{"error": "InternalServerError", "message": "{}"}}"#, e);
@@ -1299,8 +1339,9 @@ fn call_python_handler_sync_direct(
             .map_err(|e| format!("Python error: {}", e))?;
 
         // Enhanced handler returns {"content": ..., "status_code": ..., "content_type": ...}
-        // Extract status_code and content
+        // Extract status_code, content_type, and content
         let mut status_code: u16 = 200;
+        let mut content_type: Option<String> = None;
         let content = if let Ok(dict) = result.downcast_bound::<pyo3::types::PyDict>(py) {
             // Check for status_code in dict response
             if let Ok(Some(status_val)) = dict.get_item("status_code") {
@@ -1309,6 +1350,10 @@ fn call_python_handler_sync_direct(
                     .ok()
                     .and_then(|v| u16::try_from(v).ok())
                     .unwrap_or(200);
+            }
+            // Extract content_type for binary responses
+            if let Ok(Some(ct_val)) = dict.get_item("content_type") {
+                content_type = ct_val.extract::<String>().ok();
             }
             if let Ok(Some(content_val)) = dict.get_item("content") {
                 // Also check content for Response object with status_code
@@ -1336,18 +1381,30 @@ fn call_python_handler_sync_direct(
             result
         };
 
+        // Check if content is raw bytes (binary response)
+        let content_bound = content.bind(py);
+        if let Ok(bytes_content) = content_bound.downcast::<pyo3::types::PyBytes>() {
+            // Binary response - return raw bytes without JSON serialization
+            let raw_bytes = bytes_content.as_bytes().to_vec();
+            return Ok(HandlerResponse {
+                body: String::new(),
+                status_code,
+                content_type,
+                raw_body: Some(raw_bytes),
+            });
+        }
+
         // PHASE 1: SIMD JSON serialization (eliminates json.dumps FFI!)
         let body = match content.extract::<String>(py) {
             Ok(json_str) => json_str,
             Err(_) => {
                 // Use Rust SIMD serializer instead of Python json.dumps
-                let bound = content.bind(py);
-                simd_json::serialize_pyobject_to_json(py, bound)
+                simd_json::serialize_pyobject_to_json(py, content_bound)
                     .map_err(|e| format!("SIMD JSON error: {}", e))?
             }
         };
 
-        Ok(HandlerResponse { body, status_code })
+        Ok(HandlerResponse { body, status_code, content_type, raw_body: None })
     })
 }
 
@@ -1381,7 +1438,7 @@ fn call_python_handler_fast(
             .call(py, (), Some(&kwargs))
             .map_err(|e| format!("Handler error: {}", e))?;
 
-        // Check if result is a Response object with status_code
+        // Check if result is a Response object with status_code and media_type
         let bound = result.bind(py);
         let status_code = if let Ok(status_attr) = bound.getattr("status_code") {
             // Python integers are typically i64, convert to u16
@@ -1394,6 +1451,25 @@ fn call_python_handler_fast(
             200
         };
 
+        // Check for Response object with media_type (for binary responses)
+        let content_type: Option<String> = bound.getattr("media_type")
+            .ok()
+            .and_then(|v| v.extract::<String>().ok());
+
+        // If this is a Response object with body attribute, extract the body
+        if let Ok(body_attr) = bound.getattr("body") {
+            // Check if body is bytes (binary response)
+            if let Ok(bytes_content) = body_attr.downcast::<pyo3::types::PyBytes>() {
+                let raw_bytes = bytes_content.as_bytes().to_vec();
+                return Ok(HandlerResponse {
+                    body: String::new(),
+                    status_code,
+                    content_type,
+                    raw_body: Some(raw_bytes),
+                });
+            }
+        }
+
         // SIMD JSON serialization of result (no json.dumps FFI!)
         let body = match result.extract::<String>(py) {
             Ok(s) => s,
@@ -1401,7 +1477,7 @@ fn call_python_handler_fast(
                 .map_err(|e| format!("SIMD JSON error: {}", e))?,
         };
 
-        Ok(HandlerResponse { body, status_code })
+        Ok(HandlerResponse { body, status_code, content_type, raw_body: None })
     })
 }
 
@@ -1450,7 +1526,7 @@ fn call_python_handler_fast_body(
             .call(py, (), Some(&kwargs))
             .map_err(|e| format!("Handler error: {}", e))?;
 
-        // Check if result is a Response object with status_code
+        // Check if result is a Response object with status_code and media_type
         let bound = result.bind(py);
         let status_code = if let Ok(status_attr) = bound.getattr("status_code") {
             // Python integers are typically i64, convert to u16
@@ -1463,6 +1539,25 @@ fn call_python_handler_fast_body(
             200
         };
 
+        // Check for Response object with media_type (for binary responses)
+        let content_type: Option<String> = bound.getattr("media_type")
+            .ok()
+            .and_then(|v| v.extract::<String>().ok());
+
+        // If this is a Response object with body attribute, extract the body
+        if let Ok(body_attr) = bound.getattr("body") {
+            // Check if body is bytes (binary response)
+            if let Ok(bytes_content) = body_attr.downcast::<pyo3::types::PyBytes>() {
+                let raw_bytes = bytes_content.as_bytes().to_vec();
+                return Ok(HandlerResponse {
+                    body: String::new(),
+                    status_code,
+                    content_type,
+                    raw_body: Some(raw_bytes),
+                });
+            }
+        }
+
         // SIMD JSON serialization
         let body = match result.extract::<String>(py) {
             Ok(s) => s,
@@ -1470,7 +1565,7 @@ fn call_python_handler_fast_body(
                 .map_err(|e| format!("SIMD JSON error: {}", e))?,
         };
 
-        Ok(HandlerResponse { body, status_code })
+        Ok(HandlerResponse { body, status_code, content_type, raw_body: None })
     })
 }
 
@@ -1521,7 +1616,7 @@ fn call_python_handler_fast_model(
             .call(py, (), Some(&kwargs))
             .map_err(|e| format!("Handler error: {}", e))?;
 
-        // Check if result is a Response object with status_code
+        // Check if result is a Response object with status_code and media_type
         let bound = result.bind(py);
         let status_code = if let Ok(status_attr) = bound.getattr("status_code") {
             status_attr
@@ -1533,6 +1628,25 @@ fn call_python_handler_fast_model(
             200
         };
 
+        // Check for Response object with media_type (for binary responses)
+        let content_type: Option<String> = bound.getattr("media_type")
+            .ok()
+            .and_then(|v| v.extract::<String>().ok());
+
+        // If this is a Response object with body attribute, extract the body
+        if let Ok(body_attr) = bound.getattr("body") {
+            // Check if body is bytes (binary response)
+            if let Ok(bytes_content) = body_attr.downcast::<pyo3::types::PyBytes>() {
+                let raw_bytes = bytes_content.as_bytes().to_vec();
+                return Ok(HandlerResponse {
+                    body: String::new(),
+                    status_code,
+                    content_type,
+                    raw_body: Some(raw_bytes),
+                });
+            }
+        }
+
         // SIMD JSON serialization of result
         let body = match result.extract::<String>(py) {
             Ok(s) => s,
@@ -1540,7 +1654,7 @@ fn call_python_handler_fast_model(
                 .map_err(|e| format!("SIMD JSON error: {}", e))?,
         };
 
-        Ok(HandlerResponse { body, status_code })
+        Ok(HandlerResponse { body, status_code, content_type, raw_body: None })
     })
 }
 
@@ -1610,13 +1724,32 @@ async fn call_python_handler_async_fast(
             200
         };
 
+        // Check for Response object with media_type (for binary responses)
+        let content_type: Option<String> = bound.getattr("media_type")
+            .ok()
+            .and_then(|v| v.extract::<String>().ok());
+
+        // If this is a Response object with body attribute, extract the body
+        if let Ok(body_attr) = bound.getattr("body") {
+            // Check if body is bytes (binary response)
+            if let Ok(bytes_content) = body_attr.downcast::<pyo3::types::PyBytes>() {
+                let raw_bytes = bytes_content.as_bytes().to_vec();
+                return Ok(HandlerResponse {
+                    body: String::new(),
+                    status_code,
+                    content_type,
+                    raw_body: Some(raw_bytes),
+                });
+            }
+        }
+
         let body = match result.extract::<String>(py) {
             Ok(s) => s,
             Err(_) => simd_json::serialize_pyobject_to_json(py, bound)
                 .map_err(|e| format!("SIMD JSON error: {}", e))?,
         };
 
-        Ok(HandlerResponse { body, status_code })
+        Ok(HandlerResponse { body, status_code, content_type, raw_body: None })
     })
 }
 
@@ -1701,13 +1834,32 @@ async fn call_python_handler_async_fast_body(
             200
         };
 
+        // Check for Response object with media_type (for binary responses)
+        let content_type: Option<String> = bound.getattr("media_type")
+            .ok()
+            .and_then(|v| v.extract::<String>().ok());
+
+        // If this is a Response object with body attribute, extract the body
+        if let Ok(body_attr) = bound.getattr("body") {
+            // Check if body is bytes (binary response)
+            if let Ok(bytes_content) = body_attr.downcast::<pyo3::types::PyBytes>() {
+                let raw_bytes = bytes_content.as_bytes().to_vec();
+                return Ok(HandlerResponse {
+                    body: String::new(),
+                    status_code,
+                    content_type,
+                    raw_body: Some(raw_bytes),
+                });
+            }
+        }
+
         let body = match result.extract::<String>(py) {
             Ok(s) => s,
             Err(_) => simd_json::serialize_pyobject_to_json(py, bound)
                 .map_err(|e| format!("SIMD JSON error: {}", e))?,
         };
 
-        Ok(HandlerResponse { body, status_code })
+        Ok(HandlerResponse { body, status_code, content_type, raw_body: None })
     })
 }
 
@@ -1736,11 +1888,32 @@ fn serialize_result_optimized(
         200
     };
 
+    // Check for Response object with media_type (for binary responses)
+    let content_type: Option<String> = bound.getattr("media_type")
+        .ok()
+        .and_then(|v| v.extract::<String>().ok());
+
+    // If this is a Response object with body attribute, extract the body
+    if let Ok(body_attr) = bound.getattr("body") {
+        // Check if body is bytes (binary response)
+        if let Ok(bytes_content) = body_attr.downcast::<pyo3::types::PyBytes>() {
+            let raw_bytes = bytes_content.as_bytes().to_vec();
+            return Ok(HandlerResponse {
+                body: String::new(),
+                status_code,
+                content_type,
+                raw_body: Some(raw_bytes),
+            });
+        }
+    }
+
     // Try direct string extraction first (zero-copy fast path)
     if let Ok(json_str) = bound.extract::<String>() {
         return Ok(HandlerResponse {
             body: json_str,
             status_code,
+            content_type,
+            raw_body: None,
         });
     }
 
@@ -1748,7 +1921,7 @@ fn serialize_result_optimized(
     let body = simd_json::serialize_pyobject_to_json(py, bound)
         .map_err(|e| format!("SIMD JSON serialization error: {}", e))?;
 
-    Ok(HandlerResponse { body, status_code })
+    Ok(HandlerResponse { body, status_code, content_type, raw_body: None })
 }
 
 /// Handle Python request - supports both SYNC and ASYNC handlers
