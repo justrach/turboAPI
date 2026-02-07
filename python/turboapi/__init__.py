@@ -66,6 +66,9 @@ from .middleware import (
 # Background tasks
 from .background import BackgroundTasks
 
+# Queue (thread-safe, works without asyncio event loop)
+from .queue import Queue, QueueEmpty, QueueFull
+
 # WebSocket
 from .websockets import WebSocket, WebSocketDisconnect
 
@@ -128,6 +131,10 @@ __all__ = [
     "TrustedHostMiddleware",
     # Background tasks
     "BackgroundTasks",
+    # Queue
+    "Queue",
+    "QueueEmpty",
+    "QueueFull",
     # WebSocket
     "WebSocket",
     "WebSocketDisconnect",
