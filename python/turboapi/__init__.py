@@ -1,11 +1,11 @@
 """
 TurboAPI - Revolutionary Python web framework
-FastAPI-compatible API with SIMD-accelerated Rust backend.
+FastAPI-compatible API with a native backend.
 Requires Python 3.13+ free-threading for maximum performance.
 """
 
 # Core application
-from .rust_integration import TurboAPI
+from .native_integration import TurboAPI
 from .routing import APIRouter, Router
 from .models import TurboRequest, TurboResponse, Request
 

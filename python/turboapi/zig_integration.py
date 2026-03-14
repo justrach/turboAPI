@@ -1,6 +1,6 @@
 """
-TurboAPI Direct Rust Integration
-Connects FastAPI-compatible routing directly to Rust HTTP core with zero Python overhead.
+TurboAPI Direct Zig Integration
+Connects FastAPI-compatible routing directly to Zig HTTP core with zero overhead.
 Phase 3: Handler classification for fast dispatch (bypass Python enhanced wrapper).
 """
 
@@ -44,7 +44,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
                 # Found a model parameter - use fast model path (sync only for now)
                 model_info = {"param_name": param_name, "model_class": annotation}
                 # For async handlers, model parsing needs the enhanced path
-                # since Rust-side model parsing only supports sync handlers
+                # since Zig-side model parsing only supports sync handlers
                 if is_async:
                     needs_body = True
                 continue  # Don't add to param_types
@@ -93,20 +93,20 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
 
 try:
     from turboapi import turbonet
-    RUST_CORE_AVAILABLE = True
+    NATIVE_CORE_AVAILABLE = True
 except ImportError:
-    RUST_CORE_AVAILABLE = False
+    NATIVE_CORE_AVAILABLE = False
     turbonet = None
-    print("[WARN] Rust core not available - running in simulation mode")
+    print("[WARN] Native core not available - running in simulation mode")
 
-class RustIntegratedTurboAPI(TurboAPI):
-    """TurboAPI with direct Rust HTTP server integration - zero Python middleware overhead."""
+class ZigIntegratedTurboAPI(TurboAPI):
+    """TurboAPI with direct Zig HTTP server integration - zero Python middleware overhead."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.rust_server = None
+        self.zig_server = None
         self.route_handlers = {}  # Store Python handlers by route key
-        print(f"{ROCKET} RustIntegratedTurboAPI created - direct Rust integration")
+        print(f"{ROCKET} ZigIntegratedTurboAPI created - direct Zig integration")
 
         # Check environment variable to disable rate limiting for benchmarking
         import os
@@ -142,7 +142,7 @@ class RustIntegratedTurboAPI(TurboAPI):
             enabled: Whether to enable rate limiting (default: False for benchmarking)
             requests_per_minute: Maximum requests per minute per IP (default: 1,000,000)
         """
-        if RUST_CORE_AVAILABLE:
+        if NATIVE_CORE_AVAILABLE:
             try:
                 turbonet.configure_rate_limiting(enabled, requests_per_minute)
                 status = "enabled" if enabled else "disabled"
@@ -150,19 +150,19 @@ class RustIntegratedTurboAPI(TurboAPI):
             except Exception as e:
                 print(f"[WARN] Failed to configure rate limiting: {e}")
         else:
-            print("[WARN] Rate limiting configuration requires Rust core")
+            print("[WARN] Rate limiting configuration requires native core")
 
-    def _initialize_rust_server(self, host: str = "127.0.0.1", port: int = 8000):
-        """Initialize the Rust HTTP server with direct integration."""
-        if not RUST_CORE_AVAILABLE:
-            print("[WARN] Rust core not available - cannot initialize server")
+    def _initialize_zig_server(self, host: str = "127.0.0.1", port: int = 8000):
+        """Initialize the Zig HTTP server with direct integration."""
+        if not NATIVE_CORE_AVAILABLE:
+            print("[WARN] Native core not available - cannot initialize server")
             return False
 
         try:
-            # Create Rust server
-            self.rust_server = turbonet.TurboServer(host, port)
+            # Create Zig server
+            self.zig_server = turbonet.TurboServer(host, port)
 
-            # Add middleware directly to Rust server (zero Python overhead)
+            # Add middleware directly to Zig server (zero Python overhead)
             for middleware_class, kwargs in self.middleware_stack:
                 middleware_name = middleware_class.__name__
 
@@ -173,30 +173,30 @@ class RustIntegratedTurboAPI(TurboAPI):
                         kwargs.get("headers", ["*"]),
                         kwargs.get("max_age", 3600)
                     )
-                    self.rust_server.add_middleware(cors_middleware)
-                    print(f"{CHECK_MARK} Added CORS middleware to Rust server")
+                    self.zig_server.add_middleware(cors_middleware)
+                    print(f"{CHECK_MARK} Added CORS middleware to Zig server")
 
                 elif middleware_name == "RateLimitMiddleware":
                     rate_limit = turbonet.RateLimitMiddleware(
                         kwargs.get("requests_per_minute", 1000)
                     )
-                    self.rust_server.add_middleware(rate_limit)
-                    print(f"{CHECK_MARK} Added Rate Limiting middleware to Rust server")
+                    self.zig_server.add_middleware(rate_limit)
+                    print(f"{CHECK_MARK} Added Rate Limiting middleware to Zig server")
 
                 # Add more middleware types as needed
 
-            # Register all routes with Rust server
-            self._register_routes_with_rust()
+            # Register all routes with Zig server
+            self._register_routes_with_zig()
 
-            print(f"{CHECK_MARK} Rust server initialized with {len(self.registry.get_routes())} routes")
+            print(f"{CHECK_MARK} Zig server initialized with {len(self.registry.get_routes())} routes")
             return True
 
         except Exception as e:
-            print(f"{CROSS_MARK} Rust server initialization failed: {e}")
+            print(f"{CROSS_MARK} Zig server initialization failed: {e}")
             return False
 
-    def _register_routes_with_rust(self):
-        """Register all Python routes with the Rust HTTP server.
+    def _register_routes_with_zig(self):
+        """Register all Python routes with the Zig HTTP server.
         Phase 3: Uses handler classification for fast dispatch.
         """
         for route in self.registry.get_routes():
@@ -208,9 +208,9 @@ class RustIntegratedTurboAPI(TurboAPI):
                 handler_type, param_types, model_info = classify_handler(route.handler, route)
 
                 if handler_type == "model_sync":
-                    # FAST MODEL PATH: Rust parses JSON with simd-json, validates model
+                    # FAST MODEL PATH: Zig parses JSON with simd-json, validates model
                     enhanced_handler = create_enhanced_handler(route.handler, route)
-                    self.rust_server.add_route_model(
+                    self.zig_server.add_route_model(
                         route.method.value,
                         route.path,
                         enhanced_handler,  # Fallback wrapper
@@ -220,11 +220,11 @@ class RustIntegratedTurboAPI(TurboAPI):
                     )
                     print(f"{CHECK_MARK} [model_sync] {route.method.value} {route.path}")
                 elif handler_type in ("simple_sync", "body_sync"):
-                    # SYNC FAST PATH: Register with metadata for Rust-side parsing
+                    # SYNC FAST PATH: Register with metadata for Zig-side parsing
                     enhanced_handler = create_enhanced_handler(route.handler, route)
                     param_types_json = json.dumps(param_types)
 
-                    self.rust_server.add_route_fast(
+                    self.zig_server.add_route_fast(
                         route.method.value,
                         route.path,
                         enhanced_handler,  # Fallback wrapper
@@ -238,7 +238,7 @@ class RustIntegratedTurboAPI(TurboAPI):
                     enhanced_handler = create_enhanced_handler(route.handler, route)
                     param_types_json = json.dumps(param_types)
 
-                    self.rust_server.add_route_async_fast(
+                    self.zig_server.add_route_async_fast(
                         route.method.value,
                         route.path,
                         enhanced_handler,  # Fallback wrapper
@@ -250,7 +250,7 @@ class RustIntegratedTurboAPI(TurboAPI):
                 else:
                     # ENHANCED PATH: Full Python wrapper needed
                     enhanced_handler = create_enhanced_handler(route.handler, route)
-                    self.rust_server.add_route(
+                    self.zig_server.add_route(
                         route.method.value,
                         route.path,
                         enhanced_handler,
@@ -283,9 +283,9 @@ class RustIntegratedTurboAPI(TurboAPI):
 
         return {}
 
-    def _convert_to_rust_response(self, result) -> Any:
-        """Convert Python result to Rust ResponseView."""
-        if not RUST_CORE_AVAILABLE:
+    def _convert_to_response(self, result) -> Any:
+        """Convert Python result to Zig ResponseView."""
+        if not NATIVE_CORE_AVAILABLE:
             return result
 
         if isinstance(result, dict) and "status_code" in result:
@@ -316,20 +316,20 @@ class RustIntegratedTurboAPI(TurboAPI):
             return response
 
     def run(self, host: str = "127.0.0.1", port: int = 8000, **kwargs):
-        """Run with direct Rust server integration."""
-        print(f"\n{ROCKET} Starting TurboAPI with Direct Rust Integration...")
+        """Run with direct Zig server integration."""
+        print(f"\n{ROCKET} Starting TurboAPI with Direct Zig Integration...")
         print(f"   Host: {host}:{port}")
         print(f"   Title: {self.title} v{self.version}")
 
-        # Initialize Rust server
-        if not self._initialize_rust_server(host, port):
-            print(f"{CROSS_MARK} Failed to initialize Rust server")
+        # Initialize Zig server
+        if not self._initialize_zig_server(host, port):
+            print(f"{CROSS_MARK} Failed to initialize Zig server")
             return
 
         # Print integration info
-        print("\n[CONFIG] Direct Rust Integration:")
-        print(f"   Rust HTTP Server: {CHECK_MARK} Active")
-        print(f"   Middleware Pipeline: {CHECK_MARK} Rust-native (zero Python overhead)")
+        print("\n[CONFIG] Direct Zig Integration:")
+        print(f"   Zig HTTP Server: {CHECK_MARK} Active")
+        print(f"   Middleware Pipeline: {CHECK_MARK} Zig-native (zero Python overhead)")
         print(f"   Route Handlers: {CHECK_MARK} {len(self.route_handlers)} Python functions registered")
         print(f"   Performance: {CHECK_MARK} 5-10x FastAPI target (no Python middleware overhead)")
 
@@ -337,25 +337,25 @@ class RustIntegratedTurboAPI(TurboAPI):
         self.print_routes()
 
         print("\n[PERF] Zero-Overhead Architecture:")
-        print("   HTTP Request → Rust Middleware → Python Handler → Rust Response")
+        print("   HTTP Request → Zig Middleware → Python Handler → Zig Response")
         print("   No Python middleware overhead!")
-        print("   Direct Rust-to-Python calls only for route handlers")
+        print("   Direct Zig-to-Python calls only for route handlers")
 
         # Run startup handlers
         if self.startup_handlers:
             import asyncio
             asyncio.run(self._run_startup_handlers())
 
-        print(f"\n{CHECK_MARK} TurboAPI Direct Rust Integration ready!")
+        print(f"\n{CHECK_MARK} TurboAPI Direct Zig Integration ready!")
         print(f"   Visit: http://{host}:{port}")
 
         try:
-            if RUST_CORE_AVAILABLE:
-                # Start the actual Rust server
-                print("\n[SERVER] Starting Rust HTTP server with zero Python overhead...")
-                self.rust_server.run()
+            if NATIVE_CORE_AVAILABLE:
+                # Start the actual Zig server
+                print("\n[SERVER] Starting Zig HTTP server with zero overhead...")
+                self.zig_server.run()
             else:
-                print("\n[WARN] Rust core not available - simulation mode")
+                print("\n[WARN] Native core not available - simulation mode")
                 print("Press Ctrl+C to stop")
                 import time
                 while True:
@@ -372,4 +372,4 @@ class RustIntegratedTurboAPI(TurboAPI):
             print("[BYE] Server stopped")
 
 # Export the correct integration class
-TurboAPI = RustIntegratedTurboAPI
+TurboAPI = ZigIntegratedTurboAPI

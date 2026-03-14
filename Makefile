@@ -1,4 +1,4 @@
-.PHONY: help test build install clean benchmark
+.PHONY: help test build install clean benchmark zig-test
 
 help:
 	@echo "TurboAPI Development Commands"
@@ -6,10 +6,11 @@ help:
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test          - Run all tests"
+	@echo "  make zig-test      - Run Zig unit tests"
 	@echo ""
 	@echo "Building:"
-	@echo "  make build         - Build wheel"
-	@echo "  make install       - Install in development mode"
+	@echo "  make build         - Build + install Zig backend for current Python"
+	@echo "  make install       - Alias for build"
 	@echo "  make clean         - Clean build artifacts"
 	@echo ""
 	@echo "Benchmarks:"
@@ -21,26 +22,25 @@ test:
 	@echo "🧪 Running tests..."
 	@python -m pytest tests/ -v --tb=short
 
-# Build wheel
+# Build + install Zig backend (auto-detects Python version + free-threading)
 build:
-	@echo "📦 Building wheel..."
-	@maturin build --release
+	@python zig/build_turbonet.py --install
 
-# Install in development mode
-install:
-	@echo "🔧 Installing in development mode..."
-	@maturin develop --release
+# Alias
+install: build
+
+# Run Zig unit tests
+zig-test:
+	@cd zig && zig build test
 
 # Clean build artifacts
 clean:
 	@echo "🧹 Cleaning build artifacts..."
-	@rm -rf target/
-	@rm -rf dist/
-	@rm -rf build/
-	@rm -rf *.egg-info
+	@rm -rf zig/zig-out/ zig/.zig-cache/
+	@rm -rf dist/ build/ *.egg-info
 	@find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	@find . -type f -name "*.pyc" -delete
-	@find . -type f -name "*.so" -delete
+	@find python/turboapi -name "*.so" -delete 2>/dev/null || true
 	@echo "✅ Clean complete"
 
 # Run benchmarks
