@@ -5,8 +5,9 @@ Compatible with FastAPI's EventSourceResponse.
 
 import asyncio
 import json
-from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Any
 
 from .responses import StreamingResponse
 
@@ -14,6 +15,7 @@ from .responses import StreamingResponse
 @dataclass
 class ServerSentEvent:
     """Represents a single SSE event."""
+
     data: Any = ""
     event: str | None = None
     id: str | int | None = None

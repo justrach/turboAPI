@@ -4,7 +4,6 @@ Demonstrates automatic body parsing, Dhi validation, and tuple returns
 """
 
 from dhi import BaseModel, Field
-
 from turboapi import TurboAPI
 
 # Create app
@@ -13,7 +12,7 @@ app = TurboAPI(title="FastAPI Compatibility Test", version="1.0.0")
 # In-memory database
 database = {
     1: {"id": 1, "name": "Alice", "email": "alice@example.com"},
-    2: {"id": 2, "name": "Bob", "email": "bob@example.com"}
+    2: {"id": 2, "name": "Bob", "email": "bob@example.com"},
 }
 
 
@@ -21,36 +20,36 @@ database = {
 # 1. AUTOMATIC JSON BODY PARSING
 # ============================================================================
 
+
 @app.post("/search")
 def search(query: str, top_k: int = 10):
     """
     Automatic body parsing - no need for request.json()!
-    
+
     Test with:
     curl -X POST http://localhost:8000/search \
       -H "Content-Type: application/json" \
       -d '{"query": "test", "top_k": 5}'
     """
-    return {
-        "query": query,
-        "top_k": top_k,
-        "results": [f"result_{i}" for i in range(top_k)]
-    }
+    return {"query": query, "top_k": top_k, "results": [f"result_{i}" for i in range(top_k)]}
 
 
 # ============================================================================
 # 2. SATYA MODEL VALIDATION
 # ============================================================================
 
+
 class UserCreate(BaseModel):
     """User creation model with Dhi validation."""
+
     name: str = Field(min_length=1, max_length=100)
-    email: str = Field(pattern=r'^[\w\.-]+@[\w\.-]+\.\w+$')
+    email: str = Field(pattern=r"^[\w\.-]+@[\w\.-]+\.\w+$")
     age: int = Field(ge=0, le=150)
 
 
 class UserResponse(BaseModel):
     """User response model."""
+
     id: int
     name: str
     email: str
@@ -61,7 +60,7 @@ class UserResponse(BaseModel):
 def create_validated_user(user: UserCreate):
     """
     Automatic Dhi validation!
-    
+
     Test with:
     curl -X POST http://localhost:8000/users/validate \
       -H "Content-Type: application/json" \
@@ -70,10 +69,10 @@ def create_validated_user(user: UserCreate):
     # Validation happens automatically
     new_id = max(database.keys()) + 1 if database else 1
     user_data = user.model_dump()
-    user_data['id'] = new_id
-    
+    user_data["id"] = new_id
+
     database[new_id] = user_data
-    
+
     # Return 201 Created with tuple syntax
     return UserResponse(**user_data).model_dump(), 201
 
@@ -82,11 +81,12 @@ def create_validated_user(user: UserCreate):
 # 3. TUPLE RETURN FOR STATUS CODES
 # ============================================================================
 
+
 @app.get("/users/{user_id}")
 def get_user(user_id: int):
     """
     FastAPI-style tuple returns for status codes!
-    
+
     Test with:
     curl http://localhost:8000/users/1
     curl http://localhost:8000/users/999  # Returns 404
@@ -94,7 +94,7 @@ def get_user(user_id: int):
     if user_id not in database:
         # FastAPI-style tuple return!
         return {"error": "User not found", "user_id": user_id}, 404
-    
+
     return database[user_id]
 
 
@@ -102,13 +102,13 @@ def get_user(user_id: int):
 def delete_user(user_id: int):
     """
     Delete with proper status codes.
-    
+
     Test with:
     curl -X DELETE http://localhost:8000/users/1
     """
     if user_id not in database:
         return {"error": "User not found"}, 404
-    
+
     del database[user_id]
     return {"message": "User deleted", "user_id": user_id}, 200
 
@@ -117,11 +117,12 @@ def delete_user(user_id: int):
 # 4. MIXED PARAMETERS (Path + Body)
 # ============================================================================
 
+
 @app.put("/users/{user_id}")
 def update_user(user_id: int, name: str, email: str):
     """
     Path parameter + automatic body parsing!
-    
+
     Test with:
     curl -X PUT http://localhost:8000/users/1 \
       -H "Content-Type: application/json" \
@@ -129,7 +130,7 @@ def update_user(user_id: int, name: str, email: str):
     """
     if user_id not in database:
         return {"error": "User not found"}, 404
-    
+
     database[user_id].update({"name": name, "email": email})
     return database[user_id]
 
@@ -138,26 +139,28 @@ def update_user(user_id: int, name: str, email: str):
 # 5. QUERY PARAMETERS
 # ============================================================================
 
+
 @app.get("/users")
 def list_users(limit: int = 10, offset: int = 0):
     """
     Query parameters with defaults.
-    
+
     Test with:
     curl http://localhost:8000/users?limit=5&offset=0
     """
     users_list = list(database.values())
     return {
-        "users": users_list[offset:offset + limit],
+        "users": users_list[offset : offset + limit],
         "total": len(users_list),
         "limit": limit,
-        "offset": offset
+        "offset": offset,
     }
 
 
 # ============================================================================
 # 6. STARTUP/SHUTDOWN EVENTS
 # ============================================================================
+
 
 @app.on_event("startup")
 def startup():
@@ -176,18 +179,21 @@ def shutdown():
 # 7. COMPLEX NESTED MODELS
 # ============================================================================
 
+
 class Address(BaseModel):
     """Address model."""
+
     street: str = Field(min_length=1)
     city: str = Field(min_length=1)
     country: str = Field(min_length=2, max_length=2)  # ISO code
-    zip_code: str = Field(pattern=r'^\d{5}$')
+    zip_code: str = Field(pattern=r"^\d{5}$")
 
 
 class UserWithAddress(BaseModel):
     """User with nested address."""
+
     name: str = Field(min_length=1, max_length=100)
-    email: str = Field(pattern=r'^[\w\.-]+@[\w\.-]+\.\w+$')
+    email: str = Field(pattern=r"^[\w\.-]+@[\w\.-]+\.\w+$")
     address: Address
 
 
@@ -195,7 +201,7 @@ class UserWithAddress(BaseModel):
 def create_user_with_address(user: UserWithAddress):
     """
     Nested Dhi model validation!
-    
+
     Test with:
     curl -X POST http://localhost:8000/users/with-address \
       -H "Content-Type: application/json" \
@@ -210,21 +216,19 @@ def create_user_with_address(user: UserWithAddress):
         }
       }'
     """
-    return {
-        "message": "User with address created",
-        "data": user.model_dump()
-    }, 201
+    return {"message": "User with address created", "data": user.model_dump()}, 201
 
 
 # ============================================================================
 # 8. ERROR HANDLING
 # ============================================================================
 
+
 @app.get("/error-demo/{error_type}")
 def error_demo(error_type: str):
     """
     Demonstrate different error responses.
-    
+
     Test with:
     curl http://localhost:8000/error-demo/400
     curl http://localhost:8000/error-demo/404
@@ -236,13 +240,14 @@ def error_demo(error_type: str):
         return {"error": "Not Found", "detail": "Resource not found"}, 404
     elif error_type == "500":
         return {"error": "Internal Server Error", "detail": "Something went wrong"}, 500
-    
+
     return {"message": "No error", "type": error_type}
 
 
 # ============================================================================
 # 9. HEALTH CHECK
 # ============================================================================
+
 
 @app.get("/")
 def root():
@@ -255,19 +260,15 @@ def root():
             "Dhi model validation",
             "Tuple return for status codes",
             "Startup/shutdown events",
-            "Type-safe parameters"
-        ]
+            "Type-safe parameters",
+        ],
     }
 
 
 @app.get("/health")
 def health_check():
     """Health check endpoint."""
-    return {
-        "status": "healthy",
-        "users_count": len(database),
-        "features_working": "all"
-    }
+    return {"status": "healthy", "users_count": len(database), "features_working": "all"}
 
 
 # ============================================================================
@@ -275,9 +276,9 @@ def health_check():
 # ============================================================================
 
 if __name__ == "__main__":
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("🚀 TurboAPI FastAPI Compatibility Test Server")
-    print("="*60)
+    print("=" * 60)
     print("\nTest endpoints:")
     print("  GET  http://localhost:8000/")
     print("  GET  http://localhost:8000/health")
@@ -289,10 +290,10 @@ if __name__ == "__main__":
     print("  PUT  http://localhost:8000/users/{user_id}")
     print("  DELETE http://localhost:8000/users/{user_id}")
     print("  GET  http://localhost:8000/error-demo/{error_type}")
-    print("\n" + "="*60 + "\n")
-    
+    print("\n" + "=" * 60 + "\n")
+
     # Disable rate limiting for testing
     app.configure_rate_limiting(enabled=False)
-    
+
     # Run the server
     app.run(host="127.0.0.1", port=8000)

@@ -15,6 +15,7 @@ from .version_check import CHECK_MARK
 
 class HTTPMethod(Enum):
     """HTTP methods supported by TurboAPI."""
+
     GET = "GET"
     POST = "POST"
     PUT = "PUT"
@@ -23,17 +24,21 @@ class HTTPMethod(Enum):
     HEAD = "HEAD"
     OPTIONS = "OPTIONS"
 
+
 @dataclass
 class PathParameter:
     """Path parameter definition."""
+
     name: str
     type: type
     default: Any = None
     required: bool = True
 
+
 @dataclass
 class RouteDefinition:
     """Complete route definition."""
+
     path: str
     method: HTTPMethod
     handler: Callable
@@ -44,6 +49,7 @@ class RouteDefinition:
     tags: list[str] = None
     summary: str | None = None
     description: str | None = None
+
 
 class RouteRegistry:
     """Registry for all routes in the application."""
@@ -68,14 +74,14 @@ class RouteRegistry:
         pattern = path
 
         # Find all path parameters
-        param_matches = re.findall(r'\{([^}]+)\}', path)
+        param_matches = re.findall(r"\{([^}]+)\}", path)
 
         for param in param_matches:
             # Replace {param} with named regex group
-            pattern = pattern.replace(f'{{{param}}}', f'(?P<{param}>[^/]+)')
+            pattern = pattern.replace(f"{{{param}}}", f"(?P<{param}>[^/]+)")
 
         # Ensure exact match
-        pattern = f'^{pattern}$'
+        pattern = f"^{pattern}$"
 
         return re.compile(pattern)
 
@@ -101,6 +107,7 @@ class RouteRegistry:
         """Get all registered routes."""
         return self.routes.copy()
 
+
 class Router:
     """FastAPI-compatible router with decorators."""
 
@@ -112,6 +119,7 @@ class Router:
 
     def _create_route_decorator(self, method: HTTPMethod):
         """Create a route decorator for the given HTTP method."""
+
         def decorator(
             path: str,
             *,
@@ -119,7 +127,7 @@ class Router:
             tags: list[str] = None,
             summary: str | None = None,
             description: str | None = None,
-            **kwargs
+            **kwargs,
         ):
             def wrapper(func: Callable) -> Callable:
                 # Analyze function signature
@@ -133,9 +141,13 @@ class Router:
                         # Path parameter
                         path_param = PathParameter(
                             name=param_name,
-                            type=param.annotation if param.annotation != inspect.Parameter.empty else str,
-                            default=param.default if param.default != inspect.Parameter.empty else None,
-                            required=param.default == inspect.Parameter.empty
+                            type=param.annotation
+                            if param.annotation != inspect.Parameter.empty
+                            else str,
+                            default=param.default
+                            if param.default != inspect.Parameter.empty
+                            else None,
+                            required=param.default == inspect.Parameter.empty,
                         )
                         path_params.append(path_param)
                     elif param.annotation != inspect.Parameter.empty:
@@ -158,7 +170,7 @@ class Router:
                     response_model=response_model,
                     tags=(tags or []) + self.tags,
                     summary=summary,
-                    description=description
+                    description=description,
                 )
 
                 # Register the route
@@ -168,6 +180,7 @@ class Router:
                 return func
 
             return wrapper
+
         return decorator
 
     def get(self, path: str, **kwargs):
@@ -198,7 +211,7 @@ class Router:
         """OPTIONS route decorator."""
         return self._create_route_decorator(HTTPMethod.OPTIONS)(path, **kwargs)
 
-    def include_router(self, router: 'Router', prefix: str = "", tags: list[str] = None):
+    def include_router(self, router: "Router", prefix: str = "", tags: list[str] = None):
         """Include another router's routes."""
         for route in router.registry.get_routes():
             # Create new route with updated prefix and tags
@@ -212,9 +225,10 @@ class Router:
                 response_model=route.response_model,
                 tags=(tags or []) + (route.tags or []),
                 summary=route.summary,
-                description=route.description
+                description=route.description,
             )
             self.registry.register_route(new_route)
+
 
 # Global router instance for the main app
 APIRouter = Router

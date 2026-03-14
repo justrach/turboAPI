@@ -6,16 +6,14 @@ Tests that binary responses (audio, video, image, etc.) are returned as raw byte
 instead of being base64 encoded through JSON serialization.
 """
 
-import json
 import os
-import sys
-import time
-import threading
 import subprocess
+import sys
 import tempfile
+import time
 
 # Add parent directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'python'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 
 import pytest
 
@@ -26,12 +24,12 @@ except ImportError:
     requests = None
 
 from turboapi.request_handler import ResponseHandler, _is_binary_content_type
-from turboapi.responses import Response, JSONResponse, FileResponse
-
+from turboapi.responses import JSONResponse, Response
 
 # ============================================================================
 # Binary Content Type Detection Tests
 # ============================================================================
+
 
 class TestBinaryContentTypeDetection:
     """Test that binary content types are properly detected."""
@@ -86,12 +84,13 @@ class TestBinaryContentTypeDetection:
 # Binary Response Normalization Tests
 # ============================================================================
 
+
 class TestBinaryResponseNormalization:
     """Test that binary responses are properly normalized."""
 
     def test_audio_wav_response_returns_bytes(self):
         """Test that audio/wav Response returns raw bytes."""
-        wav_data = b'RIFF....WAVEfmt ' + b'\x00' * 100  # Fake WAV header
+        wav_data = b"RIFF....WAVEfmt " + b"\x00" * 100  # Fake WAV header
         resp = Response(content=wav_data, media_type="audio/wav")
 
         result = ResponseHandler.normalize_response(resp)
@@ -108,7 +107,7 @@ class TestBinaryResponseNormalization:
     def test_image_png_response_returns_bytes(self):
         """Test that image/png Response returns raw bytes."""
         # PNG magic header
-        png_data = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
+        png_data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
         resp = Response(content=png_data, media_type="image/png")
 
         result = ResponseHandler.normalize_response(resp)
@@ -122,7 +121,7 @@ class TestBinaryResponseNormalization:
 
     def test_video_mp4_response_returns_bytes(self):
         """Test that video/mp4 Response returns raw bytes."""
-        mp4_data = b'\x00\x00\x00\x1cftyp' + b'\x00' * 100  # Fake MP4 header
+        mp4_data = b"\x00\x00\x00\x1cftyp" + b"\x00" * 100  # Fake MP4 header
         resp = Response(content=mp4_data, media_type="video/mp4")
 
         result = ResponseHandler.normalize_response(resp)
@@ -136,7 +135,7 @@ class TestBinaryResponseNormalization:
 
     def test_octet_stream_response_returns_bytes(self):
         """Test that application/octet-stream Response returns raw bytes."""
-        binary_data = b'\x00\x01\x02\x03\xff\xfe\xfd'
+        binary_data = b"\x00\x01\x02\x03\xff\xfe\xfd"
         resp = Response(content=binary_data, media_type="application/octet-stream")
 
         result = ResponseHandler.normalize_response(resp)
@@ -178,12 +177,13 @@ class TestBinaryResponseNormalization:
 # Binary Response Formatting Tests
 # ============================================================================
 
+
 class TestBinaryResponseFormatting:
     """Test that format_response handles binary data correctly."""
 
     def test_format_binary_response_preserves_bytes(self):
         """Test that format_response preserves bytes for binary content."""
-        wav_data = b'RIFF....WAVEfmt ' + b'\x00' * 100
+        wav_data = b"RIFF....WAVEfmt " + b"\x00" * 100
 
         result = ResponseHandler.format_response(wav_data, 200, "audio/wav")
 
@@ -194,7 +194,7 @@ class TestBinaryResponseFormatting:
 
     def test_format_binary_response_not_base64_encoded(self):
         """Test that binary content is NOT base64 encoded."""
-        binary_data = b'\x00\x01\x02\x03\xff\xfe\xfd'
+        binary_data = b"\x00\x01\x02\x03\xff\xfe\xfd"
 
         result = ResponseHandler.format_response(binary_data, 200, "audio/wav")
 
@@ -220,6 +220,7 @@ class TestBinaryResponseFormatting:
 # Integration Tests with Real Audio File
 # ============================================================================
 
+
 class TestBinaryResponseIntegration:
     """Integration tests using the real test audio file."""
 
@@ -238,8 +239,8 @@ class TestBinaryResponseIntegration:
             header = f.read(12)
 
         # WAV files start with RIFF...WAVE
-        assert header[:4] == b'RIFF', "Not a valid WAV file (missing RIFF)"
-        assert header[8:12] == b'WAVE', "Not a valid WAV file (missing WAVE)"
+        assert header[:4] == b"RIFF", "Not a valid WAV file (missing RIFF)"
+        assert header[8:12] == b"WAVE", "Not a valid WAV file (missing WAVE)"
 
     def test_response_with_real_wav_file(self, test_wav_path):
         """Test Response object with real WAV file."""
@@ -290,13 +291,14 @@ class TestBinaryResponseIntegration:
 
         # Verify WAV header is intact
         result_content = formatted["content"]
-        assert result_content[:4] == b'RIFF'
-        assert result_content[8:12] == b'WAVE'
+        assert result_content[:4] == b"RIFF"
+        assert result_content[8:12] == b"WAVE"
 
 
 # ============================================================================
 # Server Integration Tests (requires running server)
 # ============================================================================
+
 
 @pytest.mark.skipif(requests is None, reason="requests not installed")
 class TestBinaryResponseServer:
@@ -306,8 +308,9 @@ class TestBinaryResponseServer:
     def server_port(self):
         """Use a random available port."""
         import socket
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(('', 0))
+            s.bind(("", 0))
             return s.getsockname()[1]
 
     @pytest.fixture
@@ -320,7 +323,7 @@ class TestBinaryResponseServer:
         # Create a simple test app
         app_code = f'''
 import sys
-sys.path.insert(0, "{os.path.join(os.path.dirname(__file__), '..', 'python')}")
+sys.path.insert(0, "{os.path.join(os.path.dirname(__file__), "..", "python")}")
 
 from turboapi import TurboAPI
 from turboapi.responses import Response
@@ -338,16 +341,14 @@ if __name__ == "__main__":
 '''
 
         # Write temp app file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
             f.write(app_code)
             app_file = f.name
 
         try:
             # Start server in background
             proc = subprocess.Popen(
-                [sys.executable, app_file],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                [sys.executable, app_file], stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
 
             # Wait for server to start
@@ -363,8 +364,8 @@ if __name__ == "__main__":
 
                 # Verify it's raw bytes, not base64
                 content = response.content
-                assert content[:4] == b'RIFF', "Response is not raw WAV (missing RIFF header)"
-                assert content[8:12] == b'WAVE', "Response is not raw WAV (missing WAVE marker)"
+                assert content[:4] == b"RIFF", "Response is not raw WAV (missing RIFF header)"
+                assert content[8:12] == b"WAVE", "Response is not raw WAV (missing WAVE marker)"
 
                 # Compare with original file
                 with open(test_wav_path, "rb") as f:

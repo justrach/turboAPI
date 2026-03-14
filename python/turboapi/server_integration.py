@@ -14,17 +14,26 @@ from .version_check import CHECK_MARK, ROCKET
 
 try:
     from turboapi import turbonet
+
     ZIG_CORE_AVAILABLE = True
 except ImportError:
     ZIG_CORE_AVAILABLE = False
     turbonet = None
     print("[WARN] Zig core not available - running in simulation mode")
 
+
 class RequestContextAdapter:
     """Adapter to convert HTTP requests to middleware RequestContext."""
 
-    def __init__(self, method: str, path: str, headers: dict[str, str],
-                 query_params: dict[str, str], body: bytes, client_ip: str = "127.0.0.1"):
+    def __init__(
+        self,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        query_params: dict[str, str],
+        body: bytes,
+        client_ip: str = "127.0.0.1",
+    ):
         self.method = method
         self.path = path
         self.headers = headers
@@ -37,7 +46,7 @@ class RequestContextAdapter:
         self.json_data = None
         if body and headers.get("content-type", "").startswith("application/json"):
             try:
-                self.json_data = json.loads(body.decode('utf-8'))
+                self.json_data = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 pass
 
@@ -61,14 +70,19 @@ class RequestContextAdapter:
                 "body": self.body,
                 "json_data": self.json_data,
                 "client_ip": self.client_ip,
-                "metadata": self.metadata
+                "metadata": self.metadata,
             }
+
 
 class ResponseContextAdapter:
     """Adapter to convert middleware ResponseContext to HTTP responses."""
 
-    def __init__(self, status_code: int = 200, headers: dict[str, str] = None,
-                 body: str | bytes | dict = None):
+    def __init__(
+        self,
+        status_code: int = 200,
+        headers: dict[str, str] = None,
+        body: str | bytes | dict = None,
+    ):
         self.status_code = status_code
         self.headers = headers or {}
         self.body = body
@@ -80,10 +94,10 @@ class ResponseContextAdapter:
         # Ensure proper content-type
         if isinstance(self.body, dict):
             self.headers["content-type"] = "application/json"
-            body_bytes = json.dumps(self.body).encode('utf-8')
+            body_bytes = json.dumps(self.body).encode("utf-8")
         elif isinstance(self.body, str):
             self.headers.setdefault("content-type", "text/plain")
-            body_bytes = self.body.encode('utf-8')
+            body_bytes = self.body.encode("utf-8")
         elif isinstance(self.body, bytes):
             body_bytes = self.body
         else:
@@ -102,8 +116,9 @@ class ResponseContextAdapter:
                 "status_code": self.status_code,
                 "headers": self.headers,
                 "body": body_bytes,
-                "processing_time_ms": self.processing_time_ms
+                "processing_time_ms": self.processing_time_ms,
             }
+
 
 class TurboHTTPServer:
     """HTTP Server that integrates routing with middleware pipeline."""
@@ -119,14 +134,14 @@ class TurboHTTPServer:
 
                 # Add middleware to pipeline
                 for middleware_class, kwargs in self.app.middleware_stack:
-                    if hasattr(middleware_class, '__name__'):
+                    if hasattr(middleware_class, "__name__"):
                         middleware_name = middleware_class.__name__
                         if middleware_name == "CorsMiddleware":
                             cors_middleware = turbonet.CorsMiddleware(
                                 kwargs.get("origins", ["*"]),
                                 kwargs.get("methods", ["GET", "POST", "PUT", "DELETE"]),
                                 kwargs.get("headers", ["*"]),
-                                kwargs.get("max_age", 3600)
+                                kwargs.get("max_age", 3600),
                             )
                             self.middleware_pipeline.add_middleware(cors_middleware)
                         elif middleware_name == "RateLimitMiddleware":
@@ -142,11 +157,19 @@ class TurboHTTPServer:
         else:
             self.middleware_pipeline = None
 
-        print(f"🔧 TurboHTTPServer initialized with {len(self.app.middleware_stack)} middleware components")
+        print(
+            f"🔧 TurboHTTPServer initialized with {len(self.app.middleware_stack)} middleware components"
+        )
 
-    async def handle_request(self, method: str, path: str, headers: dict[str, str] = None,
-                           query_params: dict[str, str] = None, body: bytes = b"",
-                           client_ip: str = "127.0.0.1") -> dict[str, Any]:
+    async def handle_request(
+        self,
+        method: str,
+        path: str,
+        headers: dict[str, str] = None,
+        query_params: dict[str, str] = None,
+        body: bytes = b"",
+        client_ip: str = "127.0.0.1",
+    ) -> dict[str, Any]:
         """Handle incoming HTTP request through the full pipeline."""
 
         start_time = asyncio.get_event_loop().time()
@@ -161,7 +184,7 @@ class TurboHTTPServer:
                 headers=headers,
                 query_params=query_params,
                 body=body,
-                client_ip=client_ip
+                client_ip=client_ip,
             )
 
             # 2. Run middleware pipeline (request phase)
@@ -185,13 +208,10 @@ class TurboHTTPServer:
                 response_adapter = ResponseContextAdapter(
                     status_code=route_response["status_code"],
                     headers=route_response.get("headers", {}),
-                    body=route_response.get("data") or route_response.get("error", "")
+                    body=route_response.get("data") or route_response.get("error", ""),
                 )
             else:
-                response_adapter = ResponseContextAdapter(
-                    status_code=200,
-                    body=route_response
-                )
+                response_adapter = ResponseContextAdapter(status_code=200, body=route_response)
 
             # 5. Run middleware pipeline (response phase)
             if self.middleware_pipeline:
@@ -217,7 +237,7 @@ class TurboHTTPServer:
                     "body": http_response["body"],
                     "processing_time_ms": processing_time,
                     "middleware_count": len(self.app.middleware_stack),
-                    "route_matched": True
+                    "route_matched": True,
                 }
 
             return http_response
@@ -234,16 +254,18 @@ class TurboHTTPServer:
                 "headers": {
                     "content-type": "application/json",
                     "X-Processing-Time": f"{error_time:.2f}ms",
-                    "X-Powered-By": "TurboAPI"
+                    "X-Powered-By": "TurboAPI",
                 },
-                "body": json.dumps({
-                    "error": "Internal Server Error",
-                    "detail": str(e),
-                    "processing_time_ms": error_time
-                }).encode('utf-8'),
+                "body": json.dumps(
+                    {
+                        "error": "Internal Server Error",
+                        "detail": str(e),
+                        "processing_time_ms": error_time,
+                    }
+                ).encode("utf-8"),
                 "processing_time_ms": error_time,
                 "middleware_count": len(self.app.middleware_stack),
-                "route_matched": False
+                "route_matched": False,
             }
 
     async def _process_middleware_request(self, context):
@@ -296,7 +318,7 @@ class TurboHTTPServer:
             return {
                 "error": "Not Found",
                 "status_code": 404,
-                "detail": f"Route {request_adapter.method} {request_adapter.path} not found"
+                "detail": f"Route {request_adapter.method} {request_adapter.path} not found",
             }
 
         route, path_params = match_result
@@ -318,7 +340,7 @@ class TurboHTTPServer:
                             return {
                                 "error": "Bad Request",
                                 "status_code": 400,
-                                "detail": f"Invalid {param_name}: {param_value}"
+                                "detail": f"Invalid {param_name}: {param_value}",
                             }
                     call_args[param_name] = param_value
 
@@ -335,12 +357,12 @@ class TurboHTTPServer:
                             elif param.annotation is float:
                                 param_value = float(param_value)
                             elif param.annotation is bool:
-                                param_value = param_value.lower() in ('true', '1', 'yes', 'on')
+                                param_value = param_value.lower() in ("true", "1", "yes", "on")
                         except (ValueError, TypeError):
                             return {
                                 "error": "Bad Request",
                                 "status_code": 400,
-                                "detail": f"Invalid {param_name}: {param_value}"
+                                "detail": f"Invalid {param_name}: {param_value}",
                             }
 
                     call_args[param_name] = param_value
@@ -360,11 +382,8 @@ class TurboHTTPServer:
             return result
 
         except Exception as e:
-            return {
-                "error": "Internal Server Error",
-                "status_code": 500,
-                "detail": str(e)
-            }
+            return {"error": "Internal Server Error", "status_code": 500, "detail": str(e)}
+
 
 class IntegratedTurboAPI(TurboAPI):
     """TurboAPI with integrated HTTP server and middleware pipeline."""
@@ -397,8 +416,12 @@ class IntegratedTurboAPI(TurboAPI):
 
         # Print integration info
         print("\n[CONFIG] Integration Status:")
-        print(f"   Zig Core: {CHECK_MARK + ' Available' if ZIG_CORE_AVAILABLE else '[WARN] Simulation Mode'}")
-        print(f"   Middleware Pipeline: {CHECK_MARK + ' Active' if self.http_server.middleware_pipeline else '[WARN] Simulated'}")
+        print(
+            f"   Zig Core: {CHECK_MARK + ' Available' if ZIG_CORE_AVAILABLE else '[WARN] Simulation Mode'}"
+        )
+        print(
+            f"   Middleware Pipeline: {CHECK_MARK + ' Active' if self.http_server.middleware_pipeline else '[WARN] Simulated'}"
+        )
         print(f"   Route Registration: {CHECK_MARK} {len(self.registry.get_routes())} routes")
 
         # Print route information
@@ -423,6 +446,7 @@ class IntegratedTurboAPI(TurboAPI):
 
             # Simulate server running
             import time
+
             while True:
                 time.sleep(1)
 

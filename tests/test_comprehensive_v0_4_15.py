@@ -12,23 +12,20 @@ import sys
 
 def run_test(test_file, description):
     """Run a test file and return success status"""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print(f"Running: {description}")
-    print("="*80)
-    
+    print("=" * 80)
+
     try:
         result = subprocess.run(
-            [sys.executable, test_file],
-            capture_output=True,
-            text=True,
-            timeout=60
+            [sys.executable, test_file], capture_output=True, text=True, timeout=60
         )
-        
+
         # Print last 30 lines of output
-        lines = result.stdout.split('\n')
+        lines = result.stdout.split("\n")
         for line in lines[-30:]:
             print(line)
-        
+
         if result.returncode == 0:
             print(f"✅ {description} PASSED")
             return True
@@ -37,7 +34,7 @@ def run_test(test_file, description):
             if result.stderr:
                 print("STDERR:", result.stderr[-500:])
             return False
-            
+
     except subprocess.TimeoutExpired:
         print(f"❌ {description} TIMEOUT")
         return False
@@ -48,44 +45,44 @@ def run_test(test_file, description):
 
 def main():
     """Run all comprehensive tests"""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("🧪 TurboAPI v0.4.15 - COMPREHENSIVE TEST SUITE")
-    print("="*80)
+    print("=" * 80)
     print("Testing ALL features:")
     print("  1. POST body parsing (v0.4.13)")
     print("  2. Query parameters (v0.4.14)")
     print("  3. Headers (v0.4.14)")
     print("  4. Async handlers (v0.4.15 FIX)")
     print("  5. Combined features")
-    print("="*80)
-    
+    print("=" * 80)
+
     tests = [
         ("tests/test_post_body_parsing.py", "POST Body Parsing"),
         ("tests/test_query_and_headers.py", "Query Parameters & Headers"),
         ("tests/test_async_simple.py", "Async Handlers (Basic)"),
     ]
-    
+
     results = []
     for test_file, description in tests:
         success = run_test(test_file, description)
         results.append((description, success))
-    
+
     # Summary
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("📊 COMPREHENSIVE TEST RESULTS")
-    print("="*80)
-    
+    print("=" * 80)
+
     passed = sum(1 for _, success in results if success)
     failed = len(results) - passed
-    
+
     for description, success in results:
         status = "✅ PASSED" if success else "❌ FAILED"
         print(f"  {status}: {description}")
-    
-    print("="*80)
+
+    print("=" * 80)
     print(f"Total: {passed}/{len(results)} passed, {failed} failed")
-    print("="*80)
-    
+    print("=" * 80)
+
     if failed == 0:
         print("\n🎉 ALL COMPREHENSIVE TESTS PASSED!")
         print("\n✅ v0.4.15 Features Working:")

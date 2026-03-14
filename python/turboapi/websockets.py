@@ -5,13 +5,14 @@ FastAPI-compatible WebSocket handling with decorators and connection management.
 
 import asyncio
 import json
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 
 class WebSocketDisconnect(Exception):
     """Raised when a WebSocket connection is closed."""
 
-    def __init__(self, code: int = 1000, reason: Optional[str] = None):
+    def __init__(self, code: int = 1000, reason: str | None = None):
         self.code = code
         self.reason = reason
 
@@ -22,7 +23,7 @@ class WebSocket:
     Provides methods for sending and receiving messages over a WebSocket connection.
     """
 
-    def __init__(self, scope: Optional[dict] = None):
+    def __init__(self, scope: dict | None = None):
         self.scope = scope or {}
         self._accepted = False
         self._closed = False
@@ -35,14 +36,14 @@ class WebSocket:
 
     async def accept(
         self,
-        subprotocol: Optional[str] = None,
-        headers: Optional[dict[str, str]] = None,
+        subprotocol: str | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         """Accept the WebSocket connection."""
         self._accepted = True
         self.client_state = "connected"
 
-    async def close(self, code: int = 1000, reason: Optional[str] = None) -> None:
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
         """Close the WebSocket connection."""
         self._closed = True
         self.client_state = "disconnected"

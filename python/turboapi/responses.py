@@ -7,21 +7,22 @@ StreamingResponse, FileResponse, RedirectResponse.
 import json
 import mimetypes
 import os
-from typing import Any, AsyncIterator, Iterator, Optional, Union
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
 
 class Response:
     """Base response class."""
 
-    media_type: Optional[str] = None
+    media_type: str | None = None
     charset: str = "utf-8"
 
     def __init__(
         self,
         content: Any = None,
         status_code: int = 200,
-        headers: Optional[dict[str, str]] = None,
-        media_type: Optional[str] = None,
+        headers: dict[str, str] | None = None,
+        media_type: str | None = None,
     ):
         self.status_code = status_code
         self.headers = headers or {}
@@ -42,22 +43,22 @@ class Response:
         # Decode body back to content
         if isinstance(self.body, bytes):
             try:
-                return json.loads(self.body.decode('utf-8'))
+                return json.loads(self.body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
-                return self.body.decode('utf-8')
+                return self.body.decode("utf-8")
         return self._content
 
     def set_cookie(
         self,
         key: str,
         value: str = "",
-        max_age: Optional[int] = None,
-        expires: Optional[int] = None,
+        max_age: int | None = None,
+        expires: int | None = None,
         path: str = "/",
-        domain: Optional[str] = None,
+        domain: str | None = None,
         secure: bool = False,
         httponly: bool = False,
-        samesite: Optional[str] = "lax",
+        samesite: str | None = "lax",
     ) -> None:
         """Set a cookie on the response."""
         cookie = f"{key}={value}; Path={path}"
@@ -75,7 +76,7 @@ class Response:
             cookie += f"; SameSite={samesite}"
         self.headers.setdefault("set-cookie", cookie)
 
-    def delete_cookie(self, key: str, path: str = "/", domain: Optional[str] = None) -> None:
+    def delete_cookie(self, key: str, path: str = "/", domain: str | None = None) -> None:
         """Delete a cookie."""
         self.set_cookie(key, "", max_age=0, path=path, domain=domain)
 
@@ -121,7 +122,7 @@ class RedirectResponse(Response):
         self,
         url: str,
         status_code: int = 307,
-        headers: Optional[dict[str, str]] = None,
+        headers: dict[str, str] | None = None,
     ):
         headers = headers or {}
         headers["location"] = url
@@ -143,10 +144,10 @@ class StreamingResponse(Response):
 
     def __init__(
         self,
-        content: Union[AsyncIterator, Iterator],
+        content: AsyncIterator | Iterator,
         status_code: int = 200,
-        headers: Optional[dict[str, str]] = None,
-        media_type: Optional[str] = None,
+        headers: dict[str, str] | None = None,
+        media_type: str | None = None,
     ):
         self.status_code = status_code
         self.headers = headers or {}
@@ -184,9 +185,9 @@ class FileResponse(Response):
         self,
         path: str,
         status_code: int = 200,
-        headers: Optional[dict[str, str]] = None,
-        media_type: Optional[str] = None,
-        filename: Optional[str] = None,
+        headers: dict[str, str] | None = None,
+        media_type: str | None = None,
+        filename: str | None = None,
     ):
         self.path = path
         self.status_code = status_code

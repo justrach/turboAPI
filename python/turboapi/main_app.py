@@ -4,11 +4,9 @@ FastAPI-compatible application with revolutionary performance
 """
 
 import asyncio
-import contextlib
 import inspect
-import json
-from collections.abc import AsyncGenerator, Callable
-from typing import Any, Optional
+from collections.abc import Callable
+from typing import Any
 
 from .routing import Router
 from .version_check import CHECK_MARK, ROCKET
@@ -22,11 +20,11 @@ class TurboAPI(Router):
         title: str = "TurboAPI",
         version: str = "0.1.0",
         description: str = "A revolutionary Python web framework",
-        docs_url: Optional[str] = "/docs",
-        redoc_url: Optional[str] = "/redoc",
-        openapi_url: Optional[str] = "/openapi.json",
-        lifespan: Optional[Callable] = None,
-        **kwargs
+        docs_url: str | None = "/docs",
+        redoc_url: str | None = "/redoc",
+        openapi_url: str | None = "/openapi.json",
+        lifespan: Callable | None = None,
+        **kwargs,
     ):
         super().__init__()
         self.title = title
@@ -42,14 +40,14 @@ class TurboAPI(Router):
         self._mounts: dict[str, Any] = {}
         self._websocket_routes: dict[str, Callable] = {}
         self._exception_handlers: dict[type, Callable] = {}
-        self._openapi_schema: Optional[dict] = None
+        self._openapi_schema: dict | None = None
 
         print(f"{ROCKET} TurboAPI application created: {title} v{version}")
 
     @property
     def routes(self):
         """Get all registered routes."""
-        return self.registry.get_routes() if hasattr(self, 'registry') else []
+        return self.registry.get_routes() if hasattr(self, "registry") else []
 
     def add_middleware(self, middleware_class, **kwargs):
         """Add middleware to the application."""
@@ -58,6 +56,7 @@ class TurboAPI(Router):
 
     def on_event(self, event_type: str):
         """Register event handlers (startup/shutdown)."""
+
         def decorator(func: Callable):
             if event_type == "startup":
                 self.startup_handlers.append(func)
@@ -66,6 +65,7 @@ class TurboAPI(Router):
                 self.shutdown_handlers.append(func)
                 print(f"[EVENT] Registered shutdown handler: {func.__name__}")
             return func
+
         return decorator
 
     def include_router(
@@ -73,13 +73,13 @@ class TurboAPI(Router):
         router: Router,
         prefix: str = "",
         tags: list[str] = None,
-        dependencies: list[Any] = None
+        dependencies: list[Any] = None,
     ):
         """Include a router with all its routes."""
         super().include_router(router, prefix, tags)
         print(f"[ROUTER] Included router with prefix: {prefix}")
 
-    def mount(self, path: str, app: Any, name: Optional[str] = None) -> None:
+    def mount(self, path: str, app: Any, name: str | None = None) -> None:
         """Mount a sub-application or static files at a path.
 
         Usage:
@@ -98,9 +98,11 @@ class TurboAPI(Router):
                 data = await websocket.receive_text()
                 await websocket.send_text(f"Echo: {data}")
         """
+
         def decorator(func: Callable):
             self._websocket_routes[path] = func
             return func
+
         return decorator
 
     def exception_handler(self, exc_class: type):
@@ -111,15 +113,18 @@ class TurboAPI(Router):
             async def value_error_handler(request, exc):
                 return JSONResponse(status_code=400, content={"detail": str(exc)})
         """
+
         def decorator(func: Callable):
             self._exception_handlers[exc_class] = func
             return func
+
         return decorator
 
     def openapi(self) -> dict:
         """Get the OpenAPI schema for this application."""
         if self._openapi_schema is None:
             from .openapi import generate_openapi_schema
+
             self._openapi_schema = generate_openapi_schema(self)
         return self._openapi_schema
 
@@ -158,7 +163,7 @@ class TurboAPI(Router):
                     name: type_.__name__ for name, type_ in route.query_params.items()
                 },
                 "tags": route.tags,
-                "summary": route.summary
+                "summary": route.summary,
             }
             routes_info.append(route_info)
 
@@ -167,7 +172,7 @@ class TurboAPI(Router):
             "version": self.version,
             "description": self.description,
             "routes": routes_info,
-            "middleware": [m[0].__name__ for m in self.middleware_stack]
+            "middleware": [m[0].__name__ for m in self.middleware_stack],
         }
 
     def print_routes(self):
@@ -202,7 +207,7 @@ class TurboAPI(Router):
             return {
                 "error": "Not Found",
                 "status_code": 404,
-                "detail": f"Route {method} {path} not found"
+                "detail": f"Route {method} {path} not found",
             }
 
         route, path_params = match_result
@@ -224,7 +229,7 @@ class TurboAPI(Router):
                             return {
                                 "error": "Bad Request",
                                 "status_code": 400,
-                                "detail": f"Invalid {param_name}: {param_value}"
+                                "detail": f"Invalid {param_name}: {param_value}",
                             }
                     call_args[param_name] = param_value
 
@@ -243,29 +248,19 @@ class TurboAPI(Router):
                 "data": result,
                 "status_code": 200,
                 "route": route.path,
-                "handler": route.handler.__name__
+                "handler": route.handler.__name__,
             }
 
         except Exception as e:
-            return {
-                "error": "Internal Server Error",
-                "status_code": 500,
-                "detail": str(e)
-            }
+            return {"error": "Internal Server Error", "status_code": 500, "detail": str(e)}
 
-    def run_legacy(
-        self,
-        host: str = "127.0.0.1",
-        port: int = 8000,
-        workers: int = 1,
-        **kwargs
-    ):
+    def run_legacy(self, host: str = "127.0.0.1", port: int = 8000, workers: int = 1, **kwargs):
         """Run the TurboAPI application with legacy loop sharding (DEPRECATED).
-        
+
         Use run() instead for better performance with Zig HTTP core.
         """
-        print(f"\n⚠️  WARNING: Using legacy loop sharding runtime")
-        print(f"   For 12x better performance, use app.run() (default)")
+        print("\n⚠️  WARNING: Using legacy loop sharding runtime")
+        print("   For 12x better performance, use app.run() (default)")
         print(f"\n{ROCKET} Starting TurboAPI server...")
         print(f"   Host: {host}:{port}")
         print(f"   Workers: {workers}")
@@ -300,6 +295,7 @@ class TurboAPI(Router):
 
             # Simulate server running
             import time
+
             while True:
                 time.sleep(1)
 
@@ -312,21 +308,16 @@ class TurboAPI(Router):
 
             print("[BYE] Server stopped")
 
-    def run(
-        self,
-        host: str = "127.0.0.1",
-        port: int = 8000,
-        **kwargs
-    ):
+    def run(self, host: str = "127.0.0.1", port: int = 8000, **kwargs):
         """Run the TurboAPI application with Zig HTTP core.
-        
+
         Performance: 24K+ RPS (12x faster than baseline!)
         Uses Zig thread pool with Python 3.14 free-threading.
         """
-        print(f"\n🚀 Starting TurboAPI with Zig HTTP core!")
+        print("\n🚀 Starting TurboAPI with Zig HTTP core!")
         print(f"   Host: {host}:{port}")
         print(f"   Title: {self.title} v{self.version}")
-        print(f"   ⚡ Performance: 24K+ RPS (12x improvement!)")
+        print("   ⚡ Performance: 24K+ RPS (12x improvement!)")
 
         # Print route information
         self.print_routes()
@@ -348,14 +339,14 @@ class TurboAPI(Router):
         try:
             # Import and use the Zig server
             import turbonet
-            
+
             server = turbonet.TurboServer(host, port)
-            
+
             # Register all routes
             for route in self.registry.get_routes():
                 server.add_route(route.method.value, route.path, route.handler)
-            
-            print(f"\n[SERVER] Starting Zig server...")
+
+            print("\n[SERVER] Starting Zig server...")
             server.run()
 
         except KeyboardInterrupt:

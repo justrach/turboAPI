@@ -10,14 +10,15 @@ import sysconfig
 import threading
 
 # Configure stdout to use UTF-8 encoding on Windows
-if sys.platform == 'win32':
+if sys.platform == "win32":
     # Ensure UTF-8 encoding for print() on Windows
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     elif not isinstance(sys.stdout, io.TextIOWrapper):
         # Fallback for older Python or special stdout
         import codecs
-        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+
+        sys.stdout = codecs.getwriter("utf-8")(sys.stdout.buffer, "strict")
 
 # Define symbols that work across all platforms
 CHECK_MARK = "[OK]"
@@ -34,9 +35,9 @@ PARTY = "[SUCCESS]"
 try:
     # Test if we can encode/print emojis
     test_str = "✅"
-    if sys.platform == 'win32':
+    if sys.platform == "win32":
         # On Windows, test if console can display the emoji
-        test_str.encode(sys.stdout.encoding or 'utf-8')
+        test_str.encode(sys.stdout.encoding or "utf-8")
     # If we get here, emojis work
     CHECK_MARK = "✅"
     CROSS_MARK = "❌"
@@ -84,7 +85,9 @@ def check_free_threading_support():
         )
 
     # Success! Print confirmation
-    print(f"{CHECK_MARK} TurboAPI: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} free-threading detected!")
+    print(
+        f"{CHECK_MARK} TurboAPI: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} free-threading detected!"
+    )
     print(f"{THREAD} True parallelism enabled - ready for 5-10x performance!")
 
 
@@ -104,7 +107,7 @@ def _detect_free_threading():
 
     # Method 2: sys._is_gil_enabled() (available in 3.13t+ when GIL is disabled)
     try:
-        if hasattr(sys, '_is_gil_enabled'):
+        if hasattr(sys, "_is_gil_enabled"):
             return not sys._is_gil_enabled()
     except Exception:
         pass
@@ -112,7 +115,7 @@ def _detect_free_threading():
     # Method 3: Check version string for free-threading indicators
     try:
         version_str = sys.version.lower()
-        if 'free-threading' in version_str:
+        if "free-threading" in version_str:
             return True
     except Exception:
         pass
@@ -124,22 +127,24 @@ def _detect_free_threading():
 def get_python_threading_info():
     """Get detailed information about Python threading capabilities."""
     info = {
-        'python_version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
-        'free_threading': _detect_free_threading(),
-        'gil_enabled': not _detect_free_threading(),
-        'threading_native_id': hasattr(threading._thread, 'get_native_id') if hasattr(threading, '_thread') else False,
-        'implementation': sys.implementation.name if hasattr(sys, 'implementation') else 'unknown',
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "free_threading": _detect_free_threading(),
+        "gil_enabled": not _detect_free_threading(),
+        "threading_native_id": hasattr(threading._thread, "get_native_id")
+        if hasattr(threading, "_thread")
+        else False,
+        "implementation": sys.implementation.name if hasattr(sys, "implementation") else "unknown",
     }
 
     # Add performance prediction
-    if info['free_threading']:
-        info['performance_multiplier'] = '5-10x FastAPI'
-        info['concurrency'] = 'True parallelism'
-        info['gil_overhead'] = 'Zero (Zig-native)'
+    if info["free_threading"]:
+        info["performance_multiplier"] = "5-10x FastAPI"
+        info["concurrency"] = "True parallelism"
+        info["gil_overhead"] = "Zero (Zig-native)"
     else:
-        info['performance_multiplier'] = 'Limited by GIL'
-        info['concurrency'] = 'Serialized threads'
-        info['gil_overhead'] = 'High (Python bottleneck)'
+        info["performance_multiplier"] = "Limited by GIL"
+        info["concurrency"] = "Serialized threads"
+        info["gil_overhead"] = "High (Python bottleneck)"
 
     return info
 
@@ -174,9 +179,13 @@ if __name__ == "__main__":
 
     print(f"Python Version: {info['python_version']}")
     print(f"Implementation: {info['implementation']}")
-    print(f"Free-Threading: {CHECK_MARK + ' YES' if info['free_threading'] else CROSS_MARK + ' NO'}")
+    print(
+        f"Free-Threading: {CHECK_MARK + ' YES' if info['free_threading'] else CROSS_MARK + ' NO'}"
+    )
     print(f"GIL Enabled: {CROSS_MARK + ' YES' if info['gil_enabled'] else CHECK_MARK + ' NO'}")
-    print(f"Native Thread ID: {CHECK_MARK + ' YES' if info['threading_native_id'] else CROSS_MARK + ' NO'}")
+    print(
+        f"Native Thread ID: {CHECK_MARK + ' YES' if info['threading_native_id'] else CROSS_MARK + ' NO'}"
+    )
     print()
     print(f"Expected Performance: {info['performance_multiplier']}")
     print(f"Concurrency Model: {info['concurrency']}")

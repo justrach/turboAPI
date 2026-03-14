@@ -5,8 +5,7 @@ interactive API documentation at /docs (Swagger UI) and /redoc (ReDoc).
 """
 
 import inspect
-import json
-from typing import Any, Optional, get_origin, get_args
+from typing import Any, get_args, get_origin
 
 
 def generate_openapi_schema(app) -> dict:
@@ -79,6 +78,7 @@ def _generate_operation(handler, route) -> dict:
     request_body_props = {}
 
     import re
+
     path_params = set(re.findall(r"\{([^}]+)\}", route.path))
 
     for param_name, param in sig.parameters.items():
@@ -86,12 +86,14 @@ def _generate_operation(handler, route) -> dict:
         param_schema = _type_to_schema(annotation)
 
         if param_name in path_params:
-            parameters.append({
-                "name": param_name,
-                "in": "path",
-                "required": True,
-                "schema": param_schema,
-            })
+            parameters.append(
+                {
+                    "name": param_name,
+                    "in": "path",
+                    "required": True,
+                    "schema": param_schema,
+                }
+            )
         elif route.method.value.upper() in ("POST", "PUT", "PATCH"):
             # Body parameter
             request_body_props[param_name] = param_schema

@@ -2,7 +2,7 @@
 Setup script for TurboAPI Python package.
 """
 
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup
 
 setup(
     name="turboapi",
@@ -29,7 +29,7 @@ setup(
         "benchmark": [
             "httpx>=0.24.0",
             "uvloop>=0.17.0",
-        ]
+        ],
     },
     classifiers=[
         "Development Status :: 3 - Alpha",

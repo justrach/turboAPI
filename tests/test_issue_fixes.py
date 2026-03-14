@@ -7,16 +7,15 @@ Issue 2: Async handlers with BaseModel receive kwargs instead of model instance
 Issue 3: JSON parsing error with exclamation marks and edge cases
 """
 
-import json
-import time
-import threading
 import asyncio
 import inspect
-import sys
 import os
+import sys
+import threading
+import time
 
 # Add parent directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'python'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 
 import pytest
 
@@ -26,14 +25,14 @@ try:
 except ImportError:
     requests = None
 
+from turboapi.request_handler import RequestBodyParser, ResponseHandler
+from turboapi.responses import HTMLResponse, JSONResponse, Response
 from turboapi.zig_integration import classify_handler
-from turboapi.request_handler import ResponseHandler, RequestBodyParser
-from turboapi.responses import Response, JSONResponse, HTMLResponse, FileResponse
-
 
 # ============================================================================
 # Issue 1: Response objects serialization tests
 # ============================================================================
+
 
 class TestResponseSerialization:
     """Test that Response objects are properly serialized, not converted to strings."""
@@ -104,6 +103,7 @@ class TestResponseSerialization:
 # Issue 2: Async handler classification tests
 # ============================================================================
 
+
 class TestAsyncHandlerClassification:
     """Test that async handlers with BaseModel params are properly classified."""
 
@@ -121,7 +121,7 @@ class TestAsyncHandlerClassification:
 
             # Create a mock route object
             class MockRoute:
-                method = type('Method', (), {'value': 'POST'})()
+                method = type("Method", (), {"value": "POST"})()
                 path = "/test"
 
             handler_type, param_types, model_info = classify_handler(sync_handler, MockRoute())
@@ -146,7 +146,7 @@ class TestAsyncHandlerClassification:
                 return {"text": request.text}
 
             class MockRoute:
-                method = type('Method', (), {'value': 'POST'})()
+                method = type("Method", (), {"value": "POST"})()
                 path = "/test"
 
             handler_type, param_types, model_info = classify_handler(async_handler, MockRoute())
@@ -159,11 +159,12 @@ class TestAsyncHandlerClassification:
 
     def test_async_simple_handler_classified_correctly(self):
         """Test async handler without body params is classified as simple_async."""
+
         async def async_get_handler():
             return {"message": "hello"}
 
         class MockRoute:
-            method = type('Method', (), {'value': 'GET'})()
+            method = type("Method", (), {"value": "GET"})()
             path = "/test"
 
         handler_type, param_types, model_info = classify_handler(async_get_handler, MockRoute())
@@ -172,11 +173,12 @@ class TestAsyncHandlerClassification:
 
     def test_async_with_dict_param_classified_as_enhanced(self):
         """Test async handler with dict param needs enhanced path."""
+
         async def async_dict_handler(data: dict):
             return {"received": data}
 
         class MockRoute:
-            method = type('Method', (), {'value': 'POST'})()
+            method = type("Method", (), {"value": "POST"})()
             path = "/test"
 
         handler_type, param_types, model_info = classify_handler(async_dict_handler, MockRoute())
@@ -188,6 +190,7 @@ class TestAsyncHandlerClassification:
 # ============================================================================
 # Issue 3: JSON parsing tests
 # ============================================================================
+
 
 class TestJSONParsing:
     """Test JSON parsing handles edge cases correctly."""
@@ -233,7 +236,7 @@ class TestJSONParsing:
 
     def test_json_with_unicode(self):
         """Test JSON with unicode characters."""
-        body = '{"text": "Hello 世界! 🌍"}'.encode('utf-8')
+        body = '{"text": "Hello 世界! 🌍"}'.encode()
 
         def handler(data: dict):
             pass
@@ -246,6 +249,7 @@ class TestJSONParsing:
 
     def test_empty_json_body(self):
         """Test empty body returns empty dict."""
+
         def handler(data: dict):
             pass
 
@@ -256,6 +260,7 @@ class TestJSONParsing:
 
     def test_invalid_json_raises_error(self):
         """Test invalid JSON raises ValueError."""
+
         def handler(data: dict):
             pass
 
@@ -282,6 +287,7 @@ class TestJSONParsing:
 # Integration tests (require server)
 # ============================================================================
 
+
 class TestResponseSerializationIntegration:
     """Integration tests for Response serialization with actual HTTP server."""
 
@@ -289,11 +295,12 @@ class TestResponseSerializationIntegration:
     def server_port(self):
         """Get a unique port for each test."""
         import random
+
         return random.randint(9800, 9899)
 
     def test_response_object_returned_correctly(self, server_port):
         """Test that Response objects are returned correctly via HTTP."""
-        from turboapi import TurboAPI, Response
+        from turboapi import Response, TurboAPI
 
         app = TurboAPI(title="Response Test")
 
@@ -313,10 +320,7 @@ class TestResponseSerializationIntegration:
         time.sleep(2)
 
         # Test text response
-        response = requests.post(
-            f"http://127.0.0.1:{server_port}/text",
-            json={"test": "data"}
-        )
+        response = requests.post(f"http://127.0.0.1:{server_port}/text", json={"test": "data"})
         print(f"Text response: {response.text}")
 
         # Should NOT contain the object representation
@@ -330,6 +334,7 @@ class TestAsyncModelHandlerIntegration:
     @pytest.fixture
     def server_port(self):
         import random
+
         return random.randint(9900, 9999)
 
     def test_async_handler_with_model_receives_model_instance(self, server_port):
@@ -363,8 +368,7 @@ class TestAsyncModelHandlerIntegration:
         time.sleep(2)
 
         response = requests.post(
-            f"http://127.0.0.1:{server_port}/async-model",
-            json={"text": "hello", "value": 42}
+            f"http://127.0.0.1:{server_port}/async-model", json={"text": "hello", "value": 42}
         )
         print(f"Response status: {response.status_code}")
         print(f"Response: {response.text}")
@@ -387,6 +391,7 @@ class TestJSONParsingIntegration:
     @pytest.fixture
     def server_port(self):
         import random
+
         return random.randint(9600, 9699)
 
     def test_json_with_exclamation_via_http(self, server_port):
@@ -408,8 +413,7 @@ class TestJSONParsingIntegration:
 
         # Test with exclamation mark
         response = requests.post(
-            f"http://127.0.0.1:{server_port}/echo",
-            json={"text": "Hello world!"}
+            f"http://127.0.0.1:{server_port}/echo", json={"text": "Hello world!"}
         )
         print(f"Response status: {response.status_code}")
         print(f"Response: {response.text}")
@@ -444,10 +448,7 @@ class TestJSONParsingIntegration:
         ]
 
         for payload in test_payloads:
-            response = requests.post(
-                f"http://127.0.0.1:{server_port}/echo",
-                json=payload
-            )
+            response = requests.post(f"http://127.0.0.1:{server_port}/echo", json=payload)
             print(f"Payload: {payload} -> Status: {response.status_code}")
 
             assert response.status_code == 200, f"Failed for payload {payload}: {response.text}"
@@ -457,11 +458,12 @@ class TestJSONParsingIntegration:
 # Run tests
 # ============================================================================
 
+
 def main():
     """Run all tests."""
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("Testing Issue Fixes for TurboAPI v0.5.2+")
-    print("="*70)
+    print("=" * 70)
 
     # Run unit tests first (no server needed)
     print("\n--- Unit Tests ---")
@@ -495,9 +497,9 @@ def main():
     test_json.test_empty_json_body()
     print("Empty JSON body")
 
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("All unit tests passed!")
-    print("="*70)
+    print("=" * 70)
 
     return 0
 

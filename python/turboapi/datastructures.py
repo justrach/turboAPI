@@ -5,7 +5,7 @@ FastAPI-compatible parameter markers and file handling classes.
 
 import io
 import tempfile
-from typing import Any, Optional
+from typing import Any
 
 
 class Form:
@@ -21,12 +21,12 @@ class Form:
         self,
         default: Any = ...,
         *,
-        alias: Optional[str] = None,
-        title: Optional[str] = None,
-        description: Optional[str] = None,
-        min_length: Optional[int] = None,
-        max_length: Optional[int] = None,
-        regex: Optional[str] = None,
+        alias: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        min_length: int | None = None,
+        max_length: int | None = None,
+        regex: str | None = None,
         media_type: str = "application/x-www-form-urlencoded",
     ):
         self.default = default
@@ -52,10 +52,10 @@ class File:
         self,
         default: Any = ...,
         *,
-        alias: Optional[str] = None,
-        title: Optional[str] = None,
-        description: Optional[str] = None,
-        max_length: Optional[int] = None,
+        alias: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        max_length: int | None = None,
         media_type: str = "multipart/form-data",
     ):
         self.default = default
@@ -78,12 +78,12 @@ class UploadFile:
 
     def __init__(
         self,
-        filename: Optional[str] = None,
-        file: Optional[io.IOBase] = None,
+        filename: str | None = None,
+        file: io.IOBase | None = None,
         content_type: str = "application/octet-stream",
         *,
-        size: Optional[int] = None,
-        headers: Optional[dict] = None,
+        size: int | None = None,
+        headers: dict | None = None,
     ):
         self.filename = filename
         self.content_type = content_type
@@ -132,9 +132,9 @@ class Header:
         self,
         default: Any = ...,
         *,
-        alias: Optional[str] = None,
-        title: Optional[str] = None,
-        description: Optional[str] = None,
+        alias: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
         convert_underscores: bool = True,
     ):
         self.default = default
@@ -157,9 +157,9 @@ class Cookie:
         self,
         default: Any = ...,
         *,
-        alias: Optional[str] = None,
-        title: Optional[str] = None,
-        description: Optional[str] = None,
+        alias: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
     ):
         self.default = default
         self.alias = alias
@@ -180,16 +180,16 @@ class Query:
         self,
         default: Any = ...,
         *,
-        alias: Optional[str] = None,
-        title: Optional[str] = None,
-        description: Optional[str] = None,
-        min_length: Optional[int] = None,
-        max_length: Optional[int] = None,
-        regex: Optional[str] = None,
-        gt: Optional[float] = None,
-        ge: Optional[float] = None,
-        lt: Optional[float] = None,
-        le: Optional[float] = None,
+        alias: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        min_length: int | None = None,
+        max_length: int | None = None,
+        regex: str | None = None,
+        gt: float | None = None,
+        ge: float | None = None,
+        lt: float | None = None,
+        le: float | None = None,
     ):
         self.default = default
         self.alias = alias
@@ -217,13 +217,13 @@ class Path:
         self,
         default: Any = ...,
         *,
-        alias: Optional[str] = None,
-        title: Optional[str] = None,
-        description: Optional[str] = None,
-        gt: Optional[float] = None,
-        ge: Optional[float] = None,
-        lt: Optional[float] = None,
-        le: Optional[float] = None,
+        alias: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        gt: float | None = None,
+        ge: float | None = None,
+        lt: float | None = None,
+        le: float | None = None,
     ):
         self.default = default
         self.alias = alias
@@ -249,9 +249,9 @@ class Body:
         default: Any = ...,
         *,
         embed: bool = False,
-        alias: Optional[str] = None,
-        title: Optional[str] = None,
-        description: Optional[str] = None,
+        alias: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
         media_type: str = "application/json",
     ):
         self.default = default

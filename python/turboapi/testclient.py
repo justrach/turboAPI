@@ -4,10 +4,10 @@ FastAPI-compatible test client for testing API endpoints without starting a serv
 Uses the same interface as httpx/requests.
 """
 
-import json
 import inspect
-from typing import Any, Optional
-from urllib.parse import urlencode, urlparse, parse_qs
+import json
+from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse
 
 
 class TestResponse:
@@ -17,7 +17,7 @@ class TestResponse:
         self,
         status_code: int = 200,
         content: bytes = b"",
-        headers: Optional[dict[str, str]] = None,
+        headers: dict[str, str] | None = None,
     ):
         self.status_code = status_code
         self.content = content
@@ -115,12 +115,12 @@ class TestClient:
         method: str,
         url: str,
         *,
-        params: Optional[dict] = None,
+        params: dict | None = None,
         json: Any = None,
-        data: Optional[dict] = None,
-        headers: Optional[dict] = None,
-        cookies: Optional[dict] = None,
-        content: Optional[bytes] = None,
+        data: dict | None = None,
+        headers: dict | None = None,
+        cookies: dict | None = None,
+        content: bytes | None = None,
     ) -> TestResponse:
         """Execute a request against the app."""
         import asyncio
@@ -143,6 +143,7 @@ class TestClient:
 
         if json is not None:
             import json as json_module
+
             body = json_module.dumps(json).encode("utf-8")
             request_headers.setdefault("content-type", "application/json")
         elif data is not None:
@@ -191,6 +192,7 @@ class TestClient:
         # Add body params
         if body and request_headers.get("content-type") == "application/json":
             import json as json_module
+
             body_data = json_module.loads(body)
             if isinstance(body_data, dict):
                 for key, val in body_data.items():
@@ -199,6 +201,7 @@ class TestClient:
 
         # Add BackgroundTasks if requested
         from .background import BackgroundTasks
+
         for param_name, param in sig.parameters.items():
             if param.annotation is BackgroundTasks:
                 kwargs[param_name] = BackgroundTasks()
@@ -257,7 +260,7 @@ class TestClient:
                     regex_pattern = regex_pattern.replace(f"{{{name}}}", "([^/]+)")
                 match = re.match(f"^{regex_pattern}$", path)
                 if match:
-                    params = dict(zip(param_names, match.groups()))
+                    params = dict(zip(param_names, match.groups(), strict=False))
                     # Type coerce path params based on handler signature
                     sig = inspect.signature(route.handler)
                     for name, val in params.items():
@@ -273,7 +276,7 @@ class TestClient:
 
     def _build_response(self, result) -> TestResponse:
         """Convert handler result to TestResponse."""
-        from .responses import Response as TurboResponse, JSONResponse
+        from .responses import Response as TurboResponse
 
         # Handle Response objects
         if isinstance(result, TurboResponse):
@@ -318,4 +321,5 @@ class TestClient:
 def _json_encode(obj: Any) -> bytes:
     """JSON encode an object to bytes."""
     import json as json_module
+
     return json_module.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

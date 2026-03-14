@@ -4,25 +4,26 @@ FastAPI-compatible Security and Authentication for TurboAPI.
 Includes:
 - OAuth2 (Password Bearer, Authorization Code)
 - HTTP Basic Authentication
-- HTTP Bearer Authentication  
+- HTTP Bearer Authentication
 - API Key Authentication (Header, Query, Cookie)
 - Security scopes and dependencies
 """
 
-from typing import Optional, List, Dict, Any, Callable
-from dataclasses import dataclass
-import secrets
 import base64
-
+import secrets
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 # ============================================================================
 # Base Security Classes
 # ============================================================================
 
+
 class SecurityBase:
     """Base class for all security schemes."""
-    
-    def __init__(self, *, scheme_name: Optional[str] = None, auto_error: bool = True):
+
+    def __init__(self, *, scheme_name: str | None = None, auto_error: bool = True):
         self.scheme_name = scheme_name
         self.auto_error = auto_error
 
@@ -31,24 +32,25 @@ class SecurityBase:
 # OAuth2 Authentication
 # ============================================================================
 
+
 class OAuth2PasswordBearer(SecurityBase):
     """
     OAuth2 password bearer token authentication.
-    
+
     Usage:
         oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-        
+
         @app.get("/users/me")
         async def get_user(token: str = Depends(oauth2_scheme)):
             return {"token": token}
     """
-    
+
     def __init__(
         self,
         tokenUrl: str,
-        scheme_name: Optional[str] = None,
-        scopes: Optional[Dict[str, str]] = None,
-        description: Optional[str] = None,
+        scheme_name: str | None = None,
+        scopes: dict[str, str] | None = None,
+        description: str | None = None,
         auto_error: bool = True,
     ):
         super().__init__(scheme_name=scheme_name, auto_error=auto_error)
@@ -64,8 +66,8 @@ class OAuth2PasswordBearer(SecurityBase):
                 }
             },
         }
-    
-    def __call__(self, authorization: Optional[str] = None) -> Optional[str]:
+
+    def __call__(self, authorization: str | None = None) -> str | None:
         """Extract token from Authorization header."""
         if not authorization:
             if self.auto_error:
@@ -75,7 +77,7 @@ class OAuth2PasswordBearer(SecurityBase):
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             return None
-        
+
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() != "bearer":
             if self.auto_error:
@@ -85,7 +87,7 @@ class OAuth2PasswordBearer(SecurityBase):
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             return None
-        
+
         return token
 
 
@@ -93,36 +95,37 @@ class OAuth2PasswordBearer(SecurityBase):
 class OAuth2PasswordRequestForm:
     """
     OAuth2 password request form data.
-    
+
     Automatically parses form data for OAuth2 password flow.
     """
+
     username: str
     password: str
     scope: str = ""
-    grant_type: Optional[str] = "password"
-    client_id: Optional[str] = None
-    client_secret: Optional[str] = None
+    grant_type: str | None = "password"
+    client_id: str | None = None
+    client_secret: str | None = None
 
 
 class OAuth2AuthorizationCodeBearer(SecurityBase):
     """
     OAuth2 authorization code flow with bearer token.
-    
+
     Usage:
         oauth2_scheme = OAuth2AuthorizationCodeBearer(
             authorizationUrl="https://example.com/oauth/authorize",
             tokenUrl="https://example.com/oauth/token"
         )
     """
-    
+
     def __init__(
         self,
         authorizationUrl: str,
         tokenUrl: str,
-        refreshUrl: Optional[str] = None,
-        scheme_name: Optional[str] = None,
-        scopes: Optional[Dict[str, str]] = None,
-        description: Optional[str] = None,
+        refreshUrl: str | None = None,
+        scheme_name: str | None = None,
+        scopes: dict[str, str] | None = None,
+        description: str | None = None,
         auto_error: bool = True,
     ):
         super().__init__(scheme_name=scheme_name, auto_error=auto_error)
@@ -142,8 +145,8 @@ class OAuth2AuthorizationCodeBearer(SecurityBase):
                 }
             },
         }
-    
-    def __call__(self, authorization: Optional[str] = None) -> Optional[str]:
+
+    def __call__(self, authorization: str | None = None) -> str | None:
         """Extract token from Authorization header."""
         if not authorization:
             if self.auto_error:
@@ -153,7 +156,7 @@ class OAuth2AuthorizationCodeBearer(SecurityBase):
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             return None
-        
+
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() != "bearer":
             if self.auto_error:
@@ -163,7 +166,7 @@ class OAuth2AuthorizationCodeBearer(SecurityBase):
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             return None
-        
+
         return token
 
 
@@ -171,9 +174,11 @@ class OAuth2AuthorizationCodeBearer(SecurityBase):
 # HTTP Basic Authentication
 # ============================================================================
 
+
 @dataclass
 class HTTPBasicCredentials:
     """HTTP Basic authentication credentials."""
+
     username: str
     password: str
 
@@ -181,47 +186,51 @@ class HTTPBasicCredentials:
 class HTTPBasic(SecurityBase):
     """
     HTTP Basic authentication.
-    
+
     Usage:
         security = HTTPBasic()
-        
+
         @app.get("/users/me")
         def get_user(credentials: HTTPBasicCredentials = Depends(security)):
             return {"username": credentials.username}
     """
-    
+
     def __init__(
         self,
         *,
-        scheme_name: Optional[str] = None,
-        realm: Optional[str] = None,
+        scheme_name: str | None = None,
+        realm: str | None = None,
         auto_error: bool = True,
     ):
         super().__init__(scheme_name=scheme_name, auto_error=auto_error)
         self.realm = realm
         self.model = {"type": "http", "scheme": "basic"}
-    
-    def __call__(self, authorization: Optional[str] = None) -> Optional[HTTPBasicCredentials]:
+
+    def __call__(self, authorization: str | None = None) -> HTTPBasicCredentials | None:
         """Extract and decode Basic auth credentials."""
         if not authorization:
             if self.auto_error:
                 raise HTTPException(
                     status_code=401,
                     detail="Not authenticated",
-                    headers={"WWW-Authenticate": f'Basic realm="{self.realm}"' if self.realm else "Basic"},
+                    headers={
+                        "WWW-Authenticate": f'Basic realm="{self.realm}"' if self.realm else "Basic"
+                    },
                 )
             return None
-        
+
         scheme, _, credentials = authorization.partition(" ")
         if scheme.lower() != "basic":
             if self.auto_error:
                 raise HTTPException(
                     status_code=401,
                     detail="Invalid authentication credentials",
-                    headers={"WWW-Authenticate": f'Basic realm="{self.realm}"' if self.realm else "Basic"},
+                    headers={
+                        "WWW-Authenticate": f'Basic realm="{self.realm}"' if self.realm else "Basic"
+                    },
                 )
             return None
-        
+
         try:
             decoded = base64.b64decode(credentials).decode("utf-8")
             username, _, password = decoded.partition(":")
@@ -231,7 +240,9 @@ class HTTPBasic(SecurityBase):
                 raise HTTPException(
                     status_code=401,
                     detail="Invalid authentication credentials",
-                    headers={"WWW-Authenticate": f'Basic realm="{self.realm}"' if self.realm else "Basic"},
+                    headers={
+                        "WWW-Authenticate": f'Basic realm="{self.realm}"' if self.realm else "Basic"
+                    },
                 )
             return None
 
@@ -240,9 +251,11 @@ class HTTPBasic(SecurityBase):
 # HTTP Bearer Authentication
 # ============================================================================
 
+
 @dataclass
 class HTTPAuthorizationCredentials:
     """HTTP authorization credentials."""
+
     scheme: str
     credentials: str
 
@@ -250,25 +263,25 @@ class HTTPAuthorizationCredentials:
 class HTTPBearer(SecurityBase):
     """
     HTTP Bearer token authentication.
-    
+
     Usage:
         security = HTTPBearer()
-        
+
         @app.get("/users/me")
         def get_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
             return {"token": credentials.credentials}
     """
-    
+
     def __init__(
         self,
         *,
-        scheme_name: Optional[str] = None,
+        scheme_name: str | None = None,
         auto_error: bool = True,
     ):
         super().__init__(scheme_name=scheme_name, auto_error=auto_error)
         self.model = {"type": "http", "scheme": "bearer"}
-    
-    def __call__(self, authorization: Optional[str] = None) -> Optional[HTTPAuthorizationCredentials]:
+
+    def __call__(self, authorization: str | None = None) -> HTTPAuthorizationCredentials | None:
         """Extract Bearer token."""
         if not authorization:
             if self.auto_error:
@@ -278,7 +291,7 @@ class HTTPBearer(SecurityBase):
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             return None
-        
+
         scheme, _, credentials = authorization.partition(" ")
         if scheme.lower() != "bearer":
             if self.auto_error:
@@ -288,22 +301,22 @@ class HTTPBearer(SecurityBase):
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             return None
-        
+
         return HTTPAuthorizationCredentials(scheme=scheme, credentials=credentials)
 
 
 class HTTPDigest(SecurityBase):
     """
     HTTP Digest authentication.
-    
+
     Usage:
         security = HTTPDigest()
     """
-    
+
     def __init__(
         self,
         *,
-        scheme_name: Optional[str] = None,
+        scheme_name: str | None = None,
         auto_error: bool = True,
     ):
         super().__init__(scheme_name=scheme_name, auto_error=auto_error)
@@ -314,15 +327,16 @@ class HTTPDigest(SecurityBase):
 # API Key Authentication
 # ============================================================================
 
+
 class APIKeyBase(SecurityBase):
     """Base class for API key authentication."""
-    
+
     def __init__(
         self,
         *,
         name: str,
-        scheme_name: Optional[str] = None,
-        description: Optional[str] = None,
+        scheme_name: str | None = None,
+        description: str | None = None,
         auto_error: bool = True,
     ):
         super().__init__(scheme_name=scheme_name, auto_error=auto_error)
@@ -333,21 +347,21 @@ class APIKeyBase(SecurityBase):
 class APIKeyQuery(APIKeyBase):
     """
     API Key authentication via query parameter.
-    
+
     Usage:
         api_key = APIKeyQuery(name="api_key")
-        
+
         @app.get("/items")
         def get_items(key: str = Depends(api_key)):
             return {"api_key": key}
     """
-    
+
     def __init__(
         self,
         *,
         name: str,
-        scheme_name: Optional[str] = None,
-        description: Optional[str] = None,
+        scheme_name: str | None = None,
+        description: str | None = None,
         auto_error: bool = True,
     ):
         super().__init__(
@@ -357,8 +371,8 @@ class APIKeyQuery(APIKeyBase):
             auto_error=auto_error,
         )
         self.model = {"type": "apiKey", "in": "query", "name": name}
-    
-    def __call__(self, query_params: Optional[Dict[str, str]] = None) -> Optional[str]:
+
+    def __call__(self, query_params: dict[str, str] | None = None) -> str | None:
         """Extract API key from query parameters."""
         if not query_params or self.name not in query_params:
             if self.auto_error:
@@ -373,21 +387,21 @@ class APIKeyQuery(APIKeyBase):
 class APIKeyHeader(APIKeyBase):
     """
     API Key authentication via HTTP header.
-    
+
     Usage:
         api_key = APIKeyHeader(name="X-API-Key")
-        
+
         @app.get("/items")
         def get_items(key: str = Depends(api_key)):
             return {"api_key": key}
     """
-    
+
     def __init__(
         self,
         *,
         name: str,
-        scheme_name: Optional[str] = None,
-        description: Optional[str] = None,
+        scheme_name: str | None = None,
+        description: str | None = None,
         auto_error: bool = True,
     ):
         super().__init__(
@@ -397,8 +411,8 @@ class APIKeyHeader(APIKeyBase):
             auto_error=auto_error,
         )
         self.model = {"type": "apiKey", "in": "header", "name": name}
-    
-    def __call__(self, headers: Optional[Dict[str, str]] = None) -> Optional[str]:
+
+    def __call__(self, headers: dict[str, str] | None = None) -> str | None:
         """Extract API key from headers."""
         if not headers or self.name.lower() not in {k.lower(): v for k, v in headers.items()}:
             if self.auto_error:
@@ -407,7 +421,7 @@ class APIKeyHeader(APIKeyBase):
                     detail="Not authenticated",
                 )
             return None
-        
+
         # Case-insensitive header lookup
         for key, value in headers.items():
             if key.lower() == self.name.lower():
@@ -418,21 +432,21 @@ class APIKeyHeader(APIKeyBase):
 class APIKeyCookie(APIKeyBase):
     """
     API Key authentication via HTTP cookie.
-    
+
     Usage:
         api_key = APIKeyCookie(name="session")
-        
+
         @app.get("/items")
         def get_items(key: str = Depends(api_key)):
             return {"session": key}
     """
-    
+
     def __init__(
         self,
         *,
         name: str,
-        scheme_name: Optional[str] = None,
-        description: Optional[str] = None,
+        scheme_name: str | None = None,
+        description: str | None = None,
         auto_error: bool = True,
     ):
         super().__init__(
@@ -442,8 +456,8 @@ class APIKeyCookie(APIKeyBase):
             auto_error=auto_error,
         )
         self.model = {"type": "apiKey", "in": "cookie", "name": name}
-    
-    def __call__(self, cookies: Optional[Dict[str, str]] = None) -> Optional[str]:
+
+    def __call__(self, cookies: dict[str, str] | None = None) -> str | None:
         """Extract API key from cookies."""
         if not cookies or self.name not in cookies:
             if self.auto_error:
@@ -459,10 +473,11 @@ class APIKeyCookie(APIKeyBase):
 # Security Scopes
 # ============================================================================
 
+
 class SecurityScopes:
     """
     Security scopes for OAuth2 and other scope-based auth.
-    
+
     Usage:
         def get_current_user(
             security_scopes: SecurityScopes,
@@ -474,8 +489,8 @@ class SecurityScopes:
                 authenticate_value = "Bearer"
             # Validate token and scopes...
     """
-    
-    def __init__(self, scopes: Optional[List[str]] = None):
+
+    def __init__(self, scopes: list[str] | None = None):
         self.scopes = scopes or []
         self.scope_str = " ".join(self.scopes)
 
@@ -484,14 +499,15 @@ class SecurityScopes:
 # Helper Functions
 # ============================================================================
 
+
 class HTTPException(Exception):
     """HTTP exception for authentication errors."""
-    
+
     def __init__(
         self,
         status_code: int,
         detail: Any = None,
-        headers: Optional[Dict[str, str]] = None,
+        headers: dict[str, str] | None = None,
     ):
         self.status_code = status_code
         self.detail = detail
@@ -501,7 +517,7 @@ class HTTPException(Exception):
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
     Verify a password against a hash.
-    
+
     Note: This is a placeholder. Use a proper password hashing library like:
     - passlib with bcrypt
     - argon2-cffi
@@ -513,7 +529,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def get_password_hash(password: str) -> str:
     """
     Hash a password.
-    
+
     Note: This is a placeholder. Use a proper password hashing library.
     """
     # TODO: Implement with proper password hashing
@@ -523,6 +539,7 @@ def get_password_hash(password: str) -> str:
 # ============================================================================
 # Dependency Injection Helper
 # ============================================================================
+
 
 class Depends:
     """
@@ -537,7 +554,7 @@ class Depends:
             return user
     """
 
-    def __init__(self, dependency: Optional[Callable] = None, *, use_cache: bool = True):
+    def __init__(self, dependency: Callable | None = None, *, use_cache: bool = True):
         self.dependency = dependency
         self.use_cache = use_cache
 
@@ -561,9 +578,9 @@ class Security(Depends):
 
     def __init__(
         self,
-        dependency: Optional[Callable] = None,
+        dependency: Callable | None = None,
         *,
-        scopes: Optional[List[str]] = None,
+        scopes: list[str] | None = None,
         use_cache: bool = True,
     ):
         super().__init__(dependency=dependency, use_cache=use_cache)

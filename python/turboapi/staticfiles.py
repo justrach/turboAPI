@@ -6,7 +6,6 @@ FastAPI-compatible static file mounting.
 import mimetypes
 import os
 from pathlib import Path
-from typing import Optional
 
 
 class StaticFiles:
@@ -22,8 +21,8 @@ class StaticFiles:
 
     def __init__(
         self,
-        directory: Optional[str] = None,
-        packages: Optional[list[str]] = None,
+        directory: str | None = None,
+        packages: list[str] | None = None,
         html: bool = False,
         check_dir: bool = True,
     ):
@@ -34,7 +33,7 @@ class StaticFiles:
         if check_dir and self.directory and not self.directory.is_dir():
             raise RuntimeError(f"Directory '{directory}' does not exist")
 
-    def get_file(self, path: str) -> Optional[tuple[bytes, str, int]]:
+    def get_file(self, path: str) -> tuple[bytes, str, int] | None:
         """Get a file's contents, content type, and size.
 
         Returns (content, content_type, size) or None if not found.

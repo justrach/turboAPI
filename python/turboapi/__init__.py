@@ -5,9 +5,11 @@ Requires Python 3.13+ free-threading for maximum performance.
 """
 
 # Core application
-from .native_integration import TurboAPI
-from .routing import APIRouter, Router
-from .models import TurboRequest, TurboResponse, Request
+# Status codes module (import as 'status')
+from . import status
+
+# Background tasks
+from .background import BackgroundTasks
 
 # Parameter types (FastAPI-compatible)
 from .datastructures import (
@@ -21,6 +23,26 @@ from .datastructures import (
     UploadFile,
 )
 
+# Encoders
+from .encoders import jsonable_encoder
+
+# Exceptions
+from .exceptions import (
+    RequestValidationError,
+    WebSocketException,
+)
+
+# Middleware
+from .middleware import (
+    CORSMiddleware,
+    GZipMiddleware,
+    HTTPSRedirectMiddleware,
+    Middleware,
+    TrustedHostMiddleware,
+)
+from .models import Request, TurboRequest, TurboResponse
+from .native_integration import TurboAPI
+
 # Response types
 from .responses import (
     FileResponse,
@@ -31,6 +53,7 @@ from .responses import (
     Response,
     StreamingResponse,
 )
+from .routing import APIRouter, Router
 
 # Security
 from .security import (
@@ -48,38 +71,14 @@ from .security import (
     SecurityScopes,
 )
 
-# Exceptions
-from .exceptions import (
-    RequestValidationError,
-    WebSocketException,
-)
-
-# Middleware
-from .middleware import (
-    CORSMiddleware,
-    GZipMiddleware,
-    HTTPSRedirectMiddleware,
-    Middleware,
-    TrustedHostMiddleware,
-)
-
-# Background tasks
-from .background import BackgroundTasks
-
-# WebSocket
-from .websockets import WebSocket, WebSocketDisconnect
-
 # SSE (Server-Sent Events)
 from .sse import EventSourceResponse, ServerSentEvent, format_sse_event
 
-# Encoders
-from .encoders import jsonable_encoder
-
-# Status codes module (import as 'status')
-from . import status
-
 # Version check
 from .version_check import check_free_threading_support, get_python_threading_info
+
+# WebSocket
+from .websockets import WebSocket, WebSocketDisconnect
 
 __version__ = "2.0.0"
 __all__ = [

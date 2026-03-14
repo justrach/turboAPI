@@ -11,9 +11,7 @@ _BACKEND = None
 turbonet = None
 NATIVE_CORE_AVAILABLE = False
 
-_FREE_THREADED = (
-    hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled()
-)
+_FREE_THREADED = hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled()
 
 # ── Load Zig backend ────────────────────────────────────────────────────────
 try:
@@ -31,9 +29,8 @@ except ImportError:
     NATIVE_CORE_AVAILABLE = False
     print("[WARN] Native core not available - running in simulation mode")
 
-from .zig_integration import (
+from .zig_integration import (  # noqa: E402
     ZigIntegratedTurboAPI,
-    classify_handler,
 )
 
 

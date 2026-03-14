@@ -14,22 +14,23 @@ Run with:
     python3.14 tests/bench_files_zig.py
 """
 
-import os
 import concurrent.futures
-import sys
-import time
-import tempfile
-import io
 import json
+import os
 import statistics
+import sys
+import tempfile
+import time
 
 # ── Ensure the package is importable ──
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 
+
 def banner(msg):
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  {msg}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
+
 
 def bench(name, fn, iterations=1000):
     """Run fn() `iterations` times, report stats."""
@@ -61,11 +62,12 @@ def main():
     # ── Try importing the Zig turbonet ──
     try:
         from turboapi import turbonet
+
         has_turbonet = hasattr(turbonet, "ResponseView")
         if has_turbonet:
-            print(f"  ✅ Zig turbonet loaded (ResponseView available)")
+            print("  ✅ Zig turbonet loaded (ResponseView available)")
         else:
-            print(f"  ⚠️  turbonet loaded but missing ResponseView")
+            print("  ⚠️  turbonet loaded but missing ResponseView")
             has_turbonet = False
     except ImportError as e:
         print(f"  ❌ turbonet not available: {e}")
@@ -77,7 +79,13 @@ def main():
 
     # Small file (4KB — typical JSON API response)
     small_path = os.path.join(tmpdir, "small.json")
-    small_data = json.dumps({"users": [{"id": i, "name": f"user_{i}", "email": f"user{i}@example.com"} for i in range(50)]})
+    small_data = json.dumps(
+        {
+            "users": [
+                {"id": i, "name": f"user_{i}", "email": f"user{i}@example.com"} for i in range(50)
+            ]
+        }
+    )
     with open(small_path, "w") as f:
         f.write(small_data)
 
@@ -137,8 +145,9 @@ def main():
     # TEST 3: UploadFile round-trip
     # ─────────────────────────────────────────────────────────────
     banner("Test 3: UploadFile write→read round-trip")
-    from turboapi.datastructures import UploadFile
     import asyncio
+
+    from turboapi.datastructures import UploadFile
 
     async def upload_roundtrip_small():
         uf = UploadFile(filename="test.json", content_type="application/json")
@@ -246,6 +255,7 @@ def main():
                     _ = rv.get_body_bytes()
                 results.append(len(med_data))
             return results
+
         def concurrent_rv():
             def rv_batch():
                 for _ in range(100):
@@ -255,14 +265,17 @@ def main():
                     rv.set_header("content-length", str(len(med_data)))
                     _ = rv.get_body_bytes()
                 return len(med_data)
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                 futures = [executor.submit(rv_batch) for _ in range(8)]
                 return [f.result() for f in futures]
+
         t_s = bench("8x serial RV build (256KB body)", serial_rv, 100)
         t_p = bench("8x concurrent RV build (256KB body)", concurrent_rv, 100)
         rv_speedup = t_s / t_p if t_p > 0 else 0
-        print(f"  → RV parallel speedup (8 threads): {rv_speedup:.2f}x {'🚀 TRUE PARALLELISM' if rv_speedup > 1.5 else '🔒 GIL-bound'}")
-
+        print(
+            f"  → RV parallel speedup (8 threads): {rv_speedup:.2f}x {'🚀 TRUE PARALLELISM' if rv_speedup > 1.5 else '🔒 GIL-bound'}"
+        )
 
     else:
         banner("Test 4-6: SKIPPED (turbonet not loaded)")
@@ -293,6 +306,7 @@ def main():
         def read_file(path):
             with open(path, "rb") as f:
                 return len(f.read())
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             futures = [
                 executor.submit(read_file, med_path),
@@ -330,9 +344,11 @@ def main():
 
     t_serial = bench("4x serial read+process 256KB", serial_heavy_4, 20)
     t_par4 = bench("4x concurrent read+process 256KB", concurrent_heavy_4, 20)
-    t_par8 = bench("8x concurrent read+process 256KB", concurrent_heavy_8, 20)
+    _t_par8 = bench("8x concurrent read+process 256KB", concurrent_heavy_8, 20)
     speedup = t_serial / t_par4 if t_par4 > 0 else 0
-    print(f"  → Parallel speedup (4 threads): {speedup:.2f}x {'🚀 TRUE PARALLELISM' if speedup > 1.5 else '🔒 GIL-bound'}")
+    print(
+        f"  → Parallel speedup (4 threads): {speedup:.2f}x {'🚀 TRUE PARALLELISM' if speedup > 1.5 else '🔒 GIL-bound'}"
+    )
     bench("4x concurrent 256KB reads", concurrent_reads, 200)
 
     # ─────────────────────────────────────────────────────────────
@@ -342,7 +358,7 @@ def main():
 
     def spooled_small():
         """Stays in memory (< 1MB threshold)."""
-        f = tempfile.SpooledTemporaryFile(max_size=1024*1024)
+        f = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
         f.write(small_data.encode())
         f.seek(0)
         data = f.read()
@@ -351,7 +367,7 @@ def main():
 
     def spooled_large_spill():
         """Spills to disk (> 1MB threshold)."""
-        f = tempfile.SpooledTemporaryFile(max_size=1024*1024)
+        f = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
         f.write(large_data)
         f.seek(0)
         data = f.read()
@@ -368,6 +384,7 @@ def main():
     os.rmdir(tmpdir)
 
     banner("Done!")
+
 
 if __name__ == "__main__":
     main()

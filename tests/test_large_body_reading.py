@@ -8,12 +8,11 @@ payload sizes and edge cases.
 """
 
 import json
-import time
 import threading
-import requests
-import pytest
-from turboapi import TurboAPI
+import time
 
+import requests
+from turboapi import TurboAPI
 
 # Each test uses a unique port to avoid conflicts
 _port_counter = 11200

@@ -2,7 +2,8 @@
 FastAPI-compatible exception classes for TurboAPI.
 """
 
-from typing import Any, Dict, List, Optional, Sequence, Union
+from collections.abc import Sequence
+from typing import Any
 
 
 class HTTPException(Exception):
@@ -17,7 +18,7 @@ class HTTPException(Exception):
         self,
         status_code: int,
         detail: Any = None,
-        headers: Optional[Dict[str, str]] = None,
+        headers: dict[str, str] | None = None,
     ):
         self.status_code = status_code
         self.detail = detail
@@ -50,7 +51,7 @@ class RequestValidationError(Exception):
         self._errors = errors
         self.body = body
 
-    def errors(self) -> List[Dict[str, Any]]:
+    def errors(self) -> list[dict[str, Any]]:
         """Return list of validation errors."""
         return list(self._errors)
 
@@ -68,7 +69,7 @@ class WebSocketException(Exception):
     def __init__(
         self,
         code: int = 1000,
-        reason: Optional[str] = None,
+        reason: str | None = None,
     ):
         self.code = code
         self.reason = reason
@@ -83,11 +84,11 @@ class ValidationError(Exception):
 
     def __init__(
         self,
-        errors: List[Dict[str, Any]],
+        errors: list[dict[str, Any]],
     ):
         self._errors = errors
 
-    def errors(self) -> List[Dict[str, Any]]:
+    def errors(self) -> list[dict[str, Any]]:
         """Return list of validation errors."""
         return self._errors
 

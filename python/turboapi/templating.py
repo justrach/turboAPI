@@ -3,7 +3,7 @@
 FastAPI-compatible template rendering.
 """
 
-from typing import Any, Optional
+from typing import Any
 
 from .responses import HTMLResponse
 
@@ -33,6 +33,7 @@ class Jinja2Templates:
         if self._env is None:
             try:
                 from jinja2 import Environment, FileSystemLoader
+
                 self._env = Environment(
                     loader=FileSystemLoader(self.directory),
                     autoescape=True,
@@ -47,9 +48,9 @@ class Jinja2Templates:
     def TemplateResponse(
         self,
         name: str,
-        context: Optional[dict[str, Any]] = None,
+        context: dict[str, Any] | None = None,
         status_code: int = 200,
-        headers: Optional[dict[str, str]] = None,
+        headers: dict[str, str] | None = None,
     ) -> HTMLResponse:
         """Render a template and return an HTMLResponse.
 

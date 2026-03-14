@@ -7,11 +7,12 @@ objects to JSON-serializable dictionaries.
 
 import dataclasses
 from collections import deque
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path, PurePath
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import Any
 from uuid import UUID
 
 # Try to import dhi BaseModel
@@ -32,7 +33,7 @@ except ImportError:
     HAS_PYDANTIC = False
 
 
-ENCODERS_BY_TYPE: Dict[Type[Any], Callable[[Any], Any]] = {
+ENCODERS_BY_TYPE: dict[type[Any], Callable[[Any], Any]] = {
     bytes: lambda o: o.decode(),
     date: lambda o: o.isoformat(),
     datetime: lambda o: o.isoformat(),
@@ -51,13 +52,13 @@ ENCODERS_BY_TYPE: Dict[Type[Any], Callable[[Any], Any]] = {
 
 def jsonable_encoder(
     obj: Any,
-    include: Optional[Set[str]] = None,
-    exclude: Optional[Set[str]] = None,
+    include: set[str] | None = None,
+    exclude: set[str] | None = None,
     by_alias: bool = True,
     exclude_unset: bool = False,
     exclude_defaults: bool = False,
     exclude_none: bool = False,
-    custom_encoder: Optional[Dict[Any, Callable[[Any], Any]]] = None,
+    custom_encoder: dict[Any, Callable[[Any], Any]] | None = None,
     sqlalchemy_safe: bool = True,
 ) -> Any:
     """
@@ -221,14 +222,14 @@ def jsonable_encoder(
 
 def _encode_model(
     obj: Any,
-    include: Optional[Set[str]],
-    exclude: Set[str],
+    include: set[str] | None,
+    exclude: set[str],
     by_alias: bool,
     exclude_unset: bool,
     exclude_defaults: bool,
     exclude_none: bool,
-    custom_encoder: Dict[Any, Callable[[Any], Any]],
-) -> Dict[str, Any]:
+    custom_encoder: dict[Any, Callable[[Any], Any]],
+) -> dict[str, Any]:
     """Encode a dhi BaseModel to a dict."""
     # Use model_dump if available
     if hasattr(obj, "model_dump"):
@@ -263,14 +264,14 @@ def _encode_model(
 
 def _encode_pydantic(
     obj: Any,
-    include: Optional[Set[str]],
-    exclude: Set[str],
+    include: set[str] | None,
+    exclude: set[str],
     by_alias: bool,
     exclude_unset: bool,
     exclude_defaults: bool,
     exclude_none: bool,
-    custom_encoder: Dict[Any, Callable[[Any], Any]],
-) -> Dict[str, Any]:
+    custom_encoder: dict[Any, Callable[[Any], Any]],
+) -> dict[str, Any]:
     """Encode a Pydantic model to a dict."""
     # Pydantic v2
     if hasattr(obj, "model_dump"):
@@ -297,18 +298,17 @@ def _encode_pydantic(
 
     # Recursively encode nested values
     return {
-        key: jsonable_encoder(value, custom_encoder=custom_encoder)
-        for key, value in data.items()
+        key: jsonable_encoder(value, custom_encoder=custom_encoder) for key, value in data.items()
     }
 
 
 def _encode_dataclass(
     obj: Any,
-    include: Optional[Set[str]],
-    exclude: Set[str],
+    include: set[str] | None,
+    exclude: set[str],
     exclude_none: bool,
-    custom_encoder: Dict[Any, Callable[[Any], Any]],
-) -> Dict[str, Any]:
+    custom_encoder: dict[Any, Callable[[Any], Any]],
+) -> dict[str, Any]:
     """Encode a dataclass to a dict."""
     data = dataclasses.asdict(obj)
     return {

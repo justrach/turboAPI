@@ -16,7 +16,11 @@ except ImportError:
 
 from .main_app import TurboAPI
 from .models import Request, Response
-from .request_handler import create_enhanced_handler, create_fast_handler, create_fast_model_handler, ResponseHandler
+from .request_handler import (
+    create_enhanced_handler,
+    create_fast_handler,
+    create_fast_model_handler,
+)
 from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
 
 
@@ -40,6 +44,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
     # Check for Depends/SecurityBase — forces enhanced path
     try:
         from .security import Depends, SecurityBase
+
         for _, param in sig.parameters.items():
             if isinstance(param.default, (Depends, SecurityBase)):
                 has_depends = True
@@ -55,7 +60,11 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
 
         # Check for dhi/Pydantic BaseModel
         try:
-            if BaseModel is not None and inspect.isclass(annotation) and issubclass(annotation, BaseModel):
+            if (
+                BaseModel is not None
+                and inspect.isclass(annotation)
+                and issubclass(annotation, BaseModel)
+            ):
                 # Found a model parameter - use fast model path (sync only for now)
                 model_info = {"param_name": param_name, "model_class": annotation}
                 # For async handlers, model parsing needs the enhanced path
@@ -106,6 +115,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
 
     return "simple_sync", param_types, {}
 
+
 def _extract_model_schema(model_class) -> str | None:
     """Extract a JSON schema descriptor from a dhi BaseModel class for Zig-native validation.
 
@@ -123,29 +133,28 @@ def _extract_model_schema(model_class) -> str | None:
 
 def _build_schema(model_class) -> dict | None:
     """Recursively build a schema dict from a dhi BaseModel class."""
-    import typing
 
     hints = {}
-    if hasattr(model_class, '__annotations__'):
+    if hasattr(model_class, "__annotations__"):
         for name, ann in model_class.__annotations__.items():
             hints[name] = ann
     if not hints:
         return None
 
     fields = []
-    model_fields = getattr(model_class, 'model_fields', {}) if BaseModel is not None else {}
+    model_fields = getattr(model_class, "model_fields", {}) if BaseModel is not None else {}
     for field_name, field_type in hints.items():
         field_info = _resolve_type(field_name, field_type)
 
         # Check if field has a default (not required)
         if field_name in model_fields:
             fi = model_fields[field_name]
-            if hasattr(fi, 'is_required') and not fi.is_required:
+            if hasattr(fi, "is_required") and not fi.is_required:
                 field_info["required"] = False
 
             # Extract dhi Field constraints if available
-            constraint = fi.default if hasattr(fi.default, 'min_length') else fi
-            for attr in ('min_length', 'max_length', 'gt', 'ge', 'lt', 'le'):
+            constraint = fi.default if hasattr(fi.default, "min_length") else fi
+            for attr in ("min_length", "max_length", "gt", "ge", "lt", "le"):
                 val = getattr(constraint, attr, None)
                 if val is not None:
                     field_info[attr] = val
@@ -164,6 +173,7 @@ def _resolve_type(field_name: str, field_type) -> dict:
 
     # Handle typing.Union / X | Y (includes Optional and Python 3.10+ union syntax)
     import types
+
     if origin is typing.Union or isinstance(field_type, types.UnionType):
         args = typing.get_args(field_type)
         non_none = [a for a in args if a is not type(None)]
@@ -237,6 +247,7 @@ def _python_type_to_str(t) -> str:
 def _is_model_class(t) -> bool:
     try:
         import inspect
+
         return BaseModel is not None and inspect.isclass(t) and issubclass(t, BaseModel)
     except TypeError:
         return False
@@ -244,11 +255,13 @@ def _is_model_class(t) -> bool:
 
 try:
     from turboapi import turbonet
+
     NATIVE_CORE_AVAILABLE = True
 except ImportError:
     NATIVE_CORE_AVAILABLE = False
     turbonet = None
     print("[WARN] Native core not available - running in simulation mode")
+
 
 class ZigIntegratedTurboAPI(TurboAPI):
     """TurboAPI with direct Zig HTTP server integration - zero Python middleware overhead."""
@@ -262,6 +275,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
 
         # Check environment variable to disable rate limiting for benchmarking
         import os
+
         if os.getenv("TURBO_DISABLE_RATE_LIMITING") == "1":
             self.configure_rate_limiting(enabled=False)
             print("[CONFIG] Rate limiting disabled via environment variable")
@@ -303,13 +317,16 @@ class ZigIntegratedTurboAPI(TurboAPI):
             app.native_route("GET", "/health", "./libhandlers.dylib", "handle_health")
         """
         import os
+
         abs_path = os.path.abspath(lib_path)
         if not os.path.exists(abs_path):
             print(f"{CROSS_MARK} Native lib not found: {abs_path}")
             return
-        self._native_routes = getattr(self, '_native_routes', [])
+        self._native_routes = getattr(self, "_native_routes", [])
         self._native_routes.append((method.upper(), path, abs_path, symbol_name))
-        print(f"{CHECK_MARK} [native] {method.upper()} {path} -> {os.path.basename(lib_path)}:{symbol_name}")
+        print(
+            f"{CHECK_MARK} [native] {method.upper()} {path} -> {os.path.basename(lib_path)}:{symbol_name}"
+        )
 
     def configure_rate_limiting(self, enabled: bool = False, requests_per_minute: int = 1000000):
         """Configure rate limiting for the server.
@@ -347,7 +364,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
                         kwargs.get("origins", ["*"]),
                         kwargs.get("methods", ["GET", "POST", "PUT", "DELETE"]),
                         kwargs.get("headers", ["*"]),
-                        kwargs.get("max_age", 3600)
+                        kwargs.get("max_age", 3600),
                     )
                     self.zig_server.add_middleware(cors_middleware)
                     print(f"{CHECK_MARK} Added CORS middleware to Zig server")
@@ -370,12 +387,14 @@ class ZigIntegratedTurboAPI(TurboAPI):
             self._register_routes_with_zig()
 
             # Register native FFI routes
-            for method, path, lib_path, symbol in getattr(self, '_native_routes', []):
+            for method, path, lib_path, symbol in getattr(self, "_native_routes", []):
                 self.zig_server.add_native_route(method, path, lib_path, symbol)
 
-            native_count = len(getattr(self, '_native_routes', []))
+            native_count = len(getattr(self, "_native_routes", []))
             py_count = len(self.registry.get_routes())
-            print(f"{CHECK_MARK} Zig server initialized with {py_count} Python + {native_count} native routes")
+            print(
+                f"{CHECK_MARK} Zig server initialized with {py_count} Python + {native_count} native routes"
+            )
             return True
 
         except Exception as e:
@@ -388,12 +407,12 @@ class ZigIntegratedTurboAPI(TurboAPI):
 
         def middleware_wrapped_handler(**kwargs):
             request = Request(
-                method=kwargs.get('method', ''),
-                path=kwargs.get('path', ''),
-                headers=kwargs.get('headers', {}),
-                body=kwargs.get('body', b''),
-                query_string=kwargs.get('query_string', ''),
-                path_params=kwargs.get('path_params', {}),
+                method=kwargs.get("method", ""),
+                path=kwargs.get("path", ""),
+                headers=kwargs.get("headers", {}),
+                body=kwargs.get("body", b""),
+                query_string=kwargs.get("query_string", ""),
+                path_params=kwargs.get("path_params", {}),
             )
 
             # Run before_request
@@ -401,7 +420,11 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 try:
                     mw.before_request(request)
                 except Exception as e:
-                    return {"content": {"error": str(e)}, "status_code": 429, "content_type": "application/json"}
+                    return {
+                        "content": {"error": str(e)},
+                        "status_code": 429,
+                        "content_type": "application/json",
+                    }
 
             # Call actual handler
             try:
@@ -410,18 +433,30 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 for mw in reversed(middleware_instances):
                     err_resp = mw.on_error(request, e)
                     if err_resp:
-                        return {"content": {"error": str(e)}, "status_code": 500, "content_type": "application/json"}
-                return {"content": {"error": str(e)}, "status_code": 500, "content_type": "application/json"}
+                        return {
+                            "content": {"error": str(e)},
+                            "status_code": 500,
+                            "content_type": "application/json",
+                        }
+                return {
+                    "content": {"error": str(e)},
+                    "status_code": 500,
+                    "content_type": "application/json",
+                }
 
             # Run after_request
-            response = Response(content=result.get('content', ''), status_code=result.get('status_code', 200), headers={})
+            response = Response(
+                content=result.get("content", ""),
+                status_code=result.get("status_code", 200),
+                headers={},
+            )
             for mw in reversed(middleware_instances):
                 response = mw.after_request(request, response)
 
             # Merge middleware-added headers back
-            result['status_code'] = response.status_code
+            result["status_code"] = response.status_code
             if response.headers:
-                result['extra_headers'] = response.headers
+                result["extra_headers"] = response.headers
 
             return result
 
@@ -447,12 +482,14 @@ class ZigIntegratedTurboAPI(TurboAPI):
                     else:
                         # Minimal handler: json.loads → Model(**data) → handler(model) → json.dumps
                         enhanced_handler = create_fast_model_handler(
-                            route.handler, model_info["model_class"], model_info["param_name"],
+                            route.handler,
+                            model_info["model_class"],
+                            model_info["param_name"],
                         )
 
                     # Extract dhi model schema for Zig-native validation
                     schema_json = _extract_model_schema(model_info["model_class"])
-                    if schema_json and hasattr(self.zig_server, 'add_route_model_validated'):
+                    if schema_json and hasattr(self.zig_server, "add_route_model_validated"):
                         self.zig_server.add_route_model_validated(
                             route.method.value,
                             route.path,
@@ -520,7 +557,9 @@ class ZigIntegratedTurboAPI(TurboAPI):
                     print(f"{CHECK_MARK} [enhanced] {route.method.value} {route.path}")
 
             except Exception as e:
-                print(f"{CROSS_MARK} Failed to register route {route.method.value} {route.path}: {e}")
+                print(
+                    f"{CROSS_MARK} Failed to register route {route.method.value} {route.path}: {e}"
+                )
 
     def _extract_path_params(self, route_path: str, actual_path: str) -> dict[str, str]:
         """Extract path parameters from actual path using route pattern."""
@@ -531,14 +570,14 @@ class ZigIntegratedTurboAPI(TurboAPI):
         param_names = []
 
         # Find all path parameters
-        param_matches = re.findall(r'\{([^}]+)\}', route_path)
+        param_matches = re.findall(r"\{([^}]+)\}", route_path)
 
         for param in param_matches:
             param_names.append(param)
-            pattern = pattern.replace(f'{{{param}}}', '([^/]+)')
+            pattern = pattern.replace(f"{{{param}}}", "([^/]+)")
 
         # Match actual path
-        match = re.match(f'^{pattern}$', actual_path)
+        match = re.match(f"^{pattern}$", actual_path)
 
         if match:
             return dict(zip(param_names, match.groups(), strict=False))
@@ -554,10 +593,9 @@ class ZigIntegratedTurboAPI(TurboAPI):
             # Handle error responses
             response = turbonet.ResponseView(result["status_code"])
             if "error" in result:
-                response.json(json.dumps({
-                    "error": result["error"],
-                    "detail": result.get("detail", "")
-                }))
+                response.json(
+                    json.dumps({"error": result["error"], "detail": result.get("detail", "")})
+                )
             else:
                 response.json(json.dumps(result.get("data", result)))
             return response
@@ -592,7 +630,9 @@ class ZigIntegratedTurboAPI(TurboAPI):
         print("\n[CONFIG] Direct Zig Integration:")
         print(f"   Zig HTTP Server: {CHECK_MARK} Active")
         print(f"   Middleware Pipeline: {CHECK_MARK} Zig-native (zero Python overhead)")
-        print(f"   Route Handlers: {CHECK_MARK} {len(self.route_handlers)} Python functions registered")
+        print(
+            f"   Route Handlers: {CHECK_MARK} {len(self.route_handlers)} Python functions registered"
+        )
         print(f"   Performance: {CHECK_MARK} 5-10x FastAPI target (no Python middleware overhead)")
 
         # Print route information
@@ -606,6 +646,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
         # Run startup handlers
         if self.startup_handlers:
             import asyncio
+
             asyncio.run(self._run_startup_handlers())
 
         print(f"\n{CHECK_MARK} TurboAPI Direct Zig Integration ready!")
@@ -620,6 +661,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 print("\n[WARN] Native core not available - simulation mode")
                 print("Press Ctrl+C to stop")
                 import time
+
                 while True:
                     time.sleep(1)
 
@@ -629,9 +671,11 @@ class ZigIntegratedTurboAPI(TurboAPI):
             # Run shutdown handlers
             if self.shutdown_handlers:
                 import asyncio
+
                 asyncio.run(self._run_shutdown_handlers())
 
             print("[BYE] Server stopped")
+
 
 # Export the correct integration class
 TurboAPI = ZigIntegratedTurboAPI

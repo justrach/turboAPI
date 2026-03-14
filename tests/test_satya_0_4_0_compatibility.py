@@ -6,7 +6,7 @@ validation powered by Zig/C native extensions.
 """
 
 import pytest
-from dhi import BaseModel, Field, ValidationError
+from dhi import BaseModel, Field
 from turboapi.models import TurboRequest, TurboResponse
 
 
@@ -15,6 +15,7 @@ class TestDhiFieldAccess:
 
     def test_field_without_constraints(self):
         """Fields without Field() should work normally."""
+
         class SimpleModel(BaseModel):
             name: str
             age: int
@@ -27,6 +28,7 @@ class TestDhiFieldAccess:
 
     def test_field_with_constraints(self):
         """Fields with Field() constraints return values directly."""
+
         class ConstrainedModel(BaseModel):
             age: int = Field(ge=0, le=150)
 
@@ -37,6 +39,7 @@ class TestDhiFieldAccess:
 
     def test_field_with_description(self):
         """Fields with Field(description=...) return values directly."""
+
         class DescribedModel(BaseModel):
             name: str = Field(description="User name")
             age: int = Field(ge=0, description="User age")
@@ -49,6 +52,7 @@ class TestDhiFieldAccess:
 
     def test_field_arithmetic(self):
         """Field values support arithmetic operations directly."""
+
         class NumericModel(BaseModel):
             x: int = Field(ge=0, description="X coordinate")
             y: float = Field(description="Y coordinate")
@@ -59,6 +63,7 @@ class TestDhiFieldAccess:
 
     def test_model_dump_works(self):
         """model_dump() should work correctly."""
+
         class TestModel(BaseModel):
             name: str = Field(description="Name")
             age: int = Field(ge=0, description="Age")
@@ -72,6 +77,7 @@ class TestDhiFieldAccess:
 
     def test_model_dump_json(self):
         """model_dump_json() provides JSON serialization."""
+
         class TestModel(BaseModel):
             name: str = Field(description="Name")
             age: int = Field(ge=0, description="Age")
@@ -98,7 +104,7 @@ class TestTurboRequestCompatibility:
             headers={"content-type": "application/json"},
             path_params={"id": "123"},
             query_params={"foo": "bar"},
-            body=b'{"test": "data"}'
+            body=b'{"test": "data"}',
         )
 
         assert req.method == "GET"
@@ -110,7 +116,7 @@ class TestTurboRequestCompatibility:
         req = TurboRequest(
             method="GET",
             path="/test",
-            headers={"Content-Type": "application/json", "X-API-Key": "secret"}
+            headers={"Content-Type": "application/json", "X-API-Key": "secret"},
         )
 
         content_type = req.get_header("content-type")
@@ -121,11 +127,7 @@ class TestTurboRequestCompatibility:
 
     def test_turbo_request_json_parsing(self):
         """JSON parsing should work."""
-        req = TurboRequest(
-            method="POST",
-            path="/api/users",
-            body=b'{"name": "Alice", "age": 30}'
-        )
+        req = TurboRequest(method="POST", path="/api/users", body=b'{"name": "Alice", "age": 30}')
 
         data = req.json()
         assert data == {"name": "Alice", "age": 30}
@@ -136,7 +138,7 @@ class TestTurboRequestCompatibility:
             method="POST",
             path="/test",
             headers={"content-type": "application/json"},
-            body=b'{"test": "data"}'
+            body=b'{"test": "data"}',
         )
 
         assert req.content_type == "application/json"
@@ -145,10 +147,7 @@ class TestTurboRequestCompatibility:
     def test_turbo_request_model_dump(self):
         """model_dump() on TurboRequest should serialize correctly."""
         req = TurboRequest(
-            method="POST",
-            path="/api/data",
-            headers={"x-custom": "value"},
-            body=b"hello"
+            method="POST", path="/api/data", headers={"x-custom": "value"}, body=b"hello"
         )
 
         dumped = req.model_dump()
@@ -163,9 +162,7 @@ class TestTurboResponseCompatibility:
     def test_turbo_response_creation(self):
         """TurboResponse should create successfully with direct field access."""
         resp = TurboResponse(
-            content="Hello, World!",
-            status_code=200,
-            headers={"content-type": "text/plain"}
+            content="Hello, World!", status_code=200, headers={"content-type": "text/plain"}
         )
 
         assert resp.status_code == 200
@@ -173,10 +170,7 @@ class TestTurboResponseCompatibility:
 
     def test_turbo_response_json_method(self):
         """TurboResponse.json() should work."""
-        resp = TurboResponse.json(
-            {"message": "Success", "data": [1, 2, 3]},
-            status_code=200
-        )
+        resp = TurboResponse.json({"message": "Success", "data": [1, 2, 3]}, status_code=200)
 
         dumped = resp.model_dump()
         assert dumped["status_code"] == 200
@@ -203,6 +197,7 @@ class TestDhiFeatures:
 
     def test_model_validate(self):
         """Test model_validate() classmethod."""
+
         class User(BaseModel):
             name: str
             age: int = Field(ge=0, le=150)
@@ -213,6 +208,7 @@ class TestDhiFeatures:
 
     def test_model_json_schema(self):
         """Test model_json_schema() for OpenAPI compatibility."""
+
         class User(BaseModel):
             name: str = Field(description="User name", min_length=1)
             age: int = Field(ge=0, le=150, description="User age")
@@ -225,6 +221,7 @@ class TestDhiFeatures:
 
     def test_model_copy(self):
         """Test model_copy() with updates."""
+
         class User(BaseModel):
             name: str
             age: int
@@ -237,6 +234,7 @@ class TestDhiFeatures:
 
     def test_model_dump_json(self):
         """Test model_dump_json() serialization."""
+
         class User(BaseModel):
             name: str
             age: int = Field(ge=0)
@@ -257,6 +255,7 @@ class TestDhiFeatures:
         instead of field_validator decorators for common string operations.
         """
         from typing import Annotated
+
         from dhi import StripWhitespace
 
         class User(BaseModel):
@@ -293,14 +292,15 @@ class TestDhiFeatures:
         assert obj.value == 50
         assert obj.name == "test"
 
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017 — dhi raises ValidationErrors
             Bounded(value=-1, name="test")
 
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017 — dhi raises ValidationErrors
             Bounded(value=50, name="x")  # too short
 
     def test_model_dump_exclude_include(self):
         """Test model_dump with exclude/include parameters."""
+
         class User(BaseModel):
             name: str
             age: int

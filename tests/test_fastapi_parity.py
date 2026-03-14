@@ -7,29 +7,57 @@ WebSocket, exception handling, OpenAPI, TestClient, static files, lifespan, etc.
 import json
 import os
 import tempfile
+
 import pytest
-
 from turboapi import (
-    TurboAPI, APIRouter, Request,
-    Body, Cookie, File, Form, Header, Path, Query, UploadFile,
-    FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
-    RedirectResponse, Response, StreamingResponse,
-    Depends, Security, HTTPException, HTTPBasic, HTTPBearer, HTTPBasicCredentials,
-    OAuth2PasswordBearer, OAuth2AuthorizationCodeBearer,
-    APIKeyHeader, APIKeyQuery, APIKeyCookie, SecurityScopes,
-    BackgroundTasks, WebSocket, WebSocketDisconnect,
-    RequestValidationError, WebSocketException,
-    CORSMiddleware, GZipMiddleware, TrustedHostMiddleware, HTTPSRedirectMiddleware, Middleware,
-    jsonable_encoder, status,
+    APIKeyCookie,
+    APIKeyHeader,
+    APIKeyQuery,
+    APIRouter,
+    BackgroundTasks,
+    Body,
+    Cookie,
+    CORSMiddleware,
+    Depends,
+    File,
+    FileResponse,
+    Form,
+    GZipMiddleware,
+    Header,
+    HTMLResponse,
+    HTTPBasic,
+    HTTPBasicCredentials,
+    HTTPBearer,
+    HTTPException,
+    JSONResponse,
+    OAuth2AuthorizationCodeBearer,
+    OAuth2PasswordBearer,
+    Path,
+    PlainTextResponse,
+    Query,
+    RedirectResponse,
+    RequestValidationError,
+    Response,
+    Security,
+    SecurityScopes,
+    StreamingResponse,
+    TrustedHostMiddleware,
+    TurboAPI,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    WebSocketException,
+    jsonable_encoder,
+    status,
 )
-from turboapi.testclient import TestClient
-from turboapi.staticfiles import StaticFiles
 from turboapi.openapi import generate_openapi_schema
-
+from turboapi.staticfiles import StaticFiles
+from turboapi.testclient import TestClient
 
 # ============================================================
 # Test: Core Routing
 # ============================================================
+
 
 class TestRouting:
     def setup_method(self):
@@ -91,6 +119,7 @@ class TestRouting:
 # Test: Path Parameters
 # ============================================================
 
+
 class TestPathParams:
     def setup_method(self):
         self.app = TurboAPI(title="PathParamTest")
@@ -128,6 +157,7 @@ class TestPathParams:
 # Test: Query Parameters
 # ============================================================
 
+
 class TestQueryParams:
     def setup_method(self):
         self.app = TurboAPI(title="QueryParamTest")
@@ -164,6 +194,7 @@ class TestQueryParams:
 # ============================================================
 # Test: Response Types
 # ============================================================
+
 
 class TestResponses:
     def test_json_response(self):
@@ -239,6 +270,7 @@ class TestResponses:
 # Test: Background Tasks
 # ============================================================
 
+
 class TestBackgroundTasks:
     def test_background_task_runs(self):
         results = []
@@ -272,6 +304,7 @@ class TestBackgroundTasks:
 # Test: Dependency Injection
 # ============================================================
 
+
 class TestDependencyInjection:
     def test_depends_class(self):
         def get_db():
@@ -292,6 +325,7 @@ class TestDependencyInjection:
 # ============================================================
 # Test: Security
 # ============================================================
+
 
 class TestSecurity:
     def test_oauth2_password_bearer(self):
@@ -341,6 +375,7 @@ class TestSecurity:
 # Test: HTTPException
 # ============================================================
 
+
 class TestHTTPException:
     def test_exception_creation(self):
         exc = HTTPException(status_code=404, detail="Not found")
@@ -372,21 +407,25 @@ class TestHTTPException:
 # Test: Middleware
 # ============================================================
 
+
 class TestMiddleware:
     def test_add_cors_middleware(self):
         from turboapi.middleware import CORSMiddleware
+
         app = TurboAPI(title="CORSTest")
         app.add_middleware(CORSMiddleware, origins=["http://localhost:3000"])
         assert len(app.middleware_stack) == 1
 
     def test_add_gzip_middleware(self):
         from turboapi.middleware import GZipMiddleware
+
         app = TurboAPI(title="GZipTest")
         app.add_middleware(GZipMiddleware, minimum_size=500)
         assert len(app.middleware_stack) == 1
 
     def test_add_trusted_host_middleware(self):
         from turboapi.middleware import TrustedHostMiddleware
+
         app = TurboAPI(title="THTest")
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=["example.com"])
         assert len(app.middleware_stack) == 1
@@ -395,6 +434,7 @@ class TestMiddleware:
 # ============================================================
 # Test: APIRouter
 # ============================================================
+
 
 class TestAPIRouter:
     def test_router_creation(self):
@@ -432,6 +472,7 @@ class TestAPIRouter:
 # Test: Lifecycle Events
 # ============================================================
 
+
 class TestLifecycleEvents:
     def test_startup_event(self):
         app = TurboAPI(title="LifecycleTest")
@@ -464,6 +505,7 @@ class TestLifecycleEvents:
 # ============================================================
 # Test: OpenAPI Schema
 # ============================================================
+
 
 class TestOpenAPI:
     def test_openapi_schema_generation(self):
@@ -508,6 +550,7 @@ class TestOpenAPI:
 # Test: WebSocket
 # ============================================================
 
+
 class TestWebSocket:
     def test_websocket_decorator(self):
         app = TurboAPI(title="WSTest")
@@ -547,6 +590,7 @@ class TestWebSocket:
 # ============================================================
 # Test: Static Files
 # ============================================================
+
 
 class TestStaticFiles:
     def test_static_files_creation(self):
@@ -589,6 +633,7 @@ class TestStaticFiles:
 # Test: Exception Handlers
 # ============================================================
 
+
 class TestExceptionHandlers:
     def test_register_exception_handler(self):
         app = TurboAPI(title="ExcHandlerTest")
@@ -603,6 +648,7 @@ class TestExceptionHandlers:
 # ============================================================
 # Test: Parameter Marker Classes
 # ============================================================
+
 
 class TestParameterMarkers:
     def test_query_marker(self):
@@ -647,6 +693,7 @@ class TestParameterMarkers:
 # ============================================================
 # Test: TestClient
 # ============================================================
+
 
 class TestTestClient:
     def test_basic_get(self):
@@ -698,6 +745,7 @@ class TestTestClient:
 # Test: Async Handlers
 # ============================================================
 
+
 class TestAsyncHandlers:
     def test_async_get_handler(self):
         app = TurboAPI(title="AsyncTest")
@@ -727,6 +775,7 @@ class TestAsyncHandlers:
 # ============================================================
 # Test: FastAPI 1:1 Export Parity
 # ============================================================
+
 
 class TestFastAPIExportParity:
     """Verify TurboAPI has all FastAPI exports for 1:1 compatibility."""
@@ -835,9 +884,9 @@ class TestFastAPIExportParity:
 
     def test_jsonable_encoder_basic_types(self):
         """Test jsonable_encoder handles basic types."""
-        from datetime import datetime, date
-        from uuid import UUID
+        from datetime import date, datetime
         from enum import Enum
+        from uuid import UUID
 
         class Color(Enum):
             RED = "red"
@@ -1021,57 +1070,7 @@ class TestCompleteExportCount:
         """Test comprehensive import statement works."""
         # This is the typical FastAPI-style import
         from turboapi import (
-            # Core (FastAPI equivalent)
             TurboAPI,
-            APIRouter,
-            Request,
-            Response,
-            # Parameters
-            Body,
-            Cookie,
-            Depends,
-            File,
-            Form,
-            Header,
-            Path,
-            Query,
-            Security,
-            # Utilities
-            BackgroundTasks,
-            UploadFile,
-            # Exceptions
-            HTTPException,
-            RequestValidationError,
-            WebSocketException,
-            # WebSocket
-            WebSocket,
-            WebSocketDisconnect,
-            # Responses
-            JSONResponse,
-            HTMLResponse,
-            PlainTextResponse,
-            RedirectResponse,
-            StreamingResponse,
-            FileResponse,
-            # Security classes
-            OAuth2PasswordBearer,
-            OAuth2AuthorizationCodeBearer,
-            HTTPBasic,
-            HTTPBasicCredentials,
-            HTTPBearer,
-            APIKeyHeader,
-            APIKeyQuery,
-            APIKeyCookie,
-            SecurityScopes,
-            # Middleware
-            Middleware,
-            CORSMiddleware,
-            GZipMiddleware,
-            TrustedHostMiddleware,
-            HTTPSRedirectMiddleware,
-            # Encoders
-            jsonable_encoder,
-            # Status module
             status,
         )
 

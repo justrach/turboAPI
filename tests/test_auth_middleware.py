@@ -11,24 +11,21 @@ Validates that:
 - Auth failures return the correct HTTP status code (401/403), not 500
 """
 
-import time
 import threading
+import time
+
 import requests
-import pytest
 from turboapi import TurboAPI
 from turboapi.security import (
+    APIKeyHeader,
     Depends,
-    OAuth2PasswordBearer,
+    HTTPAuthorizationCredentials,
     HTTPBasic,
     HTTPBasicCredentials,
     HTTPBearer,
-    HTTPAuthorizationCredentials,
-    APIKeyHeader,
-    APIKeyQuery,
     HTTPException,
+    OAuth2PasswordBearer,
 )
-import base64
-
 
 _port_counter = 11400
 

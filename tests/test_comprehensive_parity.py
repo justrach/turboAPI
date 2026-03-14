@@ -4,59 +4,53 @@ Tests all major FastAPI features to ensure 1:1 compatibility.
 """
 
 import pytest
-import asyncio
-from typing import Optional, List
-from dataclasses import dataclass
+from dhi import BaseModel
 
 # TurboAPI imports (should match FastAPI imports exactly)
 from turboapi import (
-    TurboAPI,
     APIRouter,
-    Depends,
-    Security,
-    HTTPException,
-    Query,
-    Path,
     Body,
-    Header,
     Cookie,
+    Depends,
     Form,
-    File,
-    UploadFile,
+    Header,
+    HTTPException,
+    Path,
+    Query,
+    Security,
+    TurboAPI,
 )
-from turboapi.responses import (
-    JSONResponse,
-    HTMLResponse,
-    PlainTextResponse,
-    RedirectResponse,
-    StreamingResponse,
-)
-from turboapi.security import (
-    OAuth2PasswordBearer,
-    OAuth2PasswordRequestForm,
-    OAuth2AuthorizationCodeBearer,
-    HTTPBasic,
-    HTTPBasicCredentials,
-    HTTPBearer,
-    HTTPAuthorizationCredentials,
-    APIKeyHeader,
-    APIKeyQuery,
-    APIKeyCookie,
-    SecurityScopes,
-)
+from turboapi.background import BackgroundTasks
 from turboapi.middleware import (
     CORSMiddleware,
     GZipMiddleware,
-    TrustedHostMiddleware,
     HTTPSRedirectMiddleware,
+    TrustedHostMiddleware,
 )
-from turboapi.background import BackgroundTasks
-from dhi import BaseModel
-
+from turboapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+)
+from turboapi.security import (
+    APIKeyCookie,
+    APIKeyHeader,
+    APIKeyQuery,
+    HTTPAuthorizationCredentials,
+    HTTPBasic,
+    HTTPBasicCredentials,
+    HTTPBearer,
+    OAuth2AuthorizationCodeBearer,
+    OAuth2PasswordBearer,
+    OAuth2PasswordRequestForm,
+    SecurityScopes,
+)
 
 # ============================================================================
 # TEST MODELS (using dhi which is FastAPI's pydantic equivalent)
 # ============================================================================
+
 
 class UserCreate(BaseModel):
     username: str
@@ -73,8 +67,8 @@ class UserResponse(BaseModel):
 class Item(BaseModel):
     name: str
     price: float
-    description: Optional[str] = None
-    tax: Optional[float] = None
+    description: str | None = None
+    tax: float | None = None
 
 
 class Token(BaseModel):
@@ -85,6 +79,7 @@ class Token(BaseModel):
 # ============================================================================
 # 1. OAUTH2 & SECURITY TESTS
 # ============================================================================
+
 
 class TestOAuth2Security:
     """Test OAuth2 and security feature parity with FastAPI."""
@@ -98,8 +93,7 @@ class TestOAuth2Security:
     def test_oauth2_password_bearer_with_scopes(self):
         """OAuth2PasswordBearer should support scopes like FastAPI."""
         oauth2_scheme = OAuth2PasswordBearer(
-            tokenUrl="token",
-            scopes={"read": "Read access", "write": "Write access"}
+            tokenUrl="token", scopes={"read": "Read access", "write": "Write access"}
         )
         assert oauth2_scheme.scopes == {"read": "Read access", "write": "Write access"}
 
@@ -122,7 +116,7 @@ class TestOAuth2Security:
             authorizationUrl="https://auth.example.com/authorize",
             tokenUrl="https://auth.example.com/token",
             refreshUrl="https://auth.example.com/refresh",
-            scopes={"openid": "OpenID Connect"}
+            scopes={"openid": "OpenID Connect"},
         )
         assert auth_code.authorizationUrl == "https://auth.example.com/authorize"
         assert auth_code.tokenUrl == "https://auth.example.com/token"
@@ -131,6 +125,7 @@ class TestOAuth2Security:
     def test_http_basic_credentials(self):
         """HTTPBasic should decode Base64 credentials like FastAPI."""
         import base64
+
         http_basic = HTTPBasic()
         credentials = base64.b64encode(b"user:pass").decode()
         result = http_basic(authorization=f"Basic {credentials}")
@@ -173,9 +168,7 @@ class TestOAuth2Security:
     def test_oauth2_password_request_form(self):
         """OAuth2PasswordRequestForm should have correct fields like FastAPI."""
         form = OAuth2PasswordRequestForm(
-            username="testuser",
-            password="testpass",
-            scope="read write"
+            username="testuser", password="testpass", scope="read write"
         )
         assert form.username == "testuser"
         assert form.password == "testpass"
@@ -186,11 +179,13 @@ class TestOAuth2Security:
 # 2. DEPENDENCY INJECTION TESTS
 # ============================================================================
 
+
 class TestDependencyInjection:
     """Test Depends() feature parity with FastAPI."""
 
     def test_depends_creation(self):
         """Depends should be created like FastAPI."""
+
         def get_db():
             return "db_connection"
 
@@ -200,8 +195,10 @@ class TestDependencyInjection:
 
     def test_depends_no_cache(self):
         """Depends with use_cache=False should work like FastAPI."""
+
         def get_timestamp():
             import time
+
             return time.time()
 
         dep = Depends(get_timestamp, use_cache=False)
@@ -218,6 +215,7 @@ class TestDependencyInjection:
 # ============================================================================
 # 3. PARAMETER TYPES TESTS
 # ============================================================================
+
 
 class TestParameterTypes:
     """Test Query, Path, Body, Header, Cookie, Form parameter types."""
@@ -258,6 +256,7 @@ class TestParameterTypes:
 # ============================================================================
 # 4. RESPONSE TYPES TESTS
 # ============================================================================
+
 
 class TestResponseTypes:
     """Test response types feature parity with FastAPI."""
@@ -302,6 +301,7 @@ class TestResponseTypes:
 # 5. MIDDLEWARE TESTS
 # ============================================================================
 
+
 class TestMiddleware:
     """Test middleware feature parity with FastAPI."""
 
@@ -312,7 +312,7 @@ class TestMiddleware:
             allow_methods=["GET", "POST"],
             allow_headers=["*"],
             allow_credentials=True,
-            max_age=600
+            max_age=600,
         )
         assert "https://example.com" in cors.allow_origins
         assert cors.allow_credentials is True
@@ -330,9 +330,7 @@ class TestMiddleware:
 
     def test_trusted_host_middleware(self):
         """TrustedHostMiddleware should work like FastAPI."""
-        trusted = TrustedHostMiddleware(
-            allowed_hosts=["example.com", "*.example.com"]
-        )
+        trusted = TrustedHostMiddleware(allowed_hosts=["example.com", "*.example.com"])
         assert "example.com" in trusted.allowed_hosts
 
     def test_https_redirect_middleware(self):
@@ -344,6 +342,7 @@ class TestMiddleware:
 # ============================================================================
 # 6. API ROUTER TESTS
 # ============================================================================
+
 
 class TestAPIRouter:
     """Test APIRouter feature parity with FastAPI."""
@@ -367,6 +366,7 @@ class TestAPIRouter:
 
     def test_router_with_dependencies(self):
         """APIRouter should support dependencies like FastAPI."""
+
         def verify_token():
             return "token"
 
@@ -378,6 +378,7 @@ class TestAPIRouter:
 # 7. APP CREATION TESTS
 # ============================================================================
 
+
 class TestAppCreation:
     """Test TurboAPI app creation parity with FastAPI."""
 
@@ -388,11 +389,7 @@ class TestAppCreation:
 
     def test_app_creation_with_metadata(self):
         """TurboAPI should accept metadata like FastAPI."""
-        app = TurboAPI(
-            title="My API",
-            description="API Description",
-            version="1.0.0"
-        )
+        app = TurboAPI(title="My API", description="API Description", version="1.0.0")
         assert app.title == "My API"
         assert app.description == "API Description"
         assert app.version == "1.0.0"
@@ -443,6 +440,7 @@ class TestAppCreation:
 # 8. MODEL VALIDATION TESTS
 # ============================================================================
 
+
 class TestModelValidation:
     """Test dhi model validation (Pydantic equivalent)."""
 
@@ -454,7 +452,7 @@ class TestModelValidation:
 
     def test_model_validation_error(self):
         """dhi models should validate like Pydantic."""
-        with pytest.raises(Exception):  # dhi raises validation errors
+        with pytest.raises(Exception):  # noqa: B017 — dhi raises ValidationErrors
             UserCreate(username=123, email="invalid", password=None)
 
     def test_model_dump(self):
@@ -478,6 +476,7 @@ class TestModelValidation:
 # 9. HTTP EXCEPTION TESTS
 # ============================================================================
 
+
 class TestHTTPException:
     """Test HTTPException feature parity with FastAPI."""
 
@@ -490,9 +489,7 @@ class TestHTTPException:
     def test_http_exception_with_headers(self):
         """HTTPException should support headers like FastAPI."""
         exc = HTTPException(
-            status_code=401,
-            detail="Unauthorized",
-            headers={"WWW-Authenticate": "Bearer"}
+            status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Bearer"}
         )
         assert exc.headers == {"WWW-Authenticate": "Bearer"}
 
@@ -500,6 +497,7 @@ class TestHTTPException:
 # ============================================================================
 # 10. BACKGROUND TASKS TESTS
 # ============================================================================
+
 
 class TestBackgroundTasks:
     """Test BackgroundTasks feature parity with FastAPI."""
@@ -525,38 +523,10 @@ class TestBackgroundTasks:
 # SUMMARY
 # ============================================================================
 
+
 def test_feature_parity_summary():
     """Summary test to verify all major FastAPI features are available."""
     # All these imports should work without error
-    from turboapi import (
-        TurboAPI,
-        APIRouter,
-        Depends,
-        Security,
-        HTTPException,
-        Query, Path, Body, Header, Cookie, Form, File, UploadFile,
-        JSONResponse, HTMLResponse, PlainTextResponse, RedirectResponse,
-        StreamingResponse, FileResponse,
-        BackgroundTasks,
-        Request,
-    )
-    from turboapi.security import (
-        OAuth2PasswordBearer,
-        OAuth2PasswordRequestForm,
-        OAuth2AuthorizationCodeBearer,
-        HTTPBasic, HTTPBasicCredentials,
-        HTTPBearer, HTTPAuthorizationCredentials,
-        APIKeyHeader, APIKeyQuery, APIKeyCookie,
-        SecurityScopes,
-    )
-    from turboapi.middleware import (
-        CORSMiddleware,
-        GZipMiddleware,
-        TrustedHostMiddleware,
-        HTTPSRedirectMiddleware,
-        Middleware,
-    )
-    from turboapi import status
 
     print("\n" + "=" * 60)
     print("TurboAPI FastAPI Feature Parity Summary")

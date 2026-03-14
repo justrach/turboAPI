@@ -31,28 +31,28 @@ class TurboRequest(BaseModel):
         """Parse request body as JSON."""
         if not self.body:
             return None
-        return json.loads(self.body.decode('utf-8'))
+        return json.loads(self.body.decode("utf-8"))
 
     def validate_json(self, model_class: type) -> Any:
         """Validate JSON body against a Dhi model."""
         if not self.body:
             return None
-        data = json.loads(self.body.decode('utf-8'))
+        data = json.loads(self.body.decode("utf-8"))
         return model_class.model_validate(data)
 
     def text(self) -> str:
         """Get request body as text."""
-        return self.body.decode('utf-8') if self.body else ""
+        return self.body.decode("utf-8") if self.body else ""
 
     @property
     def content_type(self) -> str | None:
         """Get Content-Type header."""
-        return self.get_header('content-type')
+        return self.get_header("content-type")
 
     @property
     def content_length(self) -> int:
         """Get Content-Length."""
-        length_str = self.get_header('content-length')
+        length_str = self.get_header("content-length")
         return int(length_str) if length_str else len(self.body or b"")
 
 
@@ -71,15 +71,15 @@ class TurboResponse(BaseModel):
     def body(self) -> bytes:
         """Get response body as bytes."""
         if isinstance(self.content, dict):
-            return json.dumps(self.content).encode('utf-8')
+            return json.dumps(self.content).encode("utf-8")
         elif isinstance(self.content, (list, tuple)):
-            return json.dumps(self.content).encode('utf-8')
+            return json.dumps(self.content).encode("utf-8")
         elif isinstance(self.content, str):
-            return self.content.encode('utf-8')
+            return self.content.encode("utf-8")
         elif isinstance(self.content, bytes):
             return self.content
         else:
-            return str(self.content).encode('utf-8')
+            return str(self.content).encode("utf-8")
 
     def set_header(self, name: str, value: str) -> None:
         """Set a response header."""
@@ -93,37 +93,29 @@ class TurboResponse(BaseModel):
     def json(cls, data: Any, status_code: int = 200, headers: dict[str, str] | None = None):
         """Create a JSON response with automatic serialization."""
         response_headers = headers or {}
-        response_headers['content-type'] = 'application/json'
+        response_headers["content-type"] = "application/json"
 
         return cls(
             content=data,  # Will be auto-serialized to JSON
             status_code=status_code,
-            headers=response_headers
+            headers=response_headers,
         )
 
     @classmethod
     def text(cls, content: str, status_code: int = 200, headers: dict[str, str] | None = None):
         """Create a text response."""
         response_headers = headers or {}
-        response_headers['content-type'] = 'text/plain; charset=utf-8'
+        response_headers["content-type"] = "text/plain; charset=utf-8"
 
-        return cls(
-            content=content,
-            status_code=status_code,
-            headers=response_headers
-        )
+        return cls(content=content, status_code=status_code, headers=response_headers)
 
     @classmethod
     def html(cls, content: str, status_code: int = 200, headers: dict[str, str] | None = None):
         """Create an HTML response."""
         response_headers = headers or {}
-        response_headers['content-type'] = 'text/html; charset=utf-8'
+        response_headers["content-type"] = "text/html; charset=utf-8"
 
-        return cls(
-            content=content,
-            status_code=status_code,
-            headers=response_headers
-        )
+        return cls(content=content, status_code=status_code, headers=response_headers)
 
 
 # Backward compatibility alias

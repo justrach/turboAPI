@@ -20,46 +20,56 @@ def _get_global_app() -> TurboAPI:
 
 def get(path: str):
     """Decorator for GET routes using global app."""
+
     def decorator(handler: Callable):
         app = _get_global_app()
         app.add_route("GET", path, handler)
         return handler
+
     return decorator
 
 
 def post(path: str):
     """Decorator for POST routes using global app."""
+
     def decorator(handler: Callable):
         app = _get_global_app()
         app.add_route("POST", path, handler)
         return handler
+
     return decorator
 
 
 def put(path: str):
     """Decorator for PUT routes using global app."""
+
     def decorator(handler: Callable):
         app = _get_global_app()
         app.add_route("PUT", path, handler)
         return handler
+
     return decorator
 
 
 def delete(path: str):
     """Decorator for DELETE routes using global app."""
+
     def decorator(handler: Callable):
         app = _get_global_app()
         app.add_route("DELETE", path, handler)
         return handler
+
     return decorator
 
 
 def patch(path: str):
     """Decorator for PATCH routes using global app."""
+
     def decorator(handler: Callable):
         app = _get_global_app()
         app.add_route("PATCH", path, handler)
         return handler
+
     return decorator
 
 
