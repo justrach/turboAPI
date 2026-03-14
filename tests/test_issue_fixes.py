@@ -26,7 +26,7 @@ try:
 except ImportError:
     requests = None
 
-from turboapi.rust_integration import classify_handler
+from turboapi.zig_integration import classify_handler
 from turboapi.request_handler import ResponseHandler, RequestBodyParser
 from turboapi.responses import Response, JSONResponse, HTMLResponse, FileResponse
 
