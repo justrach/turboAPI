@@ -14,9 +14,9 @@ class TurboRequest(BaseModel):
     method: str = Field(description="HTTP method")
     path: str = Field(description="Request path")
     query_string: str = Field(default="", description="Query string")
-    headers: dict[str, str] = Field(default={}, description="HTTP headers")
-    path_params: dict[str, str] = Field(default={}, description="Path parameters")
-    query_params: dict[str, str] = Field(default={}, description="Query parameters")
+    headers: dict[str, str] = {}
+    path_params: dict[str, str] = {}
+    query_params: dict[str, str] = {}
     body: bytes | None = Field(default=None, description="Request body")
 
     def get_header(self, name: str, default: str | None = None) -> str | None:
@@ -64,7 +64,7 @@ class TurboResponse(BaseModel):
     """High-performance HTTP Response model powered by Dhi."""
 
     status_code: int = Field(ge=100, le=599, default=200, description="HTTP status code")
-    headers: dict[str, str] = Field(default={}, description="HTTP headers")
+    headers: dict[str, str] = {}
     content: Any = Field(default="", description="Response content")
 
     @property
