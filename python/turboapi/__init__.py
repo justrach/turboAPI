@@ -69,6 +69,9 @@ from .background import BackgroundTasks
 # WebSocket
 from .websockets import WebSocket, WebSocketDisconnect
 
+# SSE (Server-Sent Events)
+from .sse import EventSourceResponse, ServerSentEvent, format_sse_event
+
 # Encoders
 from .encoders import jsonable_encoder
 
@@ -131,6 +134,10 @@ __all__ = [
     # WebSocket
     "WebSocket",
     "WebSocketDisconnect",
+    # SSE
+    "EventSourceResponse",
+    "ServerSentEvent",
+    "format_sse_event",
     # Encoders
     "jsonable_encoder",
     # Status module
