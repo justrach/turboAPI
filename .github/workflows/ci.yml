@@ -41,8 +41,11 @@ jobs:
           pip install -e .
           pip install pytest requests
 
-      - name: Run tests
-        run: python -m pytest tests/ -v --tb=short -x
+      - name: Install pytest-xdist for process isolation
+        run: pip install pytest-xdist
+
+      - name: Run tests (forked workers to isolate Zig server lifecycle)
+        run: python -m pytest tests/ -v --tb=short -n auto --dist loadfile
 
       - name: Thread-safety stress test
         run: |
