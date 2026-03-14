@@ -76,13 +76,34 @@ class DependencyResolver:
 
         # Check if it's a security scheme callable
         if isinstance(dep_fn, SecurityBase) and hasattr(dep_fn, '__call__'):
-            headers = context.get('headers', {})
-            auth_header = None
-            for k, v in headers.items():
-                if k.lower() == 'authorization':
-                    auth_header = v
-                    break
-            result = dep_fn(auth_header)
+            # Inspect __call__ signature to pass the right context
+            try:
+                call_sig = inspect.signature(dep_fn.__call__)
+                call_params = list(call_sig.parameters.keys())
+            except (ValueError, TypeError):
+                call_params = []
+
+            if 'headers' in call_params:
+                # APIKeyHeader — pass full headers dict
+                result = dep_fn(headers=context.get('headers', {}))
+            elif 'query_params' in call_params:
+                # APIKeyQuery — parse query string into dict
+                from urllib.parse import parse_qs
+                qs = context.get('query_string', '')
+                qp = {k: v[0] for k, v in parse_qs(qs, keep_blank_values=True).items()} if qs else {}
+                result = dep_fn(query_params=qp)
+            elif 'cookies' in call_params:
+                # APIKeyCookie — pass cookies dict
+                result = dep_fn(cookies=context.get('cookies', {}))
+            else:
+                # OAuth2/HTTPBearer/HTTPBasic — pass authorization header
+                headers = context.get('headers', {})
+                auth_header = None
+                for k, v in headers.items():
+                    if k.lower() == 'authorization':
+                        auth_header = v
+                        break
+                result = dep_fn(auth_header)
         elif inspect.isgeneratorfunction(dep_fn):
             gen = dep_fn(**sub_kwargs)
             result = next(gen)
@@ -254,10 +275,17 @@ class RequestBodyParser:
         parsed_params = {}
         params_list = list(handler_signature.parameters.items())
         
+        # Filter out Depends/Security parameters — they are resolved separately
+        from turboapi.security import Depends, SecurityBase
+        body_params_list = [
+            (name, p) for name, p in params_list
+            if not isinstance(p.default, Depends) and not isinstance(p.default, SecurityBase)
+        ]
+        
         # PATTERN 1: Single parameter that should receive entire body
         # Examples: handler(data: dict), handler(items: list), handler(request: Model)
-        if len(params_list) == 1:
-            param_name, param = params_list[0]
+        if len(body_params_list) == 1:
+            param_name, param = body_params_list[0]
             
             # Check if parameter is a Satya Model
             try:
@@ -287,7 +315,7 @@ class RequestBodyParser:
         
         # PATTERN 2: Multiple parameters - extract individual fields
         # Example: handler(name: str, age: int, email: str)
-        for param_name, param in params_list:
+        for param_name, param in body_params_list:
             if param.annotation == inspect.Parameter.empty:
                 # No type annotation, try to match by name
                 if param_name in json_data:
@@ -590,6 +618,12 @@ def create_enhanced_handler(original_handler, route_definition):
                     400
                 )
             except Exception as e:
+                from turboapi.security import HTTPException
+                if isinstance(e, HTTPException):
+                    return ResponseHandler.format_json_response(
+                        {"detail": e.detail},
+                        e.status_code
+                    )
                 # Unexpected error (500 Internal Server Error)
                 import traceback
                 return ResponseHandler.format_json_response(
@@ -689,6 +723,12 @@ def create_enhanced_handler(original_handler, route_definition):
                     400
                 )
             except Exception as e:
+                from turboapi.security import HTTPException
+                if isinstance(e, HTTPException):
+                    return ResponseHandler.format_json_response(
+                        {"detail": e.detail},
+                        e.status_code
+                    )
                 # Unexpected error (500 Internal Server Error)
                 import traceback
                 return ResponseHandler.format_json_response(

@@ -21,6 +21,36 @@ pub fn build(b: *std.Build) void {
     else
         "python3.13";
 
+    // ── dhi modules ──
+    const dhi_path = b.option([]const u8, "dhi-path", "Path to dhi repository") orelse "/Users/rachpradhan/dhi";
+    const dhi_root: std.Build.LazyPath = .{ .cwd_relative = dhi_path };
+
+    const validator_mod = b.createModule(.{
+        .root_source_file = dhi_root.path(b, "src/validator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const json_validator_mod = b.createModule(.{
+        .root_source_file = dhi_root.path(b, "src/json_validator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    json_validator_mod.addImport("validator", validator_mod);
+
+    const validators_comprehensive_mod = b.createModule(.{
+        .root_source_file = dhi_root.path(b, "src/validators_comprehensive.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const model_mod = b.createModule(.{
+        .root_source_file = dhi_root.path(b, "src/model.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    model_mod.addImport("validators_comprehensive", validators_comprehensive_mod);
+
     // ── shared library (turbonet) ──
     const lib = b.addLibrary(.{
         .name = "turbonet",
@@ -32,6 +62,11 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+
+    lib.root_module.addImport("validator", validator_mod);
+    lib.root_module.addImport("json_validator", json_validator_mod);
+    lib.root_module.addImport("validators_comprehensive", validators_comprehensive_mod);
+    lib.root_module.addImport("model", model_mod);
 
     lib.addIncludePath(.{ .cwd_relative = include_path });
     lib.root_module.addRPathSpecial("@loader_path");
@@ -60,6 +95,11 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    tests.root_module.addImport("validator", validator_mod);
+    tests.root_module.addImport("json_validator", json_validator_mod);
+    tests.root_module.addImport("validators_comprehensive", validators_comprehensive_mod);
+    tests.root_module.addImport("model", model_mod);
+
     tests.addIncludePath(.{ .cwd_relative = include_path });
     tests.addLibraryPath(.{ .cwd_relative = lib_path });
     tests.linkSystemLibrary(py_lib_name);

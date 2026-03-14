@@ -6,6 +6,7 @@ const std = @import("std");
 const py = @import("py.zig");
 const c = py.c;
 const router_mod = @import("router.zig");
+const dhi = @import("dhi_validator.zig");
 
 const allocator = std.heap.c_allocator;
 
@@ -77,6 +78,7 @@ const NativeHandlerEntry = struct {
 
 var routes: ?std.StringHashMap(HandlerEntry) = null;
 var native_routes: ?std.StringHashMap(NativeHandlerEntry) = null;
+var model_schemas: ?std.StringHashMap(dhi.ModelSchema) = null;
 var router: ?router_mod.Router = null;
 var server_host: []const u8 = "127.0.0.1";
 var server_port: u16 = 8000;
@@ -93,6 +95,13 @@ fn getNativeRoutes() *std.StringHashMap(NativeHandlerEntry) {
         native_routes = std.StringHashMap(NativeHandlerEntry).init(allocator);
     }
     return &native_routes.?;
+}
+
+fn getModelSchemas() *std.StringHashMap(dhi.ModelSchema) {
+    if (model_schemas == null) {
+        model_schemas = std.StringHashMap(dhi.ModelSchema).init(allocator);
+    }
+    return &model_schemas.?;
 }
 
 fn getRouter() *router_mod.Router {
@@ -222,6 +231,45 @@ pub fn server_add_route_model(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) 
         .model_class = model_class,
     }) catch return null;
     getRouter().addRoute(method_s, path_s, key) catch return null;
+
+    return py.pyNone();
+}
+
+// ── add_route_model_validated(method, path, handler, param_name, model_class, original, schema_json) ──
+// Like add_route_model but also registers a JSON schema for Zig-native validation
+
+pub fn server_add_route_model_validated(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var method: [*c]const u8 = null;
+    var path: [*c]const u8 = null;
+    var handler: ?*c.PyObject = null;
+    var param_name: [*c]const u8 = null;
+    var model_class: ?*c.PyObject = null;
+    var orig: ?*c.PyObject = null;
+    var schema_json: [*c]const u8 = null;
+    if (c.PyArg_ParseTuple(args, "ssOsOOs", &method, &path, &handler, &param_name, &model_class, &orig, &schema_json) == 0) return null;
+
+    c.Py_IncRef(handler.?);
+    c.Py_IncRef(model_class.?);
+    c.Py_IncRef(orig.?);
+    const method_s = std.mem.span(method);
+    const path_s = std.mem.span(path);
+    const key = std.fmt.allocPrint(allocator, "{s} {s}", .{ method_s, path_s }) catch return null;
+    getRoutes().put(key, .{
+        .handler = handler.?,
+        .handler_type = "model_sync",
+        .param_types_json = "{}",
+        .original_handler = orig,
+        .model_param_name = std.mem.span(param_name),
+        .model_class = model_class,
+    }) catch return null;
+    getRouter().addRoute(method_s, path_s, key) catch return null;
+
+    // Parse and register the schema for Zig-native validation
+    const schema_s = std.mem.span(schema_json);
+    if (dhi.parseSchema(schema_s)) |schema| {
+        getModelSchemas().put(key, schema) catch {};
+        std.debug.print("[DHI] Registered schema for {s}: {d} fields\n", .{ key, schema.fields.len });
+    }
 
     return py.pyNone();
 }
@@ -372,19 +420,39 @@ fn parseHeaders(request_data: []const u8, first_line_end: usize, header_end_pos:
 fn handleConnection(stream: std.net.Stream) void {
     defer stream.close();
 
-    var buf: [8192]u8 = undefined;
-    const n = stream.read(&buf) catch |err| {
-        std.debug.print("[ZIG] read error: {}\n", .{err});
+    // Phase 1: Read headers into a fixed buffer (headers are typically < 8KB)
+    var header_buf: [8192]u8 = undefined;
+    var total_read: usize = 0;
+    var header_end_pos: ?usize = null;
+
+    // Read until we find \r\n\r\n (end of headers) or fill the header buffer
+    while (total_read < header_buf.len) {
+        const n = stream.read(header_buf[total_read..]) catch |err| {
+            std.debug.print("[ZIG] read error: {}\n", .{err});
+            return;
+        };
+        if (n == 0) break;
+        total_read += n;
+
+        // Check if we've received the full headers
+        if (std.mem.indexOf(u8, header_buf[0..total_read], "\r\n\r\n")) |pos| {
+            header_end_pos = pos;
+            break;
+        }
+    }
+    if (total_read == 0) return;
+
+    const he = header_end_pos orelse {
+        // No \r\n\r\n found — malformed or headers too large
+        sendResponse(stream, 431, "text/plain", "Request Header Fields Too Large");
         return;
     };
-    if (n == 0) return;
 
-    const request_data = buf[0..n];
-    std.debug.print("[ZIG] received {d} bytes\n", .{n});
+    const request_head = header_buf[0..total_read];
 
     // Parse the first line to get method + path
-    const first_line_end = std.mem.indexOf(u8, request_data, "\r\n") orelse return;
-    const first_line = request_data[0..first_line_end];
+    const first_line_end = std.mem.indexOf(u8, request_head, "\r\n") orelse return;
+    const first_line = request_head[0..first_line_end];
 
     // "GET /path HTTP/1.1"
     var parts = std.mem.splitScalar(u8, first_line, ' ');
@@ -398,16 +466,65 @@ fn handleConnection(stream: std.net.Stream) void {
     const path = if (q_idx) |i| raw_path[0..i] else raw_path;
     const query_string = if (q_idx) |i| raw_path[i + 1 ..] else "";
 
-    // Extract body (after \r\n\r\n)
-    const header_end = std.mem.indexOf(u8, request_data, "\r\n\r\n");
-    const body = if (header_end) |he| request_data[he + 4 .. n] else "";
-
     // Parse HTTP headers
-    var headers = if (header_end) |he|
-        parseHeaders(request_data, first_line_end, he)
-    else
-        HeaderList.empty;
+    var headers = parseHeaders(request_head, first_line_end, he);
     defer headers.deinit(allocator);
+
+    // Phase 2: Read body using Content-Length
+    const body_start = he + 4; // past \r\n\r\n
+    const already_read_body = request_head[body_start..total_read];
+
+    // Find Content-Length header
+    var content_length: usize = 0;
+    for (headers.items) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "content-length")) {
+            content_length = std.fmt.parseInt(usize, h.value, 10) catch 0;
+            break;
+        }
+    }
+
+    // Cap at 16 MB to prevent abuse
+    const max_body: usize = 16 * 1024 * 1024;
+    if (content_length > max_body) {
+        sendResponse(stream, 413, "application/json", "{\"error\": \"Payload Too Large\"}");
+        return;
+    }
+
+    var body: []const u8 = "";
+    var body_owned: ?[]u8 = null;
+    defer if (body_owned) |b| allocator.free(b);
+
+    if (content_length == 0) {
+        // No body expected — use whatever we already have (typically empty)
+        body = already_read_body;
+    } else if (already_read_body.len >= content_length) {
+        // We already read the entire body in the header read
+        body = already_read_body[0..content_length];
+    } else {
+        // Need to read more body data from the stream
+        const full_body = allocator.alloc(u8, content_length) catch {
+            sendResponse(stream, 500, "application/json", "{\"error\": \"Out of memory\"}");
+            return;
+        };
+        body_owned = full_body;
+
+        // Copy the portion we already have
+        @memcpy(full_body[0..already_read_body.len], already_read_body);
+        var body_read: usize = already_read_body.len;
+
+        // Read the rest
+        while (body_read < content_length) {
+            const n = stream.read(full_body[body_read..content_length]) catch |err| {
+                std.debug.print("[ZIG] body read error: {}\n", .{err});
+                return;
+            };
+            if (n == 0) break; // client disconnected
+            body_read += n;
+        }
+        body = full_body[0..body_read];
+    }
+
+    std.debug.print("[ZIG] received {d} header bytes + {d} body bytes\n", .{ he + 4, body.len });
 
     // Match route via radix trie
     const rt = getRouter();
@@ -436,6 +553,24 @@ fn handleConnection(stream: std.net.Stream) void {
         sendResponse(stream, 500, "application/json", "{\"error\": \"Internal Server Error\"}");
         return;
     };
+
+    // Zig-native dhi validation for model_sync routes — reject invalid bodies
+    // before touching the GIL, saving a full Python round-trip on bad input.
+    if (body.len > 0) {
+        const ms = getModelSchemas();
+        if (ms.get(match.handler_key)) |schema| {
+            const vr = dhi.validateJson(body, &schema);
+            switch (vr) {
+                .ok => {}, // validation passed, continue to Python handler
+                .err => |ve| {
+                    defer ve.deinit();
+                    std.debug.print("[DHI] validation failed for {s}\n", .{match.handler_key});
+                    sendResponse(stream, ve.status_code, "application/json", ve.body);
+                    return;
+                },
+            }
+        }
+    }
 
     const resp = callPythonHandler(entry, method, path, query_string, body, headers.items, &match.params);
     defer resp.deinit();

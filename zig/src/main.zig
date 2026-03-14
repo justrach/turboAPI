@@ -33,6 +33,7 @@ var methods = [_]py.PyMethodDef{
     .{ .ml_name = "_server_add_route_fast", .ml_meth = @ptrCast(&server.server_add_route_fast), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_server_add_route_model", .ml_meth = @ptrCast(&server.server_add_route_model), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_server_add_route_async_fast", .ml_meth = @ptrCast(&server.server_add_route_async_fast), .ml_flags = c.METH_VARARGS, .ml_doc = null },
+    .{ .ml_name = "_server_add_route_model_validated", .ml_meth = @ptrCast(&server.server_add_route_model_validated), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_server_add_native_route", .ml_meth = @ptrCast(&server.server_add_native_route), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_server_add_middleware", .ml_meth = @ptrCast(&server.server_add_middleware), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_server_run", .ml_meth = @ptrCast(&server.server_run), .ml_flags = c.METH_NOARGS, .ml_doc = null },
@@ -92,6 +93,8 @@ const bootstrap_code: [*:0]const u8 =
     \\        _m._server_add_route_fast(method, path, handler, handler_type, param_types_json, original_handler)
     \\    def add_route_model(self, method, path, handler, param_name, model_class, original_handler):
     \\        _m._server_add_route_model(method, path, handler, param_name, model_class, original_handler)
+    \\    def add_route_model_validated(self, method, path, handler, param_name, model_class, original_handler, schema_json):
+    \\        _m._server_add_route_model_validated(method, path, handler, param_name, model_class, original_handler, schema_json)
     \\    def add_route_async_fast(self, method, path, handler, handler_type, param_types_json, original_handler):
     \\        _m._server_add_route_async_fast(method, path, handler, handler_type, param_types_json, original_handler)
     \\    def add_native_route(self, method, path, lib_path, symbol_name):

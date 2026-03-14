@@ -92,6 +92,139 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
 
     return "simple_sync", param_types, {}
 
+def _extract_model_schema(model_class) -> str | None:
+    """Extract a JSON schema descriptor from a dhi BaseModel class for Zig-native validation.
+
+    Supports nested models, unions (str | int), Optional, typed lists, and Field constraints.
+
+    Returns a JSON string like:
+        {"name":"UserModel","fields":[{"name":"address","type":"object","schema":{...}},..]}
+    """
+    try:
+        schema = _build_schema(model_class)
+        return json.dumps(schema) if schema else None
+    except Exception:
+        return None
+
+
+def _build_schema(model_class) -> dict | None:
+    """Recursively build a schema dict from a dhi BaseModel class."""
+    import typing
+
+    hints = {}
+    if hasattr(model_class, '__annotations__'):
+        for name, ann in model_class.__annotations__.items():
+            hints[name] = ann
+    if not hints:
+        return None
+
+    fields = []
+    for field_name, field_type in hints.items():
+        field_info = _resolve_type(field_name, field_type)
+
+        # Extract dhi Field constraints if available
+        if BaseModel is not None and hasattr(model_class, 'model_fields'):
+            model_fields = model_class.model_fields
+            if field_name in model_fields:
+                fi = model_fields[field_name]
+                constraint = fi.default if hasattr(fi.default, 'min_length') else fi
+                for attr in ('min_length', 'max_length', 'gt', 'ge', 'lt', 'le'):
+                    val = getattr(constraint, attr, None)
+                    if val is not None:
+                        field_info[attr] = val
+
+        fields.append(field_info)
+
+    return {"name": model_class.__name__, "fields": fields}
+
+
+def _resolve_type(field_name: str, field_type) -> dict:
+    """Resolve a Python type annotation to a schema field descriptor."""
+    import typing
+
+    field_info: dict = {"name": field_name, "required": True}
+    origin = get_origin(field_type)
+
+    # Handle typing.Union / X | Y (includes Optional and Python 3.10+ union syntax)
+    import types
+    if origin is typing.Union or isinstance(field_type, types.UnionType):
+        args = typing.get_args(field_type)
+        non_none = [a for a in args if a is not type(None)]
+        has_none = type(None) in args
+
+        if has_none:
+            field_info["required"] = False
+
+        if len(non_none) == 1:
+            # Optional[X] — recurse on the inner type
+            inner = _resolve_type(field_name, non_none[0])
+            inner["required"] = field_info["required"]
+            return inner
+        else:
+            # True union: str | int — list the allowed types
+            union_types = []
+            for t in non_none:
+                union_types.append(_python_type_to_str(t))
+            field_info["type"] = "union"
+            field_info["union_types"] = union_types
+            return field_info
+
+    # Handle list[X]
+    if origin is list:
+        field_info["type"] = "array"
+        args = typing.get_args(field_type)
+        if args:
+            item_type = args[0]
+            if _is_model_class(item_type):
+                nested = _build_schema(item_type)
+                if nested:
+                    field_info["items_schema"] = nested
+            else:
+                field_info["items_type"] = _python_type_to_str(item_type)
+        return field_info
+
+    # Handle dict[K, V]
+    if origin is dict:
+        field_info["type"] = "object"
+        return field_info
+
+    # Handle nested BaseModel
+    if _is_model_class(field_type):
+        field_info["type"] = "object"
+        nested = _build_schema(field_type)
+        if nested:
+            field_info["schema"] = nested
+        return field_info
+
+    # Simple scalar types
+    field_info["type"] = _python_type_to_str(field_type)
+    return field_info
+
+
+def _python_type_to_str(t) -> str:
+    if t is str:
+        return "string"
+    elif t is int:
+        return "integer"
+    elif t is float:
+        return "float"
+    elif t is bool:
+        return "boolean"
+    elif t is list or get_origin(t) is list:
+        return "array"
+    elif t is dict or get_origin(t) is dict:
+        return "object"
+    return "any"
+
+
+def _is_model_class(t) -> bool:
+    try:
+        import inspect
+        return BaseModel is not None and inspect.isclass(t) and issubclass(t, BaseModel)
+    except TypeError:
+        return False
+
+
 try:
     from turboapi import turbonet
     NATIVE_CORE_AVAILABLE = True
@@ -290,19 +423,34 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 handler_type, param_types, model_info = classify_handler(route.handler, route)
 
                 if handler_type == "model_sync":
-                    # FAST MODEL PATH: Zig parses JSON with simd-json, validates model
+                    # FAST MODEL PATH: Zig validates JSON natively via dhi, then calls Python
                     enhanced_handler = create_enhanced_handler(route.handler, route)
                     if self._middleware_instances:
                         enhanced_handler = self._wrap_with_middleware(enhanced_handler)
-                    self.zig_server.add_route_model(
-                        route.method.value,
-                        route.path,
-                        enhanced_handler,  # Fallback wrapper
-                        model_info["param_name"],
-                        model_info["model_class"],
-                        route.handler,  # Original unwrapped handler
-                    )
-                    print(f"{CHECK_MARK} [model_sync] {route.method.value} {route.path}")
+
+                    # Extract dhi model schema for Zig-native validation
+                    schema_json = _extract_model_schema(model_info["model_class"])
+                    if schema_json and hasattr(self.zig_server, 'add_route_model_validated'):
+                        self.zig_server.add_route_model_validated(
+                            route.method.value,
+                            route.path,
+                            enhanced_handler,
+                            model_info["param_name"],
+                            model_info["model_class"],
+                            route.handler,
+                            schema_json,
+                        )
+                        print(f"{CHECK_MARK} [model_sync+dhi] {route.method.value} {route.path}")
+                    else:
+                        self.zig_server.add_route_model(
+                            route.method.value,
+                            route.path,
+                            enhanced_handler,
+                            model_info["param_name"],
+                            model_info["model_class"],
+                            route.handler,
+                        )
+                        print(f"{CHECK_MARK} [model_sync] {route.method.value} {route.path}")
                 elif handler_type in ("simple_sync", "body_sync"):
                     # SYNC FAST PATH: Register with metadata for Zig-side parsing
                     enhanced_handler = create_enhanced_handler(route.handler, route)
