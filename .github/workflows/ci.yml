@@ -87,9 +87,10 @@ jobs:
       - name: Thread-safety smoke test
         run: |
           python -c "
-          import threading, concurrent.futures
+          import threading, concurrent.futures, json
           from turboapi import TurboAPI
 
+          # Test 1: Concurrent route registration
           def create_app(tid):
               app = TurboAPI(title=f'App {tid}')
               for i in range(50):
@@ -101,7 +102,43 @@ jobs:
           with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
               results = list(pool.map(create_app, range(8)))
               assert len(results) == 8
-          print('Free-threaded smoke test: 8 threads x 50 routes = OK')
+          print('Test 1: 8 threads x 50 routes = OK')
+
+          # Test 2: Concurrent JSON serialization (exercises json.dumps hot path)
+          errors = []
+          def json_stress(tid):
+              for i in range(1000):
+                  data = {'thread': tid, 'iter': i, 'nested': {'a': [1, 2, 3]}}
+                  s = json.dumps(data)
+                  parsed = json.loads(s)
+                  if parsed['thread'] != tid or parsed['iter'] != i:
+                      errors.append(f'mismatch t{tid}i{i}')
+
+          with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+              list(pool.map(json_stress, range(8)))
+          assert not errors, f'JSON errors: {errors}'
+          print('Test 2: 8 threads x 1000 json round-trips = OK')
+
+          # Test 3: Concurrent model creation (dhi)
+          try:
+              from dhi import BaseModel, Field
+              class StressModel(BaseModel):
+                  name: str
+                  value: int
+
+              def model_stress(tid):
+                  for i in range(500):
+                      m = StressModel(name=f't{tid}', value=i)
+                      assert m.name == f't{tid}'
+                      assert m.value == i
+
+              with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                  list(pool.map(model_stress, range(8)))
+              print('Test 3: 8 threads x 500 model instances = OK')
+          except ImportError:
+              print('Test 3: skipped (dhi not installed)')
+
+          print('Free-threaded stress tests: ALL PASSED')
           "
 
   zig-test:

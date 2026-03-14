@@ -38,11 +38,11 @@ pub fn pyNone() *PyObject {
 }
 
 pub fn pyTrue() *PyObject {
-    return incref(&c._Py_TrueStruct);
+    return incref(@ptrCast(&c._Py_TrueStruct));
 }
 
 pub fn pyFalse() *PyObject {
-    return incref(&c._Py_FalseStruct);
+    return incref(@ptrCast(&c._Py_FalseStruct));
 }
 
 pub fn isNone(obj: *PyObject) bool {

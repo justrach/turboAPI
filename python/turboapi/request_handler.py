@@ -907,7 +907,8 @@ def create_fast_model_handler(original_handler, model_class, param_name):
     """Create a minimal handler for model_sync routes.
 
     Zig has already validated the JSON body against the schema.
-    We just need to: json.loads -> model_class(**data) -> handler -> json.dumps.
+    When Zig passes body_dict (pre-parsed), we skip json.loads entirely.
+    Fallback: json.loads -> model_class(**data) -> handler -> json.dumps.
     User gets a real model instance with all methods -- zero DX change.
     """
     import json as _json
@@ -916,12 +917,15 @@ def create_fast_model_handler(original_handler, model_class, param_name):
 
     def fast_model_handler(**kwargs):
         try:
-            body = kwargs.get("body", b"")
-            if not body:
-                return {"content": _dumps({"detail": "Request body is empty"}), "status_code": 400}
+            # Prefer body_dict (Zig-parsed JSON, skips json.loads entirely)
+            data = kwargs.get("body_dict")
+            if data is None:
+                body = kwargs.get("body", b"")
+                if not body:
+                    return {"content": _dumps({"detail": "Request body is empty"}), "status_code": 400}
+                data = _loads(body)
 
-            # Zig already validated -- parse and instantiate model
-            data = _loads(body)
+            # Zig already validated -- instantiate model
             model = model_class(**data)
 
             # Call handler with model instance

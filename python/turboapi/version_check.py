@@ -6,6 +6,7 @@ Ensures TurboAPI only runs on Python 3.13+ free-threading builds
 
 import io
 import sys
+import sysconfig
 import threading
 
 # Configure stdout to use UTF-8 encoding on Windows
@@ -71,11 +72,11 @@ def check_free_threading_support():
             f"     • 5-10x performance improvements\n"
             f"     • True multi-threading parallelism\n"
             f"     • Zero Python middleware overhead\n"
-            f"     • Rust-native concurrency\n"
+            f"     • Zig-native concurrency\n"
             f"   \n"
             f"   Install free-threading Python:\n"
-            f"     • python3.13t (if available)\n"
-            f"     • pyenv install 3.13t-dev\n"
+            f"     • uv python install 3.14t\n"
+            f"     • python3.14t\n"
             f"     • Build from source: ./configure --disable-gil\n"
             f"   \n"
             f"   {ROCKET} Experience revolutionary performance with free-threading!\n"
@@ -90,109 +91,33 @@ def check_free_threading_support():
 def _detect_free_threading():
     """
     Detect if Python is running in free-threading mode.
-    Uses multiple detection methods for reliability.
+    Uses canonical detection methods.
     """
 
-    # Method 1: Check for GIL-related functions (most reliable)
+    # Method 1: sysconfig Py_GIL_DISABLED (canonical, 3.13+)
     try:
-        # In free-threading builds, some GIL-related functions are removed/modified
-        if not hasattr(sys, '_current_frames'):
-            return True
+        gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
+        if gil_disabled is not None:
+            return bool(int(gil_disabled))
+    except (ValueError, TypeError):
+        pass
+
+    # Method 2: sys._is_gil_enabled() (available in 3.13t+ when GIL is disabled)
+    try:
+        if hasattr(sys, '_is_gil_enabled'):
+            return not sys._is_gil_enabled()
     except Exception:
         pass
 
-    # Method 2: Check sys.flags for free-threading flag
-    try:
-        if hasattr(sys, 'flags') and hasattr(sys.flags, 'nogil'):
-            return sys.flags.nogil
-    except Exception:
-        pass
-
-    # Method 3: Check threading module behavior
-    try:
-        # In free-threading, threading.get_ident() behavior changes
-        import threading
-        # This is a heuristic - may need adjustment based on actual free-threading behavior
-        if hasattr(threading, '_thread') and hasattr(threading._thread, 'get_native_id'):
-            # Free-threading builds often have enhanced native thread support
-            return True
-    except Exception:
-        pass
-
-    # Method 4: Check interpreter flags in sys
-    try:
-        if hasattr(sys, 'implementation') and hasattr(sys.implementation, 'name'):
-            # Check if implementation has free-threading indicators
-            if 'free' in sys.implementation.name.lower() or 'nogil' in str(sys.implementation):
-                return True
-    except Exception:
-        pass
-
-    # Method 5: Check version string for free-threading indicators
+    # Method 3: Check version string for free-threading indicators
     try:
         version_str = sys.version.lower()
-        if 'free-threading' in version_str or 'nogil' in version_str or '+free' in version_str:
+        if 'free-threading' in version_str:
             return True
-    except Exception:
-        pass
-
-    # Method 6: Check for experimental free-threading modules
-    try:
-        # Free-threading builds may have special modules
-        import _thread
-        if hasattr(_thread, 'get_native_id') and not hasattr(sys, '_current_frames'):
-            return True
-    except Exception:
-        pass
-
-    # Method 7: Runtime test - try true parallel execution
-    try:
-        return _test_parallel_execution()
     except Exception:
         pass
 
     # Default: assume GIL is present
-    return False
-
-
-def _test_parallel_execution():
-    """
-    Runtime test to detect if threads can execute Python code in parallel.
-    This is the most definitive test but also the most expensive.
-    """
-    import threading
-    import time
-
-    # Quick parallel execution test
-    results = []
-    start_times = []
-
-    def worker():
-        start_times.append(time.time())
-        # CPU work that would be blocked by GIL
-        total = sum(i * i for i in range(10000))
-        results.append(total)
-
-    # Start threads simultaneously
-    threads = [threading.Thread(target=worker) for _ in range(2)]
-
-    overall_start = time.time()
-    for t in threads:
-        t.start()
-
-    for t in threads:
-        t.join()
-
-    overall_time = time.time() - overall_start
-
-    # If threads started within 1ms of each other and completed quickly,
-    # it's likely true parallelism (no GIL blocking)
-    if len(start_times) >= 2:
-        start_spread = max(start_times) - min(start_times)
-        # True parallelism: threads start nearly simultaneously and complete fast
-        if start_spread < 0.01 and overall_time < 0.05:  # 10ms start spread, 50ms total
-            return True
-
     return False
 
 
@@ -201,7 +126,7 @@ def get_python_threading_info():
     info = {
         'python_version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         'free_threading': _detect_free_threading(),
-        'gil_enabled': hasattr(sys, '_current_frames'),
+        'gil_enabled': not _detect_free_threading(),
         'threading_native_id': hasattr(threading._thread, 'get_native_id') if hasattr(threading, '_thread') else False,
         'implementation': sys.implementation.name if hasattr(sys, 'implementation') else 'unknown',
     }
@@ -210,7 +135,7 @@ def get_python_threading_info():
     if info['free_threading']:
         info['performance_multiplier'] = '5-10x FastAPI'
         info['concurrency'] = 'True parallelism'
-        info['gil_overhead'] = 'Zero (Rust-native)'
+        info['gil_overhead'] = 'Zero (Zig-native)'
     else:
         info['performance_multiplier'] = 'Limited by GIL'
         info['concurrency'] = 'Serialized threads'
@@ -233,7 +158,7 @@ if __name__ != "__main__":
             f"   {TARGET} Why free-threading only?\n"
             f"     • 5-10x performance gains over FastAPI\n"
             f"     • True multi-threading without GIL bottlenecks\n"
-            f"     • Rust-native concurrency integration\n"
+            f"     • Zig-native concurrency integration\n"
             f"     • Future-proof architecture\n"
             f"   \n"
             f"   {BOOK} Setup Guide: PYTHON_FREE_THREADING_GUIDE.md\n"

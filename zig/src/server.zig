@@ -642,6 +642,10 @@ fn handleOneRequest(stream: std.net.Stream) !void {
     // Use fast dispatch for simple_sync/body_sync/model_sync handlers —
     // writes response directly to stream while holding the GIL (zero-copy)
     const ht = entry.handler_type;
+    if (std.mem.eql(u8, ht, "model_sync") and body.len > 0) {
+        callPythonModelHandlerDirect(entry, body, &match.params, stream);
+        return;
+    }
     if (std.mem.eql(u8, ht, "simple_sync") or std.mem.eql(u8, ht, "body_sync") or std.mem.eql(u8, ht, "model_sync")) {
         callPythonHandlerDirect(entry, query_string, body, &match.params, stream);
         return;
@@ -821,6 +825,139 @@ fn callPythonHandlerDirect(entry: HandlerEntry, query_string: []const u8, body: 
 
     // Write response directly — body_slice points into the Python string,
     // which is alive because we hold `result` ref until after the write.
+    sendResponse(stream, status_code, "application/json", body_slice);
+}
+
+// ── JSON-to-Python conversion (eliminates Python json.loads round-trip) ──────
+
+fn jsonValueToPyObject(val: std.json.Value) ?*c.PyObject {
+    return switch (val) {
+        .null => py.pyNone(),
+        .bool => |b| if (b) py.pyTrue() else py.pyFalse(),
+        .integer => |i| py.newInt(i),
+        .float => |f| c.PyFloat_FromDouble(f),
+        .string => |s| py.newString(s),
+        .array => |arr| blk: {
+            const list = c.PyList_New(@intCast(arr.items.len)) orelse break :blk null;
+            for (arr.items, 0..) |item, idx| {
+                const py_item = jsonValueToPyObject(item) orelse {
+                    c.Py_DecRef(list);
+                    break :blk null;
+                };
+                // PyList_SetItem steals the reference
+                _ = c.PyList_SetItem(list, @intCast(idx), py_item);
+            }
+            break :blk list;
+        },
+        .object => |obj| blk: {
+            const dict = c.PyDict_New() orelse break :blk null;
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                const py_key = py.newString(entry.key_ptr.*) orelse {
+                    c.Py_DecRef(dict);
+                    break :blk null;
+                };
+                const py_val = jsonValueToPyObject(entry.value_ptr.*) orelse {
+                    c.Py_DecRef(py_key);
+                    c.Py_DecRef(dict);
+                    break :blk null;
+                };
+                _ = c.PyDict_SetItem(dict, py_key, py_val);
+                c.Py_DecRef(py_key);
+                c.Py_DecRef(py_val);
+            }
+            break :blk dict;
+        },
+        .number_string => |s| blk: {
+            // Fallback: try to parse as Python int/float from string
+            break :blk py.newString(s);
+        },
+    };
+}
+
+// ── model_sync fast dispatch: Zig-parsed JSON → Python dict (no json.loads) ──
+
+fn callPythonModelHandlerDirect(entry: HandlerEntry, body: []const u8, params: *const std.StringHashMap([]const u8), stream: std.net.Stream) void {
+    // Parse JSON in Zig — no Python json.loads needed
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch {
+        sendResponse(stream, 400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    };
+    defer parsed.deinit();
+
+    const state = c.PyGILState_Ensure();
+    defer c.PyGILState_Release(state);
+
+    // Convert parsed JSON to Python dict
+    const py_body_dict = jsonValueToPyObject(parsed.value) orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"JSON conversion failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(py_body_dict);
+
+    const kwargs = c.PyDict_New() orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+        return;
+    };
+    defer c.Py_DecRef(kwargs);
+
+    // Pass body_dict instead of raw body bytes
+    _ = c.PyDict_SetItemString(kwargs, "body_dict", py_body_dict);
+
+    // path_params
+    const py_path_params = c.PyDict_New() orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+        return;
+    };
+    defer c.Py_DecRef(py_path_params);
+    {
+        var pit = params.iterator();
+        while (pit.next()) |pe| {
+            const pk = py.newString(pe.key_ptr.*) orelse continue;
+            const pv = py.newString(pe.value_ptr.*) orelse {
+                c.Py_DecRef(pk);
+                continue;
+            };
+            _ = c.PyDict_SetItem(py_path_params, pk, pv);
+            c.Py_DecRef(pk);
+            c.Py_DecRef(pv);
+        }
+    }
+    _ = c.PyDict_SetItemString(kwargs, "path_params", py_path_params);
+
+    // Call handler
+    const empty_tuple = c.PyTuple_New(0) orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+        return;
+    };
+    defer c.Py_DecRef(empty_tuple);
+
+    const result = c.PyObject_Call(entry.handler, empty_tuple, kwargs) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(result);
+
+    // Extract status_code
+    var status_code: u16 = 200;
+    if (c.PyDict_GetItemString(result, "status_code")) |sc| {
+        const code = c.PyLong_AsLong(sc);
+        if (code >= 100 and code <= 599) {
+            status_code = @intCast(code);
+        }
+    }
+
+    // Content — read pre-serialized string directly
+    var body_slice: []const u8 = "null";
+    if (c.PyDict_GetItemString(result, "content")) |content_obj| {
+        if (c.PyUnicode_Check(content_obj) != 0) {
+            if (c.PyUnicode_AsUTF8(content_obj)) |cs| {
+                body_slice = std.mem.span(cs);
+            }
+        }
+    }
+
     sendResponse(stream, status_code, "application/json", body_slice);
 }
 
