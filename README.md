@@ -1,545 +1,350 @@
 <p align="center">
-  <img src="assets/turbito.png" alt="Turbito - TurboAPI Mascot" width="260"/>
+  <img src="assets/turbito.png" alt="TurboAPI" width="200" />
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/turboapi/"><img src="https://img.shields.io/pypi/v/turboapi.svg?style=flat-square&label=version" alt="PyPI version" /></a>
+  <a href="https://github.com/justrach/turboAPI/blob/main/LICENSE"><img src="https://img.shields.io/github/license/justrach/turboAPI?style=flat-square" alt="License" /></a>
+  <img src="https://img.shields.io/badge/python-3.13+-blue?style=flat-square" alt="Python 3.13+" />
+  <img src="https://img.shields.io/badge/zig-0.15-f7a41d?style=flat-square" alt="Zig 0.15" />
+  <a href="https://deepwiki.com/justrach/turboAPI"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" /></a>
 </p>
 
 <h1 align="center">TurboAPI</h1>
 
+<h3 align="center">FastAPI-compatible Python framework. Zig HTTP core. 7x faster.</h3>
+
 <p align="center">
-  <strong>The FastAPI you know. The speed you deserve.</strong>
+  Drop-in replacement · Zig-native validation · Zero-copy responses · Free-threading · dhi models
 </p>
 
 <p align="center">
-  <em>Meet Turbito — the tiny Rust-powered engine that makes your FastAPI fly.</em>
-</p>
-
-<p align="center">
-  <a href="https://pypi.org/project/turboapi/"><img src="https://img.shields.io/pypi/v/turboapi.svg" alt="PyPI version"></a>
-  <a href="https://github.com/justrach/turboAPI/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.13+-blue.svg" alt="Python 3.13+"></a>
-  <a href="https://deepwiki.com/justrach/turboAPI"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
-</p>
-
-<p align="center">
-  <a href="#the-problem">The Problem</a> •
-  <a href="#the-solution">The Solution</a> •
-  <a href="#meet-turbito">Meet Turbito</a> •
-  <a href="#quick-start">Quick Start</a> •
-  <a href="#whats-new">What's New</a> •
-  <a href="#benchmarks">Benchmarks</a>
+  <a href="#-quick-start">Quick Start</a> ·
+  <a href="#-features">Features</a> ·
+  <a href="#-vs-fastapi">Benchmarks</a> ·
+  <a href="#-how-it-works">How It Works</a> ·
+  <a href="#-migrating-from-fastapi">Migrate</a>
 </p>
 
 ---
 
 ## The Problem
 
-You love FastAPI. The clean syntax. The automatic validation. The beautiful docs. But then you deploy to production, and the reality hits:
+You love FastAPI. The clean syntax. The automatic validation. The type hints. But then you benchmark it under load:
 
-> "Why is my simple API only handling 8,000 requests per second?"
+> "Why is my simple API only handling 8,000 requests per second with 12ms latency?"
 
-You've optimized your database queries. Added caching. Switched to async. Still not fast enough. The bottleneck isn't your code—it's the framework itself.
+You've optimized your queries. Added caching. Gone async. The bottleneck isn't your code — it's the framework. HTTP parsing in Python. JSON serialization in Python. The GIL blocking every thread.
 
-**Python's GIL** (Global Interpreter Lock) means only one thread executes Python code at a time. **JSON serialization** happens in pure Python. **HTTP parsing** happens in pure Python. Every microsecond adds up.
+**Free-threaded Python changes that.** Python 3.14t removes the GIL. But FastAPI can't take advantage — Uvicorn and Starlette weren't designed for true parallelism.
 
-## The Solution
-
-**TurboAPI** is FastAPI with a Rust-powered engine. Same API. Same syntax. **1.3-1.8x faster**.
-
-```python
-# This is all you change
-from turboapi import TurboAPI as FastAPI
+```
+FastAPI + Uvicorn:   Request → Python HTTP parse → Python route → Python JSON → Response
+TurboAPI + Zig:      Request → Zig HTTP parse → Zig validate → Python handler → Zig response
 ```
 
-Everything else stays exactly the same.
-
-<p align="center">
-  <img src="assets/benchmark_speedup.png" alt="TurboAPI Speedup" width="700"/>
-</p>
-
-### Why It's Faster
-
-| What FastAPI Does | What TurboAPI Does | Speedup |
-|-------------------|-------------------|---------|
-| HTTP parsing in Python | HTTP parsing in Rust (Hyper/Tokio) | 3x |
-| JSON with `json.dumps()` | SIMD-accelerated JSON (simd-json) | 2x |
-| GIL-bound threading | Python 3.13 free-threading | 2x |
-| dict-based routing | Radix tree with O(log n) lookup | 1.5x |
-| Async via asyncio | Async via Tokio work-stealing | 1.2x |
-
-The result? Your existing FastAPI code runs faster without changing a single line of business logic.
+TurboAPI moves everything except your business logic into Zig. Same API. Same decorators. 7x the throughput.
 
 ---
 
-## Meet Turbito
+## ⚡ Quick Start
 
-<p align="center">
-  <img src="assets/turbito.png" alt="Turbito" width="180"/>
-</p>
-
-Turbito is the little engine inside TurboAPI.
-
-While you write normal FastAPI code, Turbito is:
-- Parsing HTTP in Rust (Hyper/Tokio)
-- Serializing JSON with SIMD acceleration
-- Scheduling async work with Tokio's work-stealing scheduler
-- Dodging the GIL like a speed demon
-
-You never see Turbito. You just feel the speed.
-
----
-
-## What's New
-
-### v0.5.21 — Free-Threading Stability Release
-
-This release fixes critical issues when running with **free-threaded Python (3.13t)** and **Metal/MLX GPU frameworks**:
-
-| Fix | Description |
-|-----|-------------|
-| **Memory Corruption** | Fixed race condition where request body bytes were corrupted when using async handlers with MLX models loaded |
-| **Response Serialization** | Response objects now properly serialize their content instead of string representation |
-| **Async BaseModel** | Async handlers with BaseModel parameters now correctly receive the validated model instance |
-| **JSON Parsing** | Added Python fallback for edge cases where simd-json is too strict |
-
-**Technical Deep Dive:** When running free-threaded Python with Metal GPU frameworks, memory can be accessed concurrently by the CPU and GPU. We now use defensive copying (`PyBytes::new()` in Rust, `bytes(bytearray())` in Python) to ensure request data is isolated before processing.
-
-```bash
-# Upgrade to get the fixes
-pip install --upgrade turboapi
-```
-
----
-
-## Quick Start
-
-### Installation
+**Requirements:** Python 3.13+ (3.14t free-threaded recommended)
 
 ```bash
 pip install turboapi
 ```
 
-**Requirements:** Python 3.13+ (free-threading recommended for best performance)
-
-### Hello World
-
 ```python
 from turboapi import TurboAPI
+from dhi import BaseModel
 
 app = TurboAPI()
+
+class Item(BaseModel):
+    name: str
+    price: float
+    quantity: int = 1
 
 @app.get("/")
 def hello():
     return {"message": "Hello World"}
 
-app.run()
-```
+@app.get("/items/{item_id}")
+def get_item(item_id: int):
+    return {"item_id": item_id, "name": "Widget"}
 
-That's it. Your first TurboAPI server is running at `http://localhost:8000`.
-
-### Async Handlers (New!)
-
-TurboAPI now supports **true async** with Tokio-powered execution:
-
-```python
-from turboapi import TurboAPI
-import asyncio
-
-app = TurboAPI()
-
-@app.get("/sync")
-def sync_handler():
-    return {"type": "sync", "message": "Fast!"}
-
-@app.get("/async")
-async def async_handler():
-    await asyncio.sleep(0.001)  # Simulated I/O
-    return {"type": "async", "message": "Even faster under load!"}
+@app.post("/items")
+def create_item(item: Item):
+    return {"item": item.model_dump(), "created": True}
 
 app.run()
 ```
 
-Async handlers are automatically detected and routed through Tokio's work-stealing scheduler for optimal concurrency.
-
-### Let Turbito Off the Leash
-
-For maximum performance, run with Python's free-threading mode:
-
-```bash
-PYTHON_GIL=0 python app.py
-```
-
-This unlocks Turbito's full power by removing the GIL bottleneck. True parallelism, finally.
+That's it. Your API is running on a Zig HTTP server at `http://localhost:8000`.
 
 ---
 
-## Benchmarks
+## 🚀 Features
 
-Real numbers matter. Here's TurboAPI vs FastAPI on identical hardware:
-
-### Latest Benchmark Results
-
-| Endpoint | TurboAPI | FastAPI | Improvement |
-|----------|----------|---------|-------------|
-| **Sequential Latency** |
-| GET / | 0.76ms | 1.05ms | **1.4x faster** |
-| GET /benchmark/simple | 0.61ms | 0.81ms | **1.3x faster** |
-| GET /benchmark/medium | 0.61ms | 0.77ms | **1.3x faster** |
-| GET /benchmark/json | 0.72ms | 1.04ms | **1.4x faster** |
-| **Concurrent Latency** |
-| GET / | 2.05ms | 2.53ms | **1.2x faster** |
-| GET /benchmark/json | 2.17ms | 3.90ms | **1.8x faster** |
-
-### Throughput (requests/second)
-
-| Endpoint | TurboAPI | FastAPI | Speedup |
-|----------|----------|---------|---------|
-| GET / (hello world) | **19,596** | 8,336 | 2.4x |
-| GET /json (object) | **20,592** | 7,882 | 2.6x |
-| GET /users/{id} (path params) | **18,428** | 7,344 | 2.5x |
-| POST /items (model validation) | **19,255** | 6,312 | **3.1x** |
-
-### Async Handler Performance
-
-| Metric | Sync Handler | Async Handler | Notes |
-|--------|--------------|---------------|-------|
-| Sequential (100 req) | 0.66ms | 0.76ms | Similar performance |
-| Concurrent (200 req) | 108ms batch | 139ms batch | Sync faster for CPU-bound |
-| I/O Wait (1ms sleep) | 2.22ms | 2.06ms | **Async wins for I/O** |
-
-**Key Insight:** Use async handlers when you have actual I/O operations (database, network). For pure CPU work, sync handlers are slightly faster.
-
-### Run Your Own Benchmarks
-
-```bash
-# Quick benchmark
-python benches/python_benchmark.py
-
-# Full comparison with FastAPI
-python tests/benchmark_comparison.py
-
-# Async vs Sync comparison
-python benches/async_comparison_bench.py
-```
-
----
-
-## Async Support
-
-### How Async Works in TurboAPI
-
-TurboAPI uses a **hybrid async architecture**:
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                Your Python Handlers                      │
-│         @app.get("/sync")      @app.get("/async")       │
-│         def handler():         async def handler():     │
-├─────────────────────────────────────────────────────────┤
-│              Handler Classification                      │
-│   simple_sync │ body_sync │ simple_async │ body_async  │
-├─────────────────────────────────────────────────────────┤
-│              Tokio Runtime (Rust)                        │
-│         Work-stealing scheduler • 14 workers            │
-├─────────────────────────────────────────────────────────┤
-│              pyo3-async-runtimes                         │
-│     Python coroutines ↔ Rust futures conversion         │
-└─────────────────────────────────────────────────────────┘
-```
-
-### Handler Types
-
-TurboAPI automatically classifies handlers for optimal dispatch:
-
-| Handler Type | Description | Use Case |
-|--------------|-------------|----------|
-| `simple_sync` | Sync, no body | GET endpoints |
-| `body_sync` | Sync, with body | POST/PUT without complex types |
-| `model_sync` | Sync, with model validation | POST with dhi models |
-| `simple_async` | Async, no body | GET with I/O operations |
-| `body_async` | Async, with body | POST/PUT with I/O operations |
-| `enhanced` | Full Python wrapper | Complex dependencies |
-
-### When to Use Async
+### Drop-in FastAPI replacement
 
 ```python
-# Use sync for pure computation
-@app.get("/compute")
-def compute():
-    result = sum(i * i for i in range(1000))
-    return {"result": result}
-
-# Use async for I/O operations
-@app.get("/fetch-data")
-async def fetch_data():
-    async with aiohttp.ClientSession() as session:
-        async with session.get("https://api.example.com/data") as resp:
-            return await resp.json()
-
-# Use async for database operations
-@app.get("/users/{user_id}")
-async def get_user(user_id: int):
-    user = await database.fetch_one(query, values={"id": user_id})
-    return {"user": user}
-```
-
----
-
-## Migration Guide
-
-TurboAPI is designed as a **drop-in replacement** for FastAPI. Here's how to migrate:
-
-### Step 1: Change Your Imports
-
-```python
-# Before (FastAPI)
-from fastapi import FastAPI, Depends, HTTPException, Query, Path
-from fastapi.responses import JSONResponse, HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware
-
-# After (TurboAPI)
-from turboapi import TurboAPI as FastAPI, Depends, HTTPException, Query, Path
-from turboapi.responses import JSONResponse, HTMLResponse
-from turboapi.middleware import CORSMiddleware
-```
-
-### Step 2: Update Your Models
-
-TurboAPI uses [dhi](https://github.com/justrach/dhi) instead of Pydantic (it's API-compatible):
-
-```python
-# Before (Pydantic)
+# Before
+from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel
 
-# After (dhi)
+# After
+from turboapi import TurboAPI as FastAPI, Depends, HTTPException
 from dhi import BaseModel
 ```
 
-### Step 3: Run Your App
+Everything else stays the same. Routes, decorators, dependency injection, middleware — all compatible.
 
-```python
-# FastAPI way still works
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
-# Or use TurboAPI's built-in server (faster)
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
-```
-
-That's it. Your FastAPI app is now a TurboAPI app.
-
----
-
-## Feature Parity
-
-Everything you use in FastAPI works in TurboAPI:
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Route decorators (@get, @post, etc.) | ✅ | Full parity |
-| Path parameters | ✅ | With type coercion |
-| Query parameters | ✅ | With validation |
-| Request body (JSON) | ✅ | SIMD-accelerated |
-| Response models | ✅ | Full support |
-| **Async handlers** | ✅ | **Tokio-powered** |
-| Dependency injection | ✅ | `Depends()` with caching |
-| OAuth2 authentication | ✅ | Password & AuthCode flows |
-| HTTP Basic/Bearer auth | ✅ | Full implementation |
-| API Key auth | ✅ | Header/Query/Cookie |
-| CORS middleware | ✅ | Rust-accelerated |
-| GZip middleware | ✅ | Configurable |
-| Background tasks | ✅ | Async-compatible |
-| WebSocket | ✅ | HTTP upgrade support |
-| HTTP/2 | ✅ | With server push |
-| APIRouter | ✅ | Prefixes and tags |
-| HTTPException | ✅ | With custom headers |
-| Custom responses | ✅ | JSON, HTML, Redirect, etc. |
-
----
-
-## Real-World Examples
-
-### API with Authentication
-
-```python
-from turboapi import TurboAPI, Depends, HTTPException
-from turboapi.security import OAuth2PasswordBearer
-
-app = TurboAPI(title="My API", version="1.0.0")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-
-@app.get("/users/me")
-def get_current_user(token: str = Depends(oauth2_scheme)):
-    if token != "secret-token":
-        raise HTTPException(status_code=401, detail="Invalid token")
-    return {"user": "authenticated", "token": token}
-```
-
-### Async Database Access
-
-```python
-from turboapi import TurboAPI
-import asyncpg
-
-app = TurboAPI()
-pool = None
-
-@app.on_event("startup")
-async def startup():
-    global pool
-    pool = await asyncpg.create_pool("postgresql://localhost/mydb")
-
-@app.get("/users/{user_id}")
-async def get_user(user_id: int):
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
-        return dict(row) if row else {"error": "Not found"}
-```
-
-### Request Validation
+### Zig-native validation via [dhi](https://github.com/justrach/dhi)
 
 ```python
 from dhi import BaseModel, Field
-from typing import Optional
 
 class CreateUser(BaseModel):
     name: str = Field(min_length=1, max_length=100)
-    email: str = Field(pattern=r'^[\w\.-]+@[\w\.-]+\.\w+$')
-    age: Optional[int] = Field(default=None, ge=0, le=150)
+    email: str
+    age: int = Field(gt=0, le=150)
 
 @app.post("/users")
 def create_user(user: CreateUser):
     return {"created": True, "user": user.model_dump()}
 ```
 
-### CORS and Middleware
+Model schemas are extracted at startup and compiled into Zig. Invalid requests get rejected with a `422` **before touching Python** — no GIL acquired, no handler called. Valid requests are passed to your handler with a real model instance.
+
+### Zero-copy response pipeline
+
+Zig reads the response string directly from the Python object and writes it to the socket. No `memcpy`, no temporary buffers, no heap allocation on the response path.
+
+### Thread pool with keep-alive
+
+8-thread pool handles connections. HTTP/1.1 keep-alive reuses connections across requests. No OS thread spawn per request.
+
+### Async handlers
 
 ```python
-from turboapi.middleware import CORSMiddleware, GZipMiddleware
+@app.get("/async")
+async def async_handler():
+    data = await fetch_from_database()
+    return {"data": data}
+```
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://yourapp.com"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+Async handlers are automatically detected and awaited via `asyncio.run()`.
 
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+### Full security stack
+
+```python
+from turboapi import Depends, HTTPException
+from turboapi.security import OAuth2PasswordBearer, HTTPBearer, APIKeyHeader
+
+oauth2 = OAuth2PasswordBearer(tokenUrl="token")
+
+@app.get("/protected")
+def protected(token: str = Depends(oauth2)):
+    if token != "secret":
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return {"user": "authenticated"}
+```
+
+OAuth2, HTTP Bearer/Basic, API Key (header/query/cookie) — all supported with correct status codes (401/403, not 500).
+
+---
+
+## 📊 vs FastAPI
+
+All numbers verified with correct, identical JSON responses. `wrk -t4 -c100 -d10s`, Python 3.14t free-threaded.
+
+|                            | **TurboAPI**           | **FastAPI + Uvicorn**   |
+| -------------------------- | ---------------------- | ----------------------- |
+| GET `/`                    | **71,290 req/s**       | 10,038 req/s            |
+| GET `/items/{id}`          | **65,266 req/s**       | 8,666 req/s             |
+| GET `/users/{id}/posts/{id}` | **60,911 req/s**     | 8,357 req/s             |
+| POST `/items` (JSON body)  | **59,595 req/s**       | 8,200 req/s             |
+| Avg latency                | **~120 μs**            | ~12 ms                  |
+| Avg speedup                | **7.3x**               |                         |
+
+> POST validation runs in Zig (dhi schema) before acquiring the GIL. Invalid bodies return `422` directly — the Python handler is never called.
+
+### Run your own benchmarks
+
+```bash
+# Full comparison with wrk
+python benchmarks/turboapi_vs_fastapi.py
+
+# Customize
+python benchmarks/turboapi_vs_fastapi.py --duration 10 --threads 4 --connections 100
 ```
 
 ---
 
-## Architecture
-
-TurboAPI's secret is a hybrid architecture where Python meets Rust:
+## ⚙️ How It Works
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│              Your Python Application                      │
-│           (exactly like FastAPI code)                     │
-├──────────────────────────────────────────────────────────┤
-│         TurboAPI (FastAPI-compatible layer)              │
-│      Routing • Validation • Dependency Injection          │
-├──────────────────────────────────────────────────────────┤
-│           Handler Classification (Phase 3+4)             │
-│   simple_sync │ body_sync │ simple_async │ body_async   │
-├──────────────────────────────────────────────────────────┤
-│            PyO3 Bridge (zero-copy)                       │
-│       Rust ↔ Python with minimal overhead                 │
-├──────────────────────────────────────────────────────────┤
-│            TurboNet (Rust HTTP Core)                     │
-│   • Hyper + Tokio async runtime (14 worker threads)     │
-│   • SIMD-accelerated JSON (simd-json)                    │
-│   • Radix tree routing                                   │
-│   • Zero-copy response buffers                           │
-│   • pyo3-async-runtimes for async handler support       │
-└──────────────────────────────────────────────────────────┘
+HTTP Request
+  └── Zig TCP accept (thread pool, keep-alive)
+  └── Zig header parse (fixed 8KB buffer)
+  └── Zig Content-Length body read (dynamic alloc, 16MB cap)
+  └── Zig radix trie route match + path param extraction
+
+  ├── Native FFI route? → call C handler directly (no GIL, no Python)
+  │
+  ├── model_sync route?
+  │     └── Zig dhi_validator: validate JSON against schema
+  │     └── invalid? → 422 response (no GIL acquired)
+  │     └── valid? → callPythonHandlerDirect (minimal kwargs)
+  │           └── Python: json.loads → Model(**data) → handler(model) → json.dumps
+  │           └── Zig: zero-copy write string to socket
+  │
+  ├── simple_sync / body_sync route?
+  │     └── callPythonHandlerDirect (only path_params + query_string)
+  │           └── Python: fast_handler (pre-compiled converters, no regex)
+  │           └── Zig: zero-copy write
+  │
+  └── enhanced route (Depends, middleware)?
+        └── callPythonHandler (full kwargs)
+        └── Python: enhanced_handler (deps, headers, body parsing)
 ```
 
-**Python handles the logic you care about.** Routes, validation rules, business logic—all in Python.
+**Handler classification** happens once at startup. Each route gets the lightest possible dispatch path.
 
-**Rust handles the heavy lifting.** HTTP parsing, JSON serialization, connection management—the parts that need to be fast.
+---
 
-The result: **FastAPI's developer experience with systems-level performance.**
+## 📁 Structure
+
+```
+turboAPI/
+├── python/
+│   └── turboapi/
+│       ├── main_app.py           # TurboAPI class (FastAPI-compatible)
+│       ├── zig_integration.py    # route registration, handler classification
+│       ├── request_handler.py    # enhanced/fast/fast_model handlers
+│       ├── security.py           # OAuth2, HTTPBearer, APIKey, Depends
+│       └── turbonet.*.so         # compiled Zig extension
+├── zig/
+│   └── src/
+│       ├── main.zig              # Python C extension entry, bootstrap
+│       ├── server.zig            # HTTP server, thread pool, dispatch
+│       ├── router.zig            # radix trie with path params + wildcards
+│       ├── dhi_validator.zig     # runtime JSON schema validation
+│       ├── response.zig          # ResponseView state
+│       └── py.zig                # Python C-API wrappers
+├── tests/
+│   ├── test_auth_middleware.py   # 14 auth integration tests
+│   ├── test_large_body_reading.py # 12 body size tests
+│   └── ...                       # 252+ tests total
+├── benchmarks/
+│   └── turboapi_vs_fastapi.py    # wrk-based benchmark harness
+└── build.zig                     # Zig build with dhi module imports
+```
+
+---
+
+## 🔄 Migrating from FastAPI
+
+### Step 1: Swap the imports
+
+```python
+# Before
+from fastapi import FastAPI, Depends, HTTPException, Query, Path
+from pydantic import BaseModel
+
+# After
+from turboapi import TurboAPI as FastAPI, Depends, HTTPException, Query, Path
+from dhi import BaseModel
+```
+
+### Step 2: Use the built-in server
+
+```python
+# FastAPI way (still works)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# TurboAPI way (7x faster)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000)
+```
+
+### Step 3: Run with free-threading
+
+```bash
+# Install free-threaded Python
+# macOS: brew install python@3.14t
+# Or: uv python install 3.14t
+
+python3.14t app.py
+```
+
+---
+
+## Feature Parity
+
+| Feature | Status |
+|---------|--------|
+| Route decorators (@get, @post, etc.) | ✅ |
+| Path parameters with type coercion | ✅ |
+| Query parameters | ✅ |
+| JSON request body | ✅ |
+| Async handlers | ✅ |
+| Dependency injection (`Depends()`) | ✅ |
+| OAuth2 (Password, AuthCode) | ✅ |
+| HTTP Bearer / Basic auth | ✅ |
+| API Key (Header / Query / Cookie) | ✅ |
+| CORS middleware | ✅ |
+| GZip middleware | ✅ |
+| HTTPException with status codes | ✅ |
+| Custom responses (JSON, HTML, Redirect) | ✅ |
+| Background tasks | ✅ |
+| APIRouter with prefixes | ✅ |
+| Native FFI handlers (C/Zig, no Python) | ✅ |
+| Zig-native JSON schema validation (dhi) | ✅ |
+| Large body support (up to 16MB) | ✅ |
 
 ---
 
 ## Building from Source
 
-Want to contribute or build from source?
-
 ```bash
 git clone https://github.com/justrach/turboAPI.git
 cd turboAPI
 
-# Create venv with Python 3.13 free-threading
-python3.13t -m venv venv
-source venv/bin/activate
+# Build the Zig extension for your Python
+python3.14t zig/build_turbonet.py --install
 
-# Build the Rust extension
-pip install maturin
-maturin develop --release
-
-# Install Python package
-pip install -e ./python
+# Install the Python package
+pip install -e .
 
 # Run tests
-PYTHON_GIL=0 python -m pytest tests/ -v
-
-# Run benchmarks
-python benches/python_benchmark.py
-python tests/benchmark_comparison.py
+python -m pytest tests/ -v
 ```
 
 ---
 
-## Roadmap
+## 🤝 Contributing
 
-### Completed ✅
+Open an issue before submitting a large PR so we can align on the approach.
 
-- [x] Rust HTTP core (Hyper/Tokio)
-- [x] SIMD JSON serialization & parsing
-- [x] Python 3.13 free-threading support
-- [x] FastAPI feature parity (OAuth2, Depends, Middleware)
-- [x] Radix tree routing with path parameters
-- [x] Handler classification for optimized fast paths
-- [x] **Async handler optimization (Tokio + pyo3-async-runtimes)**
-- [x] **WebSocket HTTP upgrade support**
-- [x] **HTTP/2 with server push**
-
-### In Progress 🚧
-
-- [ ] OpenAPI/Swagger auto-generation
-
-### Planned 📋
-
-- [ ] GraphQL support
-- [ ] Database connection pooling
-- [ ] Prometheus metrics
-- [ ] Distributed tracing
-- [ ] gRPC support
+```bash
+git clone https://github.com/justrach/turboAPI.git
+cd turboAPI
+python -m pytest tests/   # make sure tests pass before and after your change
+```
 
 ---
 
-## Community
+## Credits
 
-- **Issues & Features**: [GitHub Issues](https://github.com/justrach/turboAPI/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/justrach/turboAPI/discussions)
-- **Documentation**: [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/justrach/turboAPI)
-
----
+- **[dhi](https://github.com/justrach/dhi)** — Pydantic-compatible validation, Zig + Python
+- **[Zig 0.15](https://ziglang.org)** — HTTP server, JSON validation, zero-copy I/O
+- **Python 3.14t** — free-threaded runtime, true parallelism
 
 ## License
 
-MIT License. Use it, modify it, ship it.
-
----
-
-<p align="center">
-  <strong>Built for developers who love FastAPI.</strong><br/>
-  <em>Powered by Turbito ⚡</em>
-</p>
-
-<p align="center">
-  <code>pip install turboapi</code>
-</p>
+MIT
