@@ -15,6 +15,7 @@ except ImportError:
     BaseModel = None
 
 from .main_app import TurboAPI
+from .models import Request, Response
 from .request_handler import create_enhanced_handler, ResponseHandler
 from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
 
@@ -106,6 +107,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
         super().__init__(*args, **kwargs)
         self.zig_server = None
         self.route_handlers = {}  # Store Python handlers by route key
+        self._middleware_instances = []
         print(f"{ROCKET} ZigIntegratedTurboAPI created - direct Zig integration")
 
         # Check environment variable to disable rate limiting for benchmarking
@@ -185,6 +187,11 @@ class ZigIntegratedTurboAPI(TurboAPI):
 
                 # Add more middleware types as needed
 
+            # Instantiate Python middleware objects for request pipeline
+            self._middleware_instances = []
+            for middleware_class, kwargs in self.middleware_stack:
+                self._middleware_instances.append(middleware_class(**kwargs))
+
             # Register all routes with Zig server
             self._register_routes_with_zig()
 
@@ -194,6 +201,51 @@ class ZigIntegratedTurboAPI(TurboAPI):
         except Exception as e:
             print(f"{CROSS_MARK} Zig server initialization failed: {e}")
             return False
+
+    def _wrap_with_middleware(self, enhanced_handler):
+        """Wrap an enhanced handler with middleware before/after/on_error hooks."""
+        middleware_instances = self._middleware_instances
+
+        def middleware_wrapped_handler(**kwargs):
+            request = Request(
+                method=kwargs.get('method', ''),
+                path=kwargs.get('path', ''),
+                headers=kwargs.get('headers', {}),
+                body=kwargs.get('body', b''),
+                query_string=kwargs.get('query_string', ''),
+                path_params=kwargs.get('path_params', {}),
+            )
+
+            # Run before_request
+            for mw in middleware_instances:
+                try:
+                    mw.before_request(request)
+                except Exception as e:
+                    return {"content": {"error": str(e)}, "status_code": 429, "content_type": "application/json"}
+
+            # Call actual handler
+            try:
+                result = enhanced_handler(**kwargs)
+            except Exception as e:
+                for mw in reversed(middleware_instances):
+                    err_resp = mw.on_error(request, e)
+                    if err_resp:
+                        return {"content": {"error": str(e)}, "status_code": 500, "content_type": "application/json"}
+                return {"content": {"error": str(e)}, "status_code": 500, "content_type": "application/json"}
+
+            # Run after_request
+            response = Response(content=result.get('content', ''), status_code=result.get('status_code', 200), headers={})
+            for mw in reversed(middleware_instances):
+                response = mw.after_request(request, response)
+
+            # Merge middleware-added headers back
+            result['status_code'] = response.status_code
+            if response.headers:
+                result['extra_headers'] = response.headers
+
+            return result
+
+        return middleware_wrapped_handler
 
     def _register_routes_with_zig(self):
         """Register all Python routes with the Zig HTTP server.
@@ -210,6 +262,8 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 if handler_type == "model_sync":
                     # FAST MODEL PATH: Zig parses JSON with simd-json, validates model
                     enhanced_handler = create_enhanced_handler(route.handler, route)
+                    if self._middleware_instances:
+                        enhanced_handler = self._wrap_with_middleware(enhanced_handler)
                     self.zig_server.add_route_model(
                         route.method.value,
                         route.path,
@@ -222,6 +276,8 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 elif handler_type in ("simple_sync", "body_sync"):
                     # SYNC FAST PATH: Register with metadata for Zig-side parsing
                     enhanced_handler = create_enhanced_handler(route.handler, route)
+                    if self._middleware_instances:
+                        enhanced_handler = self._wrap_with_middleware(enhanced_handler)
                     param_types_json = json.dumps(param_types)
 
                     self.zig_server.add_route_fast(
@@ -236,6 +292,8 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 elif handler_type in ("simple_async", "body_async"):
                     # ASYNC FAST PATH: Register with Tokio async runtime
                     enhanced_handler = create_enhanced_handler(route.handler, route)
+                    if self._middleware_instances:
+                        enhanced_handler = self._wrap_with_middleware(enhanced_handler)
                     param_types_json = json.dumps(param_types)
 
                     self.zig_server.add_route_async_fast(
@@ -250,6 +308,8 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 else:
                     # ENHANCED PATH: Full Python wrapper needed
                     enhanced_handler = create_enhanced_handler(route.handler, route)
+                    if self._middleware_instances:
+                        enhanced_handler = self._wrap_with_middleware(enhanced_handler)
                     self.zig_server.add_route(
                         route.method.value,
                         route.path,
