@@ -30,9 +30,10 @@ const PythonResponse = struct {
     status_code: u16,
     content_type: []const u8,
     body: []const u8,
+    ct_owned: bool = true,
 
     fn deinit(self: PythonResponse) void {
-        if (self.content_type.len > 0) allocator.free(self.content_type);
+        if (self.ct_owned and self.content_type.len > 0) allocator.free(self.content_type);
         if (self.body.len > 0) allocator.free(self.body);
     }
 };
@@ -363,6 +364,66 @@ pub fn server_add_middleware(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.
 
 // ── run() – start the HTTP server ──
 
+// ── Thread pool for connection handling ─────────────────────────────────────
+
+const POOL_SIZE = 8;
+
+const ConnectionPool = struct {
+    queue: Queue,
+    threads: [POOL_SIZE]std.Thread = undefined,
+
+    const Queue = struct {
+        items: [4096]std.net.Stream = undefined,
+        head: usize = 0,
+        tail: usize = 0,
+        count: usize = 0,
+        mutex: std.Thread.Mutex = .{},
+        not_empty: std.Thread.Condition = .{},
+
+        fn push(self: *Queue, stream: std.net.Stream) void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.count >= self.items.len) {
+                // Queue full — drop connection
+                stream.close();
+                return;
+            }
+            self.items[self.tail] = stream;
+            self.tail = (self.tail + 1) % self.items.len;
+            self.count += 1;
+            self.not_empty.signal();
+        }
+
+        fn pop(self: *Queue) std.net.Stream {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            while (self.count == 0) {
+                self.not_empty.wait(&self.mutex);
+            }
+            const stream = self.items[self.head];
+            self.head = (self.head + 1) % self.items.len;
+            self.count -= 1;
+            return stream;
+        }
+    };
+
+    fn init(self: *ConnectionPool) void {
+        self.queue = .{};
+        for (0..POOL_SIZE) |i| {
+            self.threads[i] = std.Thread.spawn(.{}, workerLoop, .{&self.queue}) catch @panic("thread spawn");
+        }
+    }
+
+    fn workerLoop(queue: *Queue) void {
+        while (true) {
+            const stream = queue.pop();
+            handleConnection(stream);
+        }
+    }
+};
+
+var pool: ConnectionPool = undefined;
+
 pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     const addr = std.net.Address.parseIp4(server_host, server_port) catch {
         py.setError("Invalid address: {s}:{d}", .{ server_host, server_port });
@@ -375,8 +436,11 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     };
     defer tcp_server.deinit();
 
+    // Start thread pool
+    pool.init();
+
     std.debug.print("🚀 TurboNet-Zig server listening on {s}:{d}\n", .{ server_host, server_port });
-    std.debug.print("🎯 Zig HTTP core active – zero overhead!\n", .{});
+    std.debug.print("🎯 Zig HTTP core active – {d}-thread pool!\n", .{POOL_SIZE});
 
     // Release the GIL before entering the accept loop so spawned threads
     // can acquire it to call Python handlers.
@@ -384,8 +448,7 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
 
     while (true) {
         const conn = tcp_server.accept() catch continue;
-        const thread = std.Thread.spawn(.{}, handleConnection, .{conn.stream}) catch continue;
-        thread.detach();
+        pool.queue.push(conn.stream);
     }
 
     // Restore GIL (unreachable in practice, but correct)
@@ -420,6 +483,13 @@ fn parseHeaders(request_data: []const u8, first_line_end: usize, header_end_pos:
 fn handleConnection(stream: std.net.Stream) void {
     defer stream.close();
 
+    // Keep-alive loop — handle multiple requests on the same connection
+    while (true) {
+        handleOneRequest(stream) catch return;
+    }
+}
+
+fn handleOneRequest(stream: std.net.Stream) !void {
     // Phase 1: Read headers into a fixed buffer (headers are typically < 8KB)
     var header_buf: [8192]u8 = undefined;
     var total_read: usize = 0;
@@ -427,11 +497,8 @@ fn handleConnection(stream: std.net.Stream) void {
 
     // Read until we find \r\n\r\n (end of headers) or fill the header buffer
     while (total_read < header_buf.len) {
-        const n = stream.read(header_buf[total_read..]) catch |err| {
-            std.debug.print("[ZIG] read error: {}\n", .{err});
-            return;
-        };
-        if (n == 0) break;
+        const n = stream.read(header_buf[total_read..]) catch return error.ReadError;
+        if (n == 0) return error.ConnectionClosed;
         total_read += n;
 
         // Check if we've received the full headers
@@ -440,12 +507,12 @@ fn handleConnection(stream: std.net.Stream) void {
             break;
         }
     }
-    if (total_read == 0) return;
+    if (total_read == 0) return error.ConnectionClosed;
 
     const he = header_end_pos orelse {
         // No \r\n\r\n found — malformed or headers too large
         sendResponse(stream, 431, "text/plain", "Request Header Fields Too Large");
-        return;
+        return error.HeadersTooLarge;
     };
 
     const request_head = header_buf[0..total_read];
@@ -459,7 +526,7 @@ fn handleConnection(stream: std.net.Stream) void {
     const method = parts.next() orelse return;
     const raw_path = parts.next() orelse return;
 
-    std.debug.print("[ZIG] {s} {s}\n", .{ method, raw_path });
+    // std.debug.print("[ZIG] {s} {s}\n", .{ method, raw_path });
 
     // Split path from query string
     const q_idx = std.mem.indexOf(u8, raw_path, "?");
@@ -524,7 +591,7 @@ fn handleConnection(stream: std.net.Stream) void {
         body = full_body[0..body_read];
     }
 
-    std.debug.print("[ZIG] received {d} header bytes + {d} body bytes\n", .{ he + 4, body.len });
+    // std.debug.print("[ZIG] received {d} header bytes + {d} body bytes\n", .{ he + 4, body.len });
 
     // Match route via radix trie
     const rt = getRouter();
@@ -572,9 +639,16 @@ fn handleConnection(stream: std.net.Stream) void {
         }
     }
 
+    // Use fast dispatch for simple_sync/body_sync handlers — writes response
+    // directly to stream while still holding the GIL (zero-copy from Python string)
+    const ht = entry.handler_type;
+    if (std.mem.eql(u8, ht, "simple_sync") or std.mem.eql(u8, ht, "body_sync")) {
+        callPythonHandlerDirect(entry, query_string, body, &match.params, stream);
+        return;
+    }
+
     const resp = callPythonHandler(entry, method, path, query_string, body, headers.items, &match.params);
     defer resp.deinit();
-    std.debug.print("[ZIG] handler returned status={d}\n", .{resp.status_code});
     sendResponse(stream, resp.status_code, resp.content_type, resp.body);
 }
 
@@ -660,7 +734,97 @@ fn ffiError() FfiResponse {
     };
 }
 
-// ── Python handler dispatch ─────────────────────────────────────────────────
+// ── Fast Python handler dispatch (simple_sync/body_sync) ────────────────────
+// Zero-copy: calls Python, reads response string, writes to stream — all while
+// holding the GIL. No heap allocations for the response.
+
+fn callPythonHandlerDirect(entry: HandlerEntry, query_string: []const u8, body: []const u8, params: *const std.StringHashMap([]const u8), stream: std.net.Stream) void {
+    const state = c.PyGILState_Ensure();
+    defer c.PyGILState_Release(state);
+
+    const kwargs = c.PyDict_New() orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+        return;
+    };
+    defer c.Py_DecRef(kwargs);
+
+    // Only pass what fast handlers need: path_params, query_string, body
+    const py_path_params = c.PyDict_New() orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+        return;
+    };
+    defer c.Py_DecRef(py_path_params);
+    {
+        var pit = params.iterator();
+        while (pit.next()) |pe| {
+            const pk = py.newString(pe.key_ptr.*) orelse continue;
+            const pv = py.newString(pe.value_ptr.*) orelse {
+                c.Py_DecRef(pk);
+                continue;
+            };
+            _ = c.PyDict_SetItem(py_path_params, pk, pv);
+            c.Py_DecRef(pk);
+            c.Py_DecRef(pv);
+        }
+    }
+    _ = c.PyDict_SetItemString(kwargs, "path_params", py_path_params);
+
+    if (query_string.len > 0) {
+        if (py.newString(query_string)) |v| {
+            _ = c.PyDict_SetItemString(kwargs, "query_string", v);
+            c.Py_DecRef(v);
+        }
+    }
+
+    if (body.len > 0) {
+        const py_body = c.PyBytes_FromStringAndSize(@ptrCast(body.ptr), @intCast(body.len)) orelse {
+            sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+            return;
+        };
+        _ = c.PyDict_SetItemString(kwargs, "body", py_body);
+        c.Py_DecRef(py_body);
+    }
+
+    // Call handler
+    const empty_tuple = c.PyTuple_New(0) orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+        return;
+    };
+    defer c.Py_DecRef(empty_tuple);
+
+    const result = c.PyObject_Call(entry.handler, empty_tuple, kwargs) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(result);
+
+    // Extract status_code
+    var status_code: u16 = 200;
+    if (c.PyDict_GetItemString(result, "status_code")) |sc| {
+        const code = c.PyLong_AsLong(sc);
+        if (code >= 100 and code <= 599) {
+            status_code = @intCast(code);
+        }
+    }
+
+    // Content — read pre-serialized string directly from Python object
+    // and write to stream without copying (zero-copy)
+    var body_slice: []const u8 = "null";
+    if (c.PyDict_GetItemString(result, "content")) |content_obj| {
+        if (c.PyUnicode_Check(content_obj) != 0) {
+            if (c.PyUnicode_AsUTF8(content_obj)) |cs| {
+                body_slice = std.mem.span(cs);
+            }
+        }
+    }
+
+    // Write response directly — body_slice points into the Python string,
+    // which is alive because we hold `result` ref until after the write.
+    sendResponse(stream, status_code, "application/json", body_slice);
+}
+
+// ── Python handler dispatch (full kwargs — enhanced/model handlers) ──────────
 
 fn callPythonHandler(entry: HandlerEntry, method: []const u8, path: []const u8, query_string: []const u8, body: []const u8, headers: []const HeaderPair, params: *const std.StringHashMap([]const u8)) PythonResponse {
     const err_body = "{\"error\": \"Internal Server Error\"}";
@@ -863,7 +1027,7 @@ fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, b
     };
 
     var header_buf: [512]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ status, status_text, content_type, body.len }) catch return;
+    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n", .{ status, status_text, content_type, body.len }) catch return;
 
     stream.writeAll(header) catch |err| {
         std.debug.print("[ZIG] write header error: {}\n", .{err});
@@ -873,7 +1037,7 @@ fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, b
         std.debug.print("[ZIG] write body error: {}\n", .{err});
         return;
     };
-    std.debug.print("[ZIG] response sent ({d} bytes)\n", .{header.len + body.len});
+    // std.debug.print("[ZIG] response sent ({d} bytes)\n", .{header.len + body.len});
 }
 
 // ── configure_rate_limiting(enabled, requests_per_minute) ──

@@ -16,7 +16,7 @@ except ImportError:
 
 from .main_app import TurboAPI
 from .models import Request, Response
-from .request_handler import create_enhanced_handler, ResponseHandler
+from .request_handler import create_enhanced_handler, create_fast_handler, ResponseHandler
 from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
 
 
@@ -34,7 +34,21 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
     sig = inspect.signature(handler)
     param_types = {}
     needs_body = False
+    has_depends = False
     model_info = {}
+
+    # Check for Depends/SecurityBase — forces enhanced path
+    try:
+        from .security import Depends, SecurityBase
+        for _, param in sig.parameters.items():
+            if isinstance(param.default, (Depends, SecurityBase)):
+                has_depends = True
+                break
+    except ImportError:
+        pass
+
+    if has_depends:
+        return "enhanced", {}, {}
 
     for param_name, param in sig.parameters.items():
         annotation = param.annotation
@@ -119,19 +133,22 @@ def _build_schema(model_class) -> dict | None:
         return None
 
     fields = []
+    model_fields = getattr(model_class, 'model_fields', {}) if BaseModel is not None else {}
     for field_name, field_type in hints.items():
         field_info = _resolve_type(field_name, field_type)
 
-        # Extract dhi Field constraints if available
-        if BaseModel is not None and hasattr(model_class, 'model_fields'):
-            model_fields = model_class.model_fields
-            if field_name in model_fields:
-                fi = model_fields[field_name]
-                constraint = fi.default if hasattr(fi.default, 'min_length') else fi
-                for attr in ('min_length', 'max_length', 'gt', 'ge', 'lt', 'le'):
-                    val = getattr(constraint, attr, None)
-                    if val is not None:
-                        field_info[attr] = val
+        # Check if field has a default (not required)
+        if field_name in model_fields:
+            fi = model_fields[field_name]
+            if hasattr(fi, 'is_required') and not fi.is_required:
+                field_info["required"] = False
+
+            # Extract dhi Field constraints if available
+            constraint = fi.default if hasattr(fi.default, 'min_length') else fi
+            for attr in ('min_length', 'max_length', 'gt', 'ge', 'lt', 'le'):
+                val = getattr(constraint, attr, None)
+                if val is not None:
+                    field_info[attr] = val
 
         fields.append(field_info)
 
@@ -452,10 +469,12 @@ class ZigIntegratedTurboAPI(TurboAPI):
                         )
                         print(f"{CHECK_MARK} [model_sync] {route.method.value} {route.path}")
                 elif handler_type in ("simple_sync", "body_sync"):
-                    # SYNC FAST PATH: Register with metadata for Zig-side parsing
-                    enhanced_handler = create_enhanced_handler(route.handler, route)
+                    # SYNC FAST PATH: Use minimal-overhead fast handler
                     if self._middleware_instances:
+                        enhanced_handler = create_enhanced_handler(route.handler, route)
                         enhanced_handler = self._wrap_with_middleware(enhanced_handler)
+                    else:
+                        enhanced_handler = create_fast_handler(route.handler, route)
                     param_types_json = json.dumps(param_types)
 
                     self.zig_server.add_route_fast(

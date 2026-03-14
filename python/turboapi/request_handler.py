@@ -162,16 +162,17 @@ class PathParamParser:
     """Parse path parameters from URL path."""
     
     @staticmethod
-    def extract_path_params(route_pattern: str, actual_path: str) -> dict[str, str]:
+    def extract_path_params(route_pattern: str, actual_path: str, handler_signature: inspect.Signature | None = None) -> dict[str, Any]:
         """
         Extract path parameters from actual path using route pattern.
         
         Args:
             route_pattern: Route pattern with {param} placeholders (e.g., "/users/{user_id}")
             actual_path: Actual request path (e.g., "/users/123")
+            handler_signature: Optional handler signature for type coercion
             
         Returns:
-            Dictionary of extracted path parameters
+            Dictionary of extracted path parameters (type-coerced if signature provided)
         """
         import re
         
@@ -181,10 +182,27 @@ class PathParamParser:
         pattern = f'^{pattern}$'
         
         match = re.match(pattern, actual_path)
-        if match:
-            return match.groupdict()
-        
-        return {}
+        if not match:
+            return {}
+
+        params = match.groupdict()
+
+        # Coerce types based on handler signature annotations
+        if handler_signature:
+            for name, value in params.items():
+                if name in handler_signature.parameters:
+                    annotation = handler_signature.parameters[name].annotation
+                    try:
+                        if annotation is int:
+                            params[name] = int(value)
+                        elif annotation is float:
+                            params[name] = float(value)
+                        elif annotation is bool:
+                            params[name] = value.lower() in ("true", "1", "yes")
+                    except (ValueError, TypeError):
+                        pass  # keep as string
+
+        return params
 
 
 class HeaderParser:
@@ -531,6 +549,41 @@ def create_enhanced_handler(original_handler, route_definition):
     """
     sig = inspect.signature(original_handler)
     is_async = inspect.iscoroutinefunction(original_handler)
+
+    # Pre-compile path param regex and type converters at registration time
+    import re as _re
+    _path_pattern = None
+    _path_param_types = {}
+    if hasattr(route_definition, 'path') and route_definition.path:
+        rp = route_definition.path
+        if '{' in rp:
+            _path_pattern = _re.compile(
+                '^' + _re.sub(r'\{(\w+)\}', r'(?P<\1>[^/]+)', rp) + '$'
+            )
+        for pname, param in sig.parameters.items():
+            ann = param.annotation
+            if ann is int:
+                _path_param_types[pname] = int
+            elif ann is float:
+                _path_param_types[pname] = float
+            elif ann is bool:
+                _path_param_types[pname] = lambda v: v.lower() in ("true", "1", "yes")
+
+    # Pre-check which features this handler needs
+    _param_names = set(sig.parameters.keys())
+    _has_dependencies = False
+    _has_header_params = False
+    from turboapi.datastructures import Header
+    try:
+        from turboapi.security import Depends, SecurityBase
+        _has_security = True
+    except ImportError:
+        _has_security = False
+    for pname, param in sig.parameters.items():
+        if isinstance(param.default, Header):
+            _has_header_params = True
+        if _has_security and (isinstance(param.default, Depends) or isinstance(param.default, SecurityBase)):
+            _has_dependencies = True
     
     if is_async:
         # Create async enhanced handler for async original handlers
@@ -551,7 +604,7 @@ def create_enhanced_handler(original_handler, route_definition):
                     actual_path = kwargs.get("path", "")
                     route_pattern = route_definition.path
                     if actual_path and route_pattern:
-                        path_params = PathParamParser.extract_path_params(route_pattern, actual_path)
+                        path_params = PathParamParser.extract_path_params(route_pattern, actual_path, sig)
                         parsed_params.update(path_params)
                 
                 # 3. Parse headers
@@ -645,66 +698,69 @@ def create_enhanced_handler(original_handler, route_definition):
                 parsed_params = {}
                 
                 # 1. Parse query parameters
-                if "query_string" in kwargs:
-                    query_string = kwargs.get("query_string", "")
-                    if query_string:
-                        query_params = QueryParamParser.parse_query_params(query_string)
-                        parsed_params.update(query_params)
+                query_string = kwargs.get("query_string", "")
+                if query_string:
+                    query_params = QueryParamParser.parse_query_params(query_string)
+                    parsed_params.update(query_params)
                 
-                # 2. Parse path parameters (if route pattern is available)
-                if "path" in kwargs and hasattr(route_definition, 'path'):
+                # 2. Parse path parameters using pre-compiled regex
+                if _path_pattern is not None:
                     actual_path = kwargs.get("path", "")
-                    route_pattern = route_definition.path
-                    if actual_path and route_pattern:
-                        path_params = PathParamParser.extract_path_params(route_pattern, actual_path)
-                        parsed_params.update(path_params)
+                    if actual_path:
+                        m = _path_pattern.match(actual_path)
+                        if m:
+                            params = m.groupdict()
+                            for k, v in params.items():
+                                converter = _path_param_types.get(k)
+                                if converter:
+                                    try:
+                                        params[k] = converter(v)
+                                    except (ValueError, TypeError):
+                                        pass
+                            parsed_params.update(params)
                 
-                # 3. Parse headers
-                if "headers" in kwargs:
+                # 3. Parse headers (only if handler needs them)
+                if _has_header_params:
                     headers_dict = kwargs.get("headers", {})
                     if headers_dict:
                         header_params = HeaderParser.parse_headers(headers_dict, sig)
                         parsed_params.update(header_params)
                 
                 # 4. Parse request body (JSON)
-                if "body" in kwargs:
-                    body_data = kwargs["body"]
+                body_data = kwargs.get("body", b"")
+                if body_data:
+                    parsed_body = RequestBodyParser.parse_json_body(body_data, sig)
+                    parsed_params.update(parsed_body)
 
-                    if body_data:  # Only parse if body is not empty
-                        parsed_body = RequestBodyParser.parse_json_body(
-                            body_data,
-                            sig
-                        )
-                        # Merge parsed body params (body params take precedence)
-                        parsed_params.update(parsed_body)
-
-                # 5. Resolve dependencies
-                context = {
-                    "headers": kwargs.get("headers", {}),
-                    "query_string": kwargs.get("query_string", ""),
-                    "body": kwargs.get("body", b""),
-                }
-                dependency_params = DependencyResolver.resolve_dependencies(sig, context)
-                parsed_params.update(dependency_params)
+                # 5. Resolve dependencies (only if handler uses Depends/Security)
+                if _has_dependencies:
+                    context = {
+                        "headers": kwargs.get("headers", {}),
+                        "query_string": query_string,
+                        "body": body_data,
+                    }
+                    dependency_params = DependencyResolver.resolve_dependencies(sig, context)
+                    parsed_params.update(dependency_params)
 
                 # Filter to only pass expected parameters
                 filtered_kwargs = {
                     k: v for k, v in parsed_params.items()
-                    if k in sig.parameters
+                    if k in _param_names
                 }
 
                 # Call original sync handler
                 result = original_handler(**filtered_kwargs)
 
                 # Run dependency cleanups (generator teardown)
-                cleanups = context.get('_cleanups', [])
-                for gen in cleanups:
-                    try:
-                        next(gen)
-                    except StopIteration:
-                        pass
-                    except Exception:
-                        pass
+                if _has_dependencies:
+                    cleanups = context.get('_cleanups', [])
+                    for gen in cleanups:
+                        try:
+                            next(gen)
+                        except StopIteration:
+                            pass
+                        except Exception:
+                            pass
 
                 # Normalize response - may return (content, status) or (content, status, content_type)
                 normalized = ResponseHandler.normalize_response(result)
@@ -741,3 +797,107 @@ def create_enhanced_handler(original_handler, route_definition):
                 )
         
         return enhanced_handler
+
+
+def create_fast_handler(original_handler, route_definition):
+    """Create a minimal-overhead handler for simple sync routes.
+
+    Returns content as a pre-serialized JSON string so Zig skips json.dumps.
+    Uses Zig's pre-extracted path_params. No regex, no header parsing,
+    no dependency resolution, no make_serializable.
+    """
+    import json as _json
+
+    sig = inspect.signature(original_handler)
+    param_names = set(sig.parameters.keys())
+
+    # Pre-build type converters for path params
+    _converters: dict[str, type] = {}
+    for pname, param in sig.parameters.items():
+        ann = param.annotation
+        if ann is int:
+            _converters[pname] = int
+        elif ann is float:
+            _converters[pname] = float
+
+    # Check if handler takes body params
+    _needs_body = False
+    method_str = route_definition.method.value.upper() if hasattr(route_definition, 'method') else "GET"
+    if method_str in ("POST", "PUT", "PATCH", "DELETE"):
+        for pname, param in sig.parameters.items():
+            ann = param.annotation
+            if ann in (dict, list, bytes):
+                _needs_body = True
+                break
+            try:
+                from dhi import BaseModel as DhiModel
+                if inspect.isclass(ann) and issubclass(ann, DhiModel):
+                    _needs_body = True
+                    break
+            except ImportError:
+                pass
+
+    # Pre-import json.dumps for hot path
+    _dumps = _json.dumps
+
+    if not param_names:
+        # Zero-arg handler: fastest possible path
+        def fast_handler_noargs(**kwargs):
+            try:
+                result = original_handler()
+                if hasattr(result, 'model_dump'):
+                    result = result.model_dump()
+                return {"content": _dumps(result), "status_code": 200}
+            except Exception as e:
+                return {"content": _dumps({"error": str(e)}), "status_code": 500}
+        return fast_handler_noargs
+
+    def fast_handler(**kwargs):
+        try:
+            call_kwargs = {}
+
+            # Path params from Zig (already extracted by router)
+            path_params = kwargs.get("path_params")
+            if path_params:
+                for k, v in path_params.items():
+                    if k in param_names:
+                        converter = _converters.get(k)
+                        if converter:
+                            call_kwargs[k] = converter(v)
+                        else:
+                            call_kwargs[k] = v
+
+            # Query params (only if handler has unresolved params)
+            if len(call_kwargs) < len(param_names):
+                qs = kwargs.get("query_string", "")
+                if qs:
+                    from urllib.parse import parse_qs
+                    for k, v in parse_qs(qs, keep_blank_values=True).items():
+                        if k in param_names and k not in call_kwargs:
+                            call_kwargs[k] = v[0]
+
+            # Body (only for POST/PUT/PATCH)
+            if _needs_body:
+                body = kwargs.get("body", b"")
+                if body:
+                    parsed_body = RequestBodyParser.parse_json_body(body, sig)
+                    call_kwargs.update(parsed_body)
+
+            result = original_handler(**call_kwargs)
+
+            # Pre-serialize so Zig skips json.dumps
+            if hasattr(result, 'model_dump'):
+                result = result.model_dump()
+            if isinstance(result, tuple) and len(result) == 2:
+                return {"content": _dumps(result[0]), "status_code": result[1]}
+            return {"content": _dumps(result), "status_code": 200}
+        except Exception as e:
+            try:
+                from turboapi.security import HTTPException
+                if isinstance(e, HTTPException):
+                    return {"content": _dumps({"detail": e.detail}), "status_code": e.status_code}
+            except ImportError:
+                pass
+            return {"content": _dumps({"error": str(e)}), "status_code": 500}
+
+    return fast_handler

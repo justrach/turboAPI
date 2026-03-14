@@ -267,10 +267,8 @@ fn parsePath(alloc: Allocator, path: []const u8) ![]const Segment {
     const trimmed = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
     if (trimmed.len == 0) {
-        // Root path: single empty-string static segment
-        const segs = try alloc.alloc(Segment, 1);
-        segs[0] = .{ .static = "" };
-        return segs;
+        // Root path — zero segments (handler lives at the root node)
+        return try alloc.alloc(Segment, 0);
     }
 
     // Count segments
