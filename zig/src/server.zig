@@ -20,6 +20,22 @@ const HandlerEntry = struct {
     model_class: ?*c.PyObject,
 };
 
+const HeaderPair = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+const PythonResponse = struct {
+    status_code: u16,
+    content_type: []const u8,
+    body: []const u8,
+
+    fn deinit(self: PythonResponse) void {
+        if (self.content_type.len > 0) allocator.free(self.content_type);
+        if (self.body.len > 0) allocator.free(self.body);
+    }
+};
+
 var routes: ?std.StringHashMap(HandlerEntry) = null;
 var router: ?router_mod.Router = null;
 var server_host: []const u8 = "127.0.0.1";
@@ -208,6 +224,30 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     return py.pyNone();
 }
 
+const HeaderList = std.ArrayListUnmanaged(HeaderPair);
+
+fn parseHeaders(request_data: []const u8, first_line_end: usize, header_end_pos: usize) HeaderList {
+    var headers: HeaderList = .empty;
+
+    var pos = first_line_end + 2; // skip past first \r\n
+    while (pos < header_end_pos) {
+        const line_end = std.mem.indexOfPos(u8, request_data, pos, "\r\n") orelse header_end_pos;
+        const line = request_data[pos..line_end];
+        pos = line_end + 2;
+
+        if (line.len == 0) break;
+
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+
+        if (name.len == 0) continue;
+        headers.append(allocator, .{ .name = name, .value = value }) catch continue;
+    }
+
+    return headers;
+}
+
 fn handleConnection(stream: std.net.Stream) void {
     defer stream.close();
 
@@ -241,6 +281,13 @@ fn handleConnection(stream: std.net.Stream) void {
     const header_end = std.mem.indexOf(u8, request_data, "\r\n\r\n");
     const body = if (header_end) |he| request_data[he + 4 .. n] else "";
 
+    // Parse HTTP headers
+    var headers = if (header_end) |he|
+        parseHeaders(request_data, first_line_end, he)
+    else
+        HeaderList.empty;
+    defer headers.deinit(allocator);
+
     // Match route via radix trie
     const rt = getRouter();
     var match = rt.findRoute(method, path) orelse {
@@ -257,36 +304,60 @@ fn handleConnection(stream: std.net.Stream) void {
         return;
     };
 
-    const response_body = callPythonHandler(entry, method, path, query_string, body, &match.params);
-    std.debug.print("[ZIG] handler returned: {s}\n", .{response_body});
-    sendResponse(stream, 200, "application/json", response_body);
+    const resp = callPythonHandler(entry, method, path, query_string, body, headers.items, &match.params);
+    defer resp.deinit();
+    std.debug.print("[ZIG] handler returned status={d}\n", .{resp.status_code});
+    sendResponse(stream, resp.status_code, resp.content_type, resp.body);
 }
 
-fn callPythonHandler(entry: HandlerEntry, method: []const u8, path: []const u8, query_string: []const u8, body: []const u8, params: *const std.StringHashMap([]const u8)) []const u8 {
+fn callPythonHandler(entry: HandlerEntry, method: []const u8, path: []const u8, query_string: []const u8, body: []const u8, headers: []const HeaderPair, params: *const std.StringHashMap([]const u8)) PythonResponse {
+    const err_body = "{\"error\": \"Internal Server Error\"}";
+    const err_ct = "application/json";
 
-    // Use the enhanced handler (already wrapped by Python side)
-    const handler = entry.handler;
-
-    // Call Python with GIL
     const state = c.PyGILState_Ensure();
     defer c.PyGILState_Release(state);
 
-    // Build request dict
-    const req_dict = c.PyDict_New() orelse return "{\"error\": \"internal error\"}";
-    defer c.Py_DecRef(req_dict);
+    // ── Build the kwargs dict for enhanced_handler(**kwargs) ──
+    const kwargs = c.PyDict_New() orelse return errorResponse(err_ct, err_body);
+    defer c.Py_DecRef(kwargs);
 
-    // Set method, path, body etc
-    if (py.newString(path)) |p| {
-        _ = c.PyDict_SetItemString(req_dict, "path", p);
-        c.Py_DecRef(p);
+    // method
+    if (py.newString(method)) |v| {
+        _ = c.PyDict_SetItemString(kwargs, "method", v);
+        c.Py_DecRef(v);
     }
-    if (py.newString(body)) |b| {
-        _ = c.PyDict_SetItemString(req_dict, "body", b);
-        c.Py_DecRef(b);
+    // path
+    if (py.newString(path)) |v| {
+        _ = c.PyDict_SetItemString(kwargs, "path", v);
+        c.Py_DecRef(v);
+    }
+    // body (as bytes, not string)
+    const py_body = c.PyBytes_FromStringAndSize(@ptrCast(body.ptr), @intCast(body.len)) orelse return errorResponse(err_ct, err_body);
+    _ = c.PyDict_SetItemString(kwargs, "body", py_body);
+    c.Py_DecRef(py_body);
+    // query_string
+    if (py.newString(query_string)) |v| {
+        _ = c.PyDict_SetItemString(kwargs, "query_string", v);
+        c.Py_DecRef(v);
     }
 
-    // Build path_params dict from extracted route parameters
-    const py_path_params = c.PyDict_New() orelse return "{\"error\": \"internal error\"}";
+    // ── headers dict from HeaderPair slice ──
+    const py_headers = c.PyDict_New() orelse return errorResponse(err_ct, err_body);
+    defer c.Py_DecRef(py_headers);
+    for (headers) |h| {
+        const hk = py.newString(h.name) orelse continue;
+        const hv = py.newString(h.value) orelse {
+            c.Py_DecRef(hk);
+            continue;
+        };
+        _ = c.PyDict_SetItem(py_headers, hk, hv);
+        c.Py_DecRef(hk);
+        c.Py_DecRef(hv);
+    }
+    _ = c.PyDict_SetItemString(kwargs, "headers", py_headers);
+
+    // ── path_params dict from StringHashMap ──
+    const py_path_params = c.PyDict_New() orelse return errorResponse(err_ct, err_body);
     defer c.Py_DecRef(py_path_params);
     {
         var pit = params.iterator();
@@ -301,55 +372,141 @@ fn callPythonHandler(entry: HandlerEntry, method: []const u8, path: []const u8, 
             c.Py_DecRef(pv);
         }
     }
+    _ = c.PyDict_SetItemString(kwargs, "path_params", py_path_params);
 
-    // Call handler(method, path, headers, body, query_string, path_params)
-    const py_method = py.newString(method) orelse return "{\"error\": \"internal error\"}";
-    defer c.Py_DecRef(py_method);
-    const py_path = py.newString(path) orelse return "{\"error\": \"internal error\"}";
-    defer c.Py_DecRef(py_path);
-    const py_headers = c.PyDict_New() orelse return "{\"error\": \"internal error\"}";
-    defer c.Py_DecRef(py_headers);
-    const py_body = c.PyBytes_FromStringAndSize(@ptrCast(body.ptr), @intCast(body.len)) orelse return "{\"error\": \"internal error\"}";
-    defer c.Py_DecRef(py_body);
-    const py_qs = py.newString(query_string) orelse return "{\"error\": \"internal error\"}";
-    defer c.Py_DecRef(py_qs);
+    // ── Call handler with PyObject_Call(handler, empty_tuple, kwargs) ──
+    const empty_tuple = c.PyTuple_New(0) orelse return errorResponse(err_ct, err_body);
+    defer c.Py_DecRef(empty_tuple);
 
-    const call_args = c.PyTuple_Pack(6, py_method, py_path, py_headers, py_body, py_qs, py_path_params) orelse return "{\"error\": \"internal error\"}";
-    defer c.Py_DecRef(call_args);
+    var result = c.PyObject_Call(entry.handler, empty_tuple, kwargs) orelse {
+        c.PyErr_Print();
+        return errorResponse(err_ct, err_body);
+    };
+    defer c.Py_DecRef(result);
 
-    const result = c.PyObject_CallObject(handler, call_args);
-    if (result) |res| {
-        defer c.Py_DecRef(res);
-        // Try to serialize to JSON
-        const json_mod = c.PyImport_ImportModule("json") orelse return "{\"error\": \"json import failed\"}";
-        defer c.Py_DecRef(json_mod);
-        const dumps = c.PyObject_GetAttrString(json_mod, "dumps") orelse return "{\"error\": \"json.dumps failed\"}";
-        defer c.Py_DecRef(dumps);
-        const dump_args = c.PyTuple_Pack(1, res) orelse return "{\"error\": \"pack failed\"}";
-        defer c.Py_DecRef(dump_args);
-        const json_result = c.PyObject_CallObject(dumps, dump_args);
-        if (json_result) |jr| {
-            defer c.Py_DecRef(jr);
-            const cstr = c.PyUnicode_AsUTF8(jr);
-            if (cstr) |cs| {
-                // Copy to owned memory
-                const s = std.mem.span(cs);
-                const owned = allocator.alloc(u8, s.len) catch return "{\"error\": \"alloc failed\"}";
-                @memcpy(owned, s);
-                return owned;
+    // ── Async handler support: await coroutine via asyncio.run() ──
+    if (c.PyCoro_CheckExact(result) != 0) {
+        const asyncio = c.PyImport_ImportModule("asyncio") orelse {
+            c.PyErr_Print();
+            return errorResponse(err_ct, err_body);
+        };
+        defer c.Py_DecRef(asyncio);
+        const run_fn = c.PyObject_GetAttrString(asyncio, "run") orelse {
+            c.PyErr_Print();
+            return errorResponse(err_ct, err_body);
+        };
+        defer c.Py_DecRef(run_fn);
+        const run_args = c.PyTuple_Pack(1, result) orelse return errorResponse(err_ct, err_body);
+        defer c.Py_DecRef(run_args);
+        const awaited = c.PyObject_CallObject(run_fn, run_args) orelse {
+            c.PyErr_Print();
+            return errorResponse(err_ct, err_body);
+        };
+        // Replace result with the awaited value
+        c.Py_DecRef(result);
+        result = awaited;
+    }
+
+    // ── Extract response fields from returned dict ──
+    // status_code (default 200)
+    var status_code: u16 = 200;
+    if (c.PyDict_GetItemString(result, "status_code")) |sc| {
+        const code = c.PyLong_AsLong(sc);
+        if (code >= 100 and code <= 599) {
+            status_code = @intCast(code);
+        }
+    }
+
+    // content_type (default "application/json")
+    var ct_slice: []const u8 = "application/json";
+    if (c.PyDict_GetItemString(result, "content_type")) |ct_obj| {
+        if (c.PyUnicode_AsUTF8(ct_obj)) |cs| {
+            ct_slice = std.mem.span(cs);
+        }
+    }
+
+    // content — json.dumps() if not already a string
+    var body_slice: []const u8 = "null";
+    if (c.PyDict_GetItemString(result, "content")) |content_obj| {
+        if (c.PyUnicode_Check(content_obj) != 0) {
+            // Already a string, use directly
+            if (c.PyUnicode_AsUTF8(content_obj)) |cs| {
+                body_slice = std.mem.span(cs);
+            }
+        } else {
+            // Serialize via json.dumps()
+            const json_mod = c.PyImport_ImportModule("json");
+            if (json_mod) |jm| {
+                defer c.Py_DecRef(jm);
+                const dumps_fn = c.PyObject_GetAttrString(jm, "dumps");
+                if (dumps_fn) |df| {
+                    defer c.Py_DecRef(df);
+                    const dump_args = c.PyTuple_Pack(1, content_obj);
+                    if (dump_args) |da| {
+                        defer c.Py_DecRef(da);
+                        const json_result = c.PyObject_CallObject(df, da);
+                        if (json_result) |jr| {
+                            defer c.Py_DecRef(jr);
+                            if (c.PyUnicode_AsUTF8(jr)) |cs| {
+                                body_slice = std.mem.span(cs);
+                            }
+                        }
+                    }
+                }
             }
         }
-    } else {
-        c.PyErr_Print();
     }
-    return "{\"error\": \"handler failed\"}";
+
+    // ── Return PythonResponse with owned copies ──
+    const owned_ct = allocator.dupe(u8, ct_slice) catch return errorResponse(err_ct, err_body);
+    const owned_body = allocator.dupe(u8, body_slice) catch {
+        allocator.free(owned_ct);
+        return errorResponse(err_ct, err_body);
+    };
+
+    return PythonResponse{
+        .status_code = status_code,
+        .content_type = owned_ct,
+        .body = owned_body,
+    };
+}
+
+fn errorResponse(ct: []const u8, body_str: []const u8) PythonResponse {
+    const owned_ct = allocator.dupe(u8, ct) catch return PythonResponse{
+        .status_code = 500,
+        .content_type = &.{},
+        .body = &.{},
+    };
+    const owned_body = allocator.dupe(u8, body_str) catch {
+        allocator.free(owned_ct);
+        return PythonResponse{
+            .status_code = 500,
+            .content_type = &.{},
+            .body = &.{},
+        };
+    };
+    return PythonResponse{
+        .status_code = 500,
+        .content_type = owned_ct,
+        .body = owned_body,
+    };
 }
 
 fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
     const status_text = switch (status) {
         200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
+        405 => "Method Not Allowed",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
         500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
         else => "Unknown",
     };
 
