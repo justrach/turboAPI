@@ -14,7 +14,7 @@ setup(
     author_email="team@turboapi.dev",
     url="https://github.com/turboapi/turboapi",
     packages=find_packages(),
-    python_requires=">=3.12",  # Will be 3.14+ when no-GIL is stable
+    python_requires=">=3.14",
     install_requires=[
         # The Zig extension is built separately via zig/build_turbonet.py
     ],

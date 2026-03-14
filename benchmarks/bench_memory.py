@@ -6,10 +6,8 @@ Compares memory footprint and allocation patterns between frameworks.
 """
 
 import gc
-import sys
 import tracemalloc
 from dataclasses import dataclass
-from typing import List
 
 # Import validation libraries
 import dhi
@@ -41,7 +39,9 @@ def measure_memory(func, iterations: int = 10_000) -> tuple[float, float]:
     return current / 1024, peak / 1024  # Convert to KB
 
 
-def run_memory_benchmark(name: str, dhi_func, pydantic_func, iterations: int = 10_000) -> MemoryResult:
+def run_memory_benchmark(
+    name: str, dhi_func, pydantic_func, iterations: int = 10_000
+) -> MemoryResult:
     """Run a memory benchmark comparing dhi vs pydantic."""
     gc.collect()
 
@@ -72,7 +72,7 @@ def main():
     print(f"pydantic version: {pydantic.__version__}")
     print()
 
-    results: List[MemoryResult] = []
+    results: list[MemoryResult] = []
     ITERATIONS = 10_000
 
     # ================================================================
@@ -176,7 +176,9 @@ def main():
 
     for r in results:
         ratio_str = f"{r.ratio:.2f}x" if r.ratio >= 1 else f"{r.ratio:.2f}x"
-        print(f"{r.name:<20} {r.dhi_peak_kb:>10.1f}KB {r.pydantic_peak_kb:>12.1f}KB {ratio_str:>10}")
+        print(
+            f"{r.name:<20} {r.dhi_peak_kb:>10.1f}KB {r.pydantic_peak_kb:>12.1f}KB {ratio_str:>10}"
+        )
 
     print("=" * 70)
     print()
@@ -185,7 +187,7 @@ def main():
     if avg_ratio >= 1:
         print(f"dhi uses {avg_ratio:.2f}x LESS memory than Pydantic on average!")
     else:
-        print(f"dhi uses {1/avg_ratio:.2f}x more memory than Pydantic on average")
+        print(f"dhi uses {1 / avg_ratio:.2f}x more memory than Pydantic on average")
 
 
 if __name__ == "__main__":

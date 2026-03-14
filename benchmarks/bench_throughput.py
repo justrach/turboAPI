@@ -6,14 +6,13 @@ Measures requests per second using test clients.
 """
 
 import time
-import json
 from dataclasses import dataclass
-from typing import Optional
 
 # Import frameworks
 try:
     from turboapi import TurboAPI
     from turboapi.testclient import TestClient as TurboTestClient
+
     HAS_TURBOAPI = True
 except ImportError:
     HAS_TURBOAPI = False
@@ -21,6 +20,7 @@ except ImportError:
 try:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient as FastAPITestClient
+
     HAS_FASTAPI = True
 except ImportError:
     HAS_FASTAPI = False
@@ -133,13 +133,15 @@ def main():
     fastapi_time = time.perf_counter() - start
     fastapi_rps = ITERATIONS / fastapi_time
 
-    results.append(ThroughputResult(
-        name="GET /",
-        turbo_rps=turbo_rps,
-        fastapi_rps=fastapi_rps,
-        speedup=turbo_rps / fastapi_rps if fastapi_rps > 0 else 0,
-        iterations=ITERATIONS,
-    ))
+    results.append(
+        ThroughputResult(
+            name="GET /",
+            turbo_rps=turbo_rps,
+            fastapi_rps=fastapi_rps,
+            speedup=turbo_rps / fastapi_rps if fastapi_rps > 0 else 0,
+            iterations=ITERATIONS,
+        )
+    )
 
     # ================================================================
     # Test 2: GET with Path Parameter
@@ -163,13 +165,15 @@ def main():
     fastapi_time = time.perf_counter() - start
     fastapi_rps = ITERATIONS / fastapi_time
 
-    results.append(ThroughputResult(
-        name="GET /items/{id}",
-        turbo_rps=turbo_rps,
-        fastapi_rps=fastapi_rps,
-        speedup=turbo_rps / fastapi_rps if fastapi_rps > 0 else 0,
-        iterations=ITERATIONS,
-    ))
+    results.append(
+        ThroughputResult(
+            name="GET /items/{id}",
+            turbo_rps=turbo_rps,
+            fastapi_rps=fastapi_rps,
+            speedup=turbo_rps / fastapi_rps if fastapi_rps > 0 else 0,
+            iterations=ITERATIONS,
+        )
+    )
 
     # ================================================================
     # Test 3: POST with JSON Body
@@ -195,13 +199,15 @@ def main():
     fastapi_time = time.perf_counter() - start
     fastapi_rps = ITERATIONS / fastapi_time
 
-    results.append(ThroughputResult(
-        name="POST /items",
-        turbo_rps=turbo_rps,
-        fastapi_rps=fastapi_rps,
-        speedup=turbo_rps / fastapi_rps if fastapi_rps > 0 else 0,
-        iterations=ITERATIONS,
-    ))
+    results.append(
+        ThroughputResult(
+            name="POST /items",
+            turbo_rps=turbo_rps,
+            fastapi_rps=fastapi_rps,
+            speedup=turbo_rps / fastapi_rps if fastapi_rps > 0 else 0,
+            iterations=ITERATIONS,
+        )
+    )
 
     # ================================================================
     # Print Results

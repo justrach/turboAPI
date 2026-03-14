@@ -5,20 +5,19 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "turboapi"
 version = "1.0.0a1"
-description = "FastAPI-compatible web framework with Zig HTTP core - 2-3x faster with Python 3.14 free-threading"
+description = "FastAPI-compatible web framework with Zig HTTP core — 7x faster with Python 3.14 free-threading"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 license = {text = "MIT"}
 authors = [
     {name = "Rach Pradhan", email = "rach@turboapi.dev"}
 ]
-keywords = ["web", "framework", "http", "server", "zig", "performance", "fastapi", "async", "free-threading"]
+keywords = ["web", "framework", "http", "server", "zig", "performance", "fastapi", "free-threading", "no-gil"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
@@ -49,7 +48,7 @@ benchmark = [
 where = ["python"]
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py314"
 line-length = 100
 
 [tool.ruff.lint]

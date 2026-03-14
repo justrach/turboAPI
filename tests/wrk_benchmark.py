@@ -161,7 +161,9 @@ def save_results_to_json(results, filename=None):
         "timestamp": datetime.now().isoformat(),
         "benchmark_type": "TurboAPI vs FastAPI Performance Comparison",
         "python_version": sys.version,
-        "platform": dict(zip(["sysname", "nodename", "release", "version", "machine"], os.uname(), strict=False))
+        "platform": dict(
+            zip(["sysname", "nodename", "release", "version", "machine"], os.uname(), strict=False)
+        )
         if hasattr(os, "uname")
         else "unknown",
         "results": results,

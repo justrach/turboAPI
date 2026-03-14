@@ -5,10 +5,9 @@ JSON Serialization Benchmark: dhi vs Pydantic
 Compares JSON encoding/decoding performance.
 """
 
-import time
 import json
+import time
 from dataclasses import dataclass
-from typing import List
 
 import dhi
 import pydantic
@@ -60,7 +59,7 @@ def main():
     print(f"pydantic version: {pydantic.__version__}")
     print()
 
-    results: List[JSONResult] = []
+    results: list[JSONResult] = []
     ITERATIONS = 50_000
 
     # ================================================================
@@ -191,7 +190,9 @@ def main():
         total_dhi += r.dhi_time_ms
         total_pydantic += r.pydantic_time_ms
         speedup_str = f"{r.speedup:.2f}x"
-        print(f"{r.name:<25} {r.dhi_time_ms:>8.1f}ms {r.pydantic_time_ms:>10.1f}ms {speedup_str:>10}")
+        print(
+            f"{r.name:<25} {r.dhi_time_ms:>8.1f}ms {r.pydantic_time_ms:>10.1f}ms {speedup_str:>10}"
+        )
 
     print("-" * 70)
     overall_speedup = total_pydantic / total_dhi if total_dhi > 0 else 0
@@ -202,7 +203,7 @@ def main():
     if overall_speedup >= 1:
         print(f"dhi JSON is {overall_speedup:.2f}x FASTER than Pydantic!")
     else:
-        print(f"dhi JSON is {1/overall_speedup:.2f}x slower than Pydantic")
+        print(f"dhi JSON is {1 / overall_speedup:.2f}x slower than Pydantic")
 
 
 if __name__ == "__main__":

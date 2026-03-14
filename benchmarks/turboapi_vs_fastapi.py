@@ -180,11 +180,18 @@ def run_turboapi_server(port: int):
 
         app.run(host="127.0.0.1", port={port})
     """)
-    return subprocess.Popen(
+    # Use temp file for stderr so we can read errors without pipe deadlock
+    # (the server runs forever, so PIPE would fill and block)
+    import tempfile
+
+    err_file = tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False)
+    proc = subprocess.Popen(
         [sys.executable, "-c", code],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=err_file,
     )
+    proc._turbo_err_path = err_file.name  # stash path for error reporting
+    return proc
 
 
 # ── wrk lua script for POST ─────────────────────────────────────────────────
@@ -284,11 +291,19 @@ def main():
     if not wait_for_server(turbo_port, timeout=15.0):
         print("FAILED (timeout)")
         turbo_proc.kill()
-        out, err = turbo_proc.communicate(timeout=5)
-        if out:
-            print("  stdout:", out.decode(errors="replace")[-500:])
-        if err:
-            print("  stderr:", err.decode(errors="replace")[-500:])
+        turbo_proc.wait()
+        # Read stderr from temp file
+        err_path = getattr(turbo_proc, "_turbo_err_path", None)
+        if err_path:
+            try:
+                with open(err_path) as f:
+                    err_text = f.read().strip()
+                if err_text:
+                    print("  Server stderr:")
+                    for line in err_text.splitlines()[-20:]:
+                        print(f"    {line}")
+            except Exception:
+                pass
         fastapi_proc.kill()
         sys.exit(1)
     print(f"✅  port {turbo_port}")

@@ -1,202 +1,128 @@
 #!/usr/bin/env python3
 """
-TurboAPI Free-Threading Version Check
-Ensures TurboAPI only runs on Python 3.13+ free-threading builds
+TurboAPI Version & Free-Threading Check
+Ensures TurboAPI runs on Python 3.14+ free-threading builds only.
 """
 
-import io
 import sys
 import sysconfig
-import threading
 
-# Configure stdout to use UTF-8 encoding on Windows
-if sys.platform == "win32":
-    # Ensure UTF-8 encoding for print() on Windows
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-    elif not isinstance(sys.stdout, io.TextIOWrapper):
-        # Fallback for older Python or special stdout
-        import codecs
+# ── Emoji / ASCII symbols ────────────────────────────────────────────────────
 
-        sys.stdout = codecs.getwriter("utf-8")(sys.stdout.buffer, "strict")
+CHECK_MARK = "✅"
+CROSS_MARK = "❌"
+ROCKET = "🚀"
+THREAD = "🧵"
+BULB = "💡"
+TARGET = "🎯"
+BOOK = "📚"
+MAG = "🔍"
+PARTY = "🎉"
 
-# Define symbols that work across all platforms
-CHECK_MARK = "[OK]"
-CROSS_MARK = "[X]"
-ROCKET = "[ROCKET]"
-THREAD = "[THREAD]"
-BULB = "[INFO]"
-TARGET = "[TARGET]"
-BOOK = "[DOCS]"
-MAG = "[CHECK]"
-PARTY = "[SUCCESS]"
-
-# Try to use Unicode emojis if the terminal supports it
 try:
-    # Test if we can encode/print emojis
-    test_str = "✅"
-    if sys.platform == "win32":
-        # On Windows, test if console can display the emoji
-        test_str.encode(sys.stdout.encoding or "utf-8")
-    # If we get here, emojis work
-    CHECK_MARK = "✅"
-    CROSS_MARK = "❌"
-    ROCKET = "🚀"
-    THREAD = "🧵"
-    BULB = "💡"
-    TARGET = "🎯"
-    BOOK = "📚"
-    MAG = "🔍"
-    PARTY = "🎉"
+    # Test if terminal can render emojis
+    CHECK_MARK.encode(sys.stdout.encoding or "utf-8")
 except (UnicodeEncodeError, LookupError, AttributeError):
-    # Fallback to ASCII symbols already set above
-    pass
+    CHECK_MARK = "[OK]"
+    CROSS_MARK = "[X]"
+    ROCKET = ">>"
+    THREAD = "--"
+    BULB = "i "
+    TARGET = "* "
+    BOOK = "# "
+    MAG = "? "
+    PARTY = "!!"
 
 
-def check_free_threading_support():
-    """
-    Check if Python is running with free-threading (no-GIL) enabled.
-    Raises ImportError if not compatible.
-    """
-
-    # Check Python version first
-
-    # Check for free-threading build (multiple detection methods)
-    is_free_threading = _detect_free_threading()
-
-    if not is_free_threading:
-        raise ImportError(
-            f"{CROSS_MARK} TurboAPI requires Python free-threading build (no-GIL).\n"
-            f"   Current: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} with GIL enabled\n"
-            f"   \n"
-            f"   {THREAD} Free-threading required for:\n"
-            f"     • 5-10x performance improvements\n"
-            f"     • True multi-threading parallelism\n"
-            f"     • Zero Python middleware overhead\n"
-            f"     • Zig-native concurrency\n"
-            f"   \n"
-            f"   Install free-threading Python:\n"
-            f"     • uv python install 3.14t\n"
-            f"     • python3.14t\n"
-            f"     • Build from source: ./configure --disable-gil\n"
-            f"   \n"
-            f"   {ROCKET} Experience revolutionary performance with free-threading!\n"
-            f"   {BOOK} See: PYTHON_FREE_THREADING_GUIDE.md"
-        )
-
-    # Success! Print confirmation
-    print(
-        f"{CHECK_MARK} TurboAPI: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} free-threading detected!"
-    )
-    print(f"{THREAD} True parallelism enabled - ready for 5-10x performance!")
+# ── Detection ────────────────────────────────────────────────────────────────
 
 
-def _detect_free_threading():
-    """
-    Detect if Python is running in free-threading mode.
-    Uses canonical detection methods.
-    """
-
-    # Method 1: sysconfig Py_GIL_DISABLED (canonical, 3.13+)
+def _detect_free_threading() -> bool:
+    """Detect if Python is running in free-threading (no-GIL) mode."""
+    # Method 1: sysconfig Py_GIL_DISABLED (canonical)
     try:
-        gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
-        if gil_disabled is not None:
-            return bool(int(gil_disabled))
+        val = sysconfig.get_config_var("Py_GIL_DISABLED")
+        if val is not None:
+            return bool(int(val))
     except (ValueError, TypeError):
         pass
 
-    # Method 2: sys._is_gil_enabled() (available in 3.13t+ when GIL is disabled)
-    try:
-        if hasattr(sys, "_is_gil_enabled"):
+    # Method 2: sys._is_gil_enabled() (3.13t+)
+    if hasattr(sys, "_is_gil_enabled"):
+        try:
             return not sys._is_gil_enabled()
-    except Exception:
-        pass
+        except Exception:
+            pass
 
-    # Method 3: Check version string for free-threading indicators
-    try:
-        version_str = sys.version.lower()
-        if "free-threading" in version_str:
-            return True
-    except Exception:
-        pass
-
-    # Default: assume GIL is present
     return False
 
 
-def get_python_threading_info():
-    """Get detailed information about Python threading capabilities."""
-    info = {
+# ── Check ────────────────────────────────────────────────────────────────────
+
+
+def check_python_version():
+    """Raise ImportError if Python < 3.14."""
+    if sys.version_info < (3, 14):  # noqa: UP036 — runtime guard, not dead code
+        raise ImportError(
+            f"{CROSS_MARK} TurboAPI requires Python 3.14+.\n"
+            f"   Current: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n"
+            f"\n"
+            f"   Install:\n"
+            f"     uv python install 3.14t   # recommended (free-threaded)\n"
+            f"     uv python install 3.14    # also works\n"
+        )
+
+
+def check_free_threading_support():
+    """Raise ImportError if not running on a free-threading build."""
+    check_python_version()
+
+    if not _detect_free_threading():
+        raise ImportError(
+            f"{CROSS_MARK} TurboAPI requires a free-threading Python build (no-GIL).\n"
+            f"   Current: Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} (GIL enabled)\n"
+            f"\n"
+            f"   {THREAD} Free-threading gives you:\n"
+            f"     • 7x faster than FastAPI\n"
+            f"     • True multi-threaded parallelism\n"
+            f"     • Zig-native concurrency\n"
+            f"\n"
+            f"   Install:\n"
+            f"     uv python install 3.14t\n"
+            f"     python3.14t -m pip install turboapi\n"
+        )
+
+    v = sys.version_info
+    print(f"{CHECK_MARK} TurboAPI: Python {v.major}.{v.minor}.{v.micro} free-threading active")
+
+
+def get_python_threading_info() -> dict:
+    """Return diagnostic info about the Python runtime."""
+    ft = _detect_free_threading()
+    return {
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
-        "free_threading": _detect_free_threading(),
-        "gil_enabled": not _detect_free_threading(),
-        "threading_native_id": hasattr(threading._thread, "get_native_id")
-        if hasattr(threading, "_thread")
-        else False,
-        "implementation": sys.implementation.name if hasattr(sys, "implementation") else "unknown",
+        "free_threading": ft,
+        "gil_enabled": not ft,
+        "implementation": getattr(sys, "implementation", type("", (), {"name": "unknown"})).name,
     }
 
-    # Add performance prediction
-    if info["free_threading"]:
-        info["performance_multiplier"] = "5-10x FastAPI"
-        info["concurrency"] = "True parallelism"
-        info["gil_overhead"] = "Zero (Zig-native)"
-    else:
-        info["performance_multiplier"] = "Limited by GIL"
-        info["concurrency"] = "Serialized threads"
-        info["gil_overhead"] = "High (Python bottleneck)"
 
-    return info
+# ── Auto-check on import ────────────────────────────────────────────────────
 
-
-# Perform the check when module is imported
 if __name__ != "__main__":
-    try:
-        check_free_threading_support()
-    except ImportError as e:
-        # Re-raise with additional context
-        raise ImportError(
-            f"{e}\n\n"
-            f"{BULB} TurboAPI is designed exclusively for free-threading Python builds.\n"
-            f"   This ensures maximum performance and true parallelism.\n"
-            f"   \n"
-            f"   {TARGET} Why free-threading only?\n"
-            f"     • 5-10x performance gains over FastAPI\n"
-            f"     • True multi-threading without GIL bottlenecks\n"
-            f"     • Zig-native concurrency integration\n"
-            f"     • Future-proof architecture\n"
-            f"   \n"
-            f"   {BOOK} Setup Guide: PYTHON_FREE_THREADING_GUIDE.md\n"
-        ) from e
-
+    check_free_threading_support()
 
 if __name__ == "__main__":
-    # Direct execution - show diagnostic information
-    print(f"{MAG} TurboAPI Python Free-Threading Compatibility Check")
-    print("=" * 60)
-
+    print(f"{MAG} TurboAPI Python Compatibility Check")
+    print("=" * 50)
     info = get_python_threading_info()
-
-    print(f"Python Version: {info['python_version']}")
-    print(f"Implementation: {info['implementation']}")
-    print(
-        f"Free-Threading: {CHECK_MARK + ' YES' if info['free_threading'] else CROSS_MARK + ' NO'}"
-    )
-    print(f"GIL Enabled: {CROSS_MARK + ' YES' if info['gil_enabled'] else CHECK_MARK + ' NO'}")
-    print(
-        f"Native Thread ID: {CHECK_MARK + ' YES' if info['threading_native_id'] else CROSS_MARK + ' NO'}"
-    )
+    print(f"Python:         {info['python_version']}")
+    print(f"Free-threading: {'YES' if info['free_threading'] else 'NO'}")
+    print(f"GIL:            {'disabled' if info['free_threading'] else 'enabled'}")
     print()
-    print(f"Expected Performance: {info['performance_multiplier']}")
-    print(f"Concurrency Model: {info['concurrency']}")
-    print(f"GIL Overhead: {info['gil_overhead']}")
-
-    print("\n" + "=" * 60)
-
     try:
         check_free_threading_support()
-        print(f"{PARTY} TurboAPI compatibility: PASSED")
-        print(f"{ROCKET} Ready for revolutionary performance!")
+        print(f"{PARTY} Compatible — ready for 7x FastAPI performance!")
     except ImportError as e:
-        print(f"{CROSS_MARK} TurboAPI compatibility: FAILED")
+        print(f"{CROSS_MARK} Not compatible")
         print(f"   {e}")

@@ -211,7 +211,7 @@ class Router:
         """OPTIONS route decorator."""
         return self._create_route_decorator(HTTPMethod.OPTIONS)(path, **kwargs)
 
-    def include_router(self, router: "Router", prefix: str = "", tags: list[str] = None):
+    def include_router(self, router: Router, prefix: str = "", tags: list[str] = None):
         """Include another router's routes."""
         for route in router.registry.get_routes():
             # Create new route with updated prefix and tags

@@ -6,11 +6,9 @@ Compares the core validation performance between TurboAPI (dhi) and FastAPI (Pyd
 This is the foundational performance difference between the frameworks.
 """
 
-import time
-import sys
 import json
+import time
 from dataclasses import dataclass
-from typing import Optional
 
 # Import validation libraries
 import dhi
@@ -170,7 +168,12 @@ def main():
     # ================================================================
     # Test 6: Large List Validation
     # ================================================================
-    large_list_data = {"id": 1, "name": "Test", "email": "test@example.com", "tags": list(range(100))}
+    large_list_data = {
+        "id": 1,
+        "name": "Test",
+        "email": "test@example.com",
+        "tags": list(range(100)),
+    }
 
     result = run_benchmark(
         "Large List Field",
@@ -196,7 +199,9 @@ def main():
         total_dhi += r.dhi_time_ms
         total_pydantic += r.pydantic_time_ms
         speedup_str = f"{r.speedup:.2f}x" if r.speedup >= 1 else f"{r.speedup:.2f}x"
-        print(f"{r.name:<25} {r.dhi_time_ms:>8.1f}ms {r.pydantic_time_ms:>10.1f}ms {speedup_str:>10}")
+        print(
+            f"{r.name:<25} {r.dhi_time_ms:>8.1f}ms {r.pydantic_time_ms:>10.1f}ms {speedup_str:>10}"
+        )
 
     print("-" * 70)
     overall_speedup = total_pydantic / total_dhi if total_dhi > 0 else 0
@@ -208,7 +213,7 @@ def main():
     if overall_speedup >= 1:
         print(f"✓ dhi is {overall_speedup:.2f}x FASTER than Pydantic overall!")
     else:
-        print(f"✗ dhi is {1/overall_speedup:.2f}x slower than Pydantic overall")
+        print(f"✗ dhi is {1 / overall_speedup:.2f}x slower than Pydantic overall")
 
     # Save results as JSON
     results_json = {
@@ -234,7 +239,7 @@ def main():
 
     with open("benchmarks/results_validation.json", "w") as f:
         json.dump(results_json, f, indent=2)
-    print(f"\nResults saved to benchmarks/results_validation.json")
+    print("\nResults saved to benchmarks/results_validation.json")
 
 
 if __name__ == "__main__":
