@@ -137,6 +137,30 @@ class ZigIntegratedTurboAPI(TurboAPI):
         """Decorator for PATCH routes - FastAPI-like syntax."""
         return super().patch(path, **kwargs)
 
+    def native_route(self, method: str, path: str, lib_path: str, symbol_name: str):
+        """Register a native FFI handler — bypasses Python entirely.
+
+        The shared library must export a function matching the turboapi_ffi.h
+        contract. The handler runs on the Zig request thread with no GIL.
+
+        Args:
+            method: HTTP method ("GET", "POST", etc.)
+            path: URL path pattern (supports {param} syntax)
+            lib_path: Path to the shared library (.so/.dylib)
+            symbol_name: Exported symbol name of the handler function
+
+        Usage:
+            app.native_route("GET", "/health", "./libhandlers.dylib", "handle_health")
+        """
+        import os
+        abs_path = os.path.abspath(lib_path)
+        if not os.path.exists(abs_path):
+            print(f"{CROSS_MARK} Native lib not found: {abs_path}")
+            return
+        self._native_routes = getattr(self, '_native_routes', [])
+        self._native_routes.append((method.upper(), path, abs_path, symbol_name))
+        print(f"{CHECK_MARK} [native] {method.upper()} {path} -> {os.path.basename(lib_path)}:{symbol_name}")
+
     def configure_rate_limiting(self, enabled: bool = False, requests_per_minute: int = 1000000):
         """Configure rate limiting for the server.
 
@@ -195,7 +219,13 @@ class ZigIntegratedTurboAPI(TurboAPI):
             # Register all routes with Zig server
             self._register_routes_with_zig()
 
-            print(f"{CHECK_MARK} Zig server initialized with {len(self.registry.get_routes())} routes")
+            # Register native FFI routes
+            for method, path, lib_path, symbol in getattr(self, '_native_routes', []):
+                self.zig_server.add_native_route(method, path, lib_path, symbol)
+
+            native_count = len(getattr(self, '_native_routes', []))
+            py_count = len(self.registry.get_routes())
+            print(f"{CHECK_MARK} Zig server initialized with {py_count} Python + {native_count} native routes")
             return True
 
         except Exception as e:

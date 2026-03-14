@@ -36,7 +36,47 @@ const PythonResponse = struct {
     }
 };
 
+// ── FFI native handler types (matching turboapi_ffi.h) ──────────────────────
+
+const FfiRequest = extern struct {
+    method: [*c]const u8,
+    method_len: usize,
+    path: [*c]const u8,
+    path_len: usize,
+    query_string: [*c]const u8,
+    query_len: usize,
+    body: [*c]const u8,
+    body_len: usize,
+    header_names: [*c]const [*c]const u8,
+    header_name_lens: [*c]const usize,
+    header_values: [*c]const [*c]const u8,
+    header_value_lens: [*c]const usize,
+    header_count: usize,
+    param_names: [*c]const [*c]const u8,
+    param_name_lens: [*c]const usize,
+    param_values: [*c]const [*c]const u8,
+    param_value_lens: [*c]const usize,
+    param_count: usize,
+};
+
+const FfiResponse = extern struct {
+    status_code: u16,
+    content_type: [*c]const u8,
+    content_type_len: usize,
+    body: [*c]const u8,
+    body_len: usize,
+};
+
+const NativeHandlerFn = *const fn (*const FfiRequest) callconv(.c) FfiResponse;
+const NativeInitFn = *const fn () callconv(.c) c_int;
+
+const NativeHandlerEntry = struct {
+    handler_fn: NativeHandlerFn,
+    lib_handle: *anyopaque,
+};
+
 var routes: ?std.StringHashMap(HandlerEntry) = null;
+var native_routes: ?std.StringHashMap(NativeHandlerEntry) = null;
 var router: ?router_mod.Router = null;
 var server_host: []const u8 = "127.0.0.1";
 var server_port: u16 = 8000;
@@ -46,6 +86,13 @@ fn getRoutes() *std.StringHashMap(HandlerEntry) {
         routes = std.StringHashMap(HandlerEntry).init(allocator);
     }
     return &routes.?;
+}
+
+fn getNativeRoutes() *std.StringHashMap(NativeHandlerEntry) {
+    if (native_routes == null) {
+        native_routes = std.StringHashMap(NativeHandlerEntry).init(allocator);
+    }
+    return &native_routes.?;
 }
 
 fn getRouter() *router_mod.Router {
@@ -186,6 +233,80 @@ pub fn server_add_route_async_fast(_: ?*c.PyObject, args: ?*c.PyObject) callconv
     return server_add_route_fast(null, args);
 }
 
+// ── add_native_route(method, path, lib_path, symbol_name) ───────────────────
+
+pub fn server_add_native_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var method: [*c]const u8 = null;
+    var path: [*c]const u8 = null;
+    var lib_path: [*c]const u8 = null;
+    var symbol_name: [*c]const u8 = null;
+    if (c.PyArg_ParseTuple(args, "ssss", &method, &path, &lib_path, &symbol_name) == 0) return null;
+
+    const method_s = std.mem.span(method);
+    const path_s = std.mem.span(path);
+    const lib_path_s = std.mem.span(lib_path);
+    const symbol_name_s = std.mem.span(symbol_name);
+
+    // dlopen the shared library
+    const lib_path_z = allocator.dupeZ(u8, lib_path_s) catch {
+        py.setError("OOM for lib path", .{});
+        return null;
+    };
+    defer allocator.free(lib_path_z);
+
+    const handle = std.c.dlopen(lib_path_z, .{}) orelse {
+        py.setError("dlopen failed for {s}", .{lib_path_s});
+        return null;
+    };
+
+    // Try to call turboapi_init if it exists
+    const init_sym = std.c.dlsym(handle, "turboapi_init");
+    if (init_sym) |sym| {
+        const init_fn: NativeInitFn = @ptrCast(@alignCast(sym));
+        const rc = init_fn();
+        if (rc != 0) {
+            py.setError("turboapi_init returned {d}", .{rc});
+            _ = std.c.dlclose(handle);
+            return null;
+        }
+    }
+
+    // Resolve the handler symbol
+    const sym_z = allocator.dupeZ(u8, symbol_name_s) catch {
+        py.setError("OOM for symbol name", .{});
+        _ = std.c.dlclose(handle);
+        return null;
+    };
+    defer allocator.free(sym_z);
+
+    const handler_sym = std.c.dlsym(handle, sym_z) orelse {
+        py.setError("dlsym failed for {s} in {s}", .{ symbol_name_s, lib_path_s });
+        _ = std.c.dlclose(handle);
+        return null;
+    };
+    const handler_fn: NativeHandlerFn = @ptrCast(@alignCast(handler_sym));
+
+    // Register in router + native_routes
+    const key = std.fmt.allocPrint(allocator, "{s} {s}", .{ method_s, path_s }) catch {
+        _ = std.c.dlclose(handle);
+        return null;
+    };
+    getNativeRoutes().put(key, .{
+        .handler_fn = handler_fn,
+        .lib_handle = handle,
+    }) catch {
+        _ = std.c.dlclose(handle);
+        return null;
+    };
+    getRouter().addRoute(method_s, path_s, key) catch {
+        _ = std.c.dlclose(handle);
+        return null;
+    };
+
+    std.debug.print("[FFI] Registered native handler: {s} {s} -> {s}:{s}\n", .{ method_s, path_s, lib_path_s, symbol_name_s });
+    return py.pyNone();
+}
+
 // ── add_middleware(middleware_obj) – currently a no-op ──
 
 pub fn server_add_middleware(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
@@ -297,6 +418,18 @@ fn handleConnection(stream: std.net.Stream) void {
     };
     defer match.deinit();
 
+    // Check native (FFI) routes first — no GIL, no Python, zero overhead
+    const nr = getNativeRoutes();
+    if (nr.get(match.handler_key)) |native_entry| {
+        std.debug.print("[FFI] native handler for {s}\n", .{match.handler_key});
+        const ffi_resp = callNativeHandler(native_entry, method, path, query_string, body, headers.items, &match.params);
+        const resp_ct = ffi_resp.content_type[0..ffi_resp.content_type_len];
+        const resp_body = ffi_resp.body[0..ffi_resp.body_len];
+        sendResponse(stream, ffi_resp.status_code, resp_ct, resp_body);
+        return;
+    }
+
+    // Fall through to Python handler
     const r = getRoutes();
     const entry = r.get(match.handler_key) orelse {
         std.debug.print("[ZIG] handler entry missing for key: {s}\n", .{match.handler_key});
@@ -309,6 +442,90 @@ fn handleConnection(stream: std.net.Stream) void {
     std.debug.print("[ZIG] handler returned status={d}\n", .{resp.status_code});
     sendResponse(stream, resp.status_code, resp.content_type, resp.body);
 }
+
+// ── FFI native handler dispatch (no GIL, no Python) ─────────────────────────
+
+fn callNativeHandler(
+    entry: NativeHandlerEntry,
+    method: []const u8,
+    path: []const u8,
+    query_string: []const u8,
+    body: []const u8,
+    headers: []const HeaderPair,
+    params: *const std.StringHashMap([]const u8),
+) FfiResponse {
+    // Build parallel arrays for headers
+    const hcount = headers.len;
+    const h_names = allocator.alloc([*c]const u8, hcount) catch return ffiError();
+    defer allocator.free(h_names);
+    const h_name_lens = allocator.alloc(usize, hcount) catch return ffiError();
+    defer allocator.free(h_name_lens);
+    const h_values = allocator.alloc([*c]const u8, hcount) catch return ffiError();
+    defer allocator.free(h_values);
+    const h_value_lens = allocator.alloc(usize, hcount) catch return ffiError();
+    defer allocator.free(h_value_lens);
+
+    for (headers, 0..) |h, i| {
+        h_names[i] = h.name.ptr;
+        h_name_lens[i] = h.name.len;
+        h_values[i] = h.value.ptr;
+        h_value_lens[i] = h.value.len;
+    }
+
+    // Build parallel arrays for path params
+    var p_names_list: std.ArrayListUnmanaged([*c]const u8) = .empty;
+    defer p_names_list.deinit(allocator);
+    var p_name_lens_list: std.ArrayListUnmanaged(usize) = .empty;
+    defer p_name_lens_list.deinit(allocator);
+    var p_values_list: std.ArrayListUnmanaged([*c]const u8) = .empty;
+    defer p_values_list.deinit(allocator);
+    var p_value_lens_list: std.ArrayListUnmanaged(usize) = .empty;
+    defer p_value_lens_list.deinit(allocator);
+
+    var pit = params.iterator();
+    while (pit.next()) |pe| {
+        p_names_list.append(allocator, pe.key_ptr.*.ptr) catch continue;
+        p_name_lens_list.append(allocator, pe.key_ptr.*.len) catch continue;
+        p_values_list.append(allocator, pe.value_ptr.*.ptr) catch continue;
+        p_value_lens_list.append(allocator, pe.value_ptr.*.len) catch continue;
+    }
+
+    const ffi_req = FfiRequest{
+        .method = method.ptr,
+        .method_len = method.len,
+        .path = path.ptr,
+        .path_len = path.len,
+        .query_string = query_string.ptr,
+        .query_len = query_string.len,
+        .body = body.ptr,
+        .body_len = body.len,
+        .header_names = h_names.ptr,
+        .header_name_lens = h_name_lens.ptr,
+        .header_values = h_values.ptr,
+        .header_value_lens = h_value_lens.ptr,
+        .header_count = hcount,
+        .param_names = p_names_list.items.ptr,
+        .param_name_lens = p_name_lens_list.items.ptr,
+        .param_values = p_values_list.items.ptr,
+        .param_value_lens = p_value_lens_list.items.ptr,
+        .param_count = p_names_list.items.len,
+    };
+
+    return entry.handler_fn(&ffi_req);
+}
+
+fn ffiError() FfiResponse {
+    const body = "{\"error\": \"FFI dispatch error\"}";
+    return .{
+        .status_code = 500,
+        .content_type = "application/json",
+        .content_type_len = 16,
+        .body = body,
+        .body_len = body.len,
+    };
+}
+
+// ── Python handler dispatch ─────────────────────────────────────────────────
 
 fn callPythonHandler(entry: HandlerEntry, method: []const u8, path: []const u8, query_string: []const u8, body: []const u8, headers: []const HeaderPair, params: *const std.StringHashMap([]const u8)) PythonResponse {
     const err_body = "{\"error\": \"Internal Server Error\"}";
