@@ -16,7 +16,7 @@ except ImportError:
 
 from .main_app import TurboAPI
 from .models import Request, Response
-from .request_handler import create_enhanced_handler, create_fast_handler, ResponseHandler
+from .request_handler import create_enhanced_handler, create_fast_handler, create_fast_model_handler, ResponseHandler
 from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
 
 
@@ -441,9 +441,14 @@ class ZigIntegratedTurboAPI(TurboAPI):
 
                 if handler_type == "model_sync":
                     # FAST MODEL PATH: Zig validates JSON natively via dhi, then calls Python
-                    enhanced_handler = create_enhanced_handler(route.handler, route)
                     if self._middleware_instances:
+                        enhanced_handler = create_enhanced_handler(route.handler, route)
                         enhanced_handler = self._wrap_with_middleware(enhanced_handler)
+                    else:
+                        # Minimal handler: json.loads → Model(**data) → handler(model) → json.dumps
+                        enhanced_handler = create_fast_model_handler(
+                            route.handler, model_info["model_class"], model_info["param_name"],
+                        )
 
                     # Extract dhi model schema for Zig-native validation
                     schema_json = _extract_model_schema(model_info["model_class"])

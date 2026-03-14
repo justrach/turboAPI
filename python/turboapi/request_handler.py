@@ -901,3 +901,45 @@ def create_fast_handler(original_handler, route_definition):
             return {"content": _dumps({"error": str(e)}), "status_code": 500}
 
     return fast_handler
+
+
+def create_fast_model_handler(original_handler, model_class, param_name):
+    """Create a minimal handler for model_sync routes.
+
+    Zig has already validated the JSON body against the schema.
+    We just need to: json.loads -> model_class(**data) -> handler -> json.dumps.
+    User gets a real model instance with all methods -- zero DX change.
+    """
+    import json as _json
+    _loads = _json.loads
+    _dumps = _json.dumps
+
+    def fast_model_handler(**kwargs):
+        try:
+            body = kwargs.get("body", b"")
+            if not body:
+                return {"content": _dumps({"detail": "Request body is empty"}), "status_code": 400}
+
+            # Zig already validated -- parse and instantiate model
+            data = _loads(body)
+            model = model_class(**data)
+
+            # Call handler with model instance
+            result = original_handler(**{param_name: model})
+
+            # Serialize response
+            if hasattr(result, 'model_dump'):
+                result = result.model_dump()
+            if isinstance(result, tuple) and len(result) == 2:
+                return {"content": _dumps(result[0]), "status_code": result[1]}
+            return {"content": _dumps(result), "status_code": 200}
+        except Exception as e:
+            try:
+                from turboapi.security import HTTPException
+                if isinstance(e, HTTPException):
+                    return {"content": _dumps({"detail": e.detail}), "status_code": e.status_code}
+            except ImportError:
+                pass
+            return {"content": _dumps({"error": str(e)}), "status_code": 500}
+
+    return fast_model_handler

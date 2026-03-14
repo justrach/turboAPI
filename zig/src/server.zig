@@ -639,10 +639,10 @@ fn handleOneRequest(stream: std.net.Stream) !void {
         }
     }
 
-    // Use fast dispatch for simple_sync/body_sync handlers — writes response
-    // directly to stream while still holding the GIL (zero-copy from Python string)
+    // Use fast dispatch for simple_sync/body_sync/model_sync handlers —
+    // writes response directly to stream while holding the GIL (zero-copy)
     const ht = entry.handler_type;
-    if (std.mem.eql(u8, ht, "simple_sync") or std.mem.eql(u8, ht, "body_sync")) {
+    if (std.mem.eql(u8, ht, "simple_sync") or std.mem.eql(u8, ht, "body_sync") or std.mem.eql(u8, ht, "model_sync")) {
         callPythonHandlerDirect(entry, query_string, body, &match.params, stream);
         return;
     }
