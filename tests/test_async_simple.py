@@ -4,7 +4,7 @@ Simple Async Handler Test
 Verifies that async handlers are awaited (no coroutine objects returned)
 
 This is a MINIMAL test to confirm the async bug is fixed.
-Full async support with query params/headers requires Rust updates.
+Full async support with query params/headers via Zig HTTP core.
 """
 
 import time

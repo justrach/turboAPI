@@ -7,7 +7,7 @@ Welcome to the TurboAPI documentation! This directory contains detailed guides f
 | Document | Description |
 |----------|-------------|
 | [Architecture](./ARCHITECTURE.md) | Internal architecture and component breakdown |
-| [Async Handlers](./ASYNC_HANDLERS.md) | How async handlers work with Tokio |
+| [Async Handlers](./ASYNC_HANDLERS.md) | How async handlers work |
 | [Benchmarks](./BENCHMARKS.md) | Benchmark suite and performance results |
 | [Performance Tuning](./PERFORMANCE_TUNING.md) | Optimization guide for production |
 
@@ -30,7 +30,7 @@ Welcome to the TurboAPI documentation! This directory contains detailed guides f
 
 1. **Installation**: `pip install turboapi`
 2. **Hello World**: See [Quick Start](../README.md#quick-start)
-3. **Async Handlers**: Learn about [Tokio-powered async](./ASYNC_HANDLERS.md)
+3. **Async Handlers**: Learn about [async handlers](./ASYNC_HANDLERS.md)
 4. **Optimization**: Follow the [Performance Tuning Guide](./PERFORMANCE_TUNING.md)
 
 ## Contributing

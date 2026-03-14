@@ -114,7 +114,7 @@ Client Request (HTTP/2)
         ↓
    TLS Handshake + ALPN
         ↓
-   h2 Frame Parser (Rust)
+   h2 Frame Parser (planned)
         ↓
    Stream Manager
         ↓
@@ -151,4 +151,4 @@ app.configure_http2(
 
 - [TLS Setup](./TLS_SETUP.md)
 - [Architecture](./ARCHITECTURE.md)
-- [Hyper HTTP/2 Documentation](https://hyper.rs/)
+- [RFC 9113 - HTTP/2](https://datatracker.ietf.org/doc/html/rfc9113)

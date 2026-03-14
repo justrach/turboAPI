@@ -118,24 +118,11 @@ async def broadcast_handler(websocket):
         connected_clients.remove(websocket)
 ```
 
-## Rust Integration
+## Zig Integration
 
-TurboAPI's WebSocket uses tokio-tungstenite for high performance:
+TurboAPI's WebSocket support is planned for the Zig backend:
 
-```
-┌─────────────────────────────────────────┐
-│          Python Handler                  │
-│     async def handler(websocket):        │
-├─────────────────────────────────────────┤
-│          PyO3 Bridge                     │
-│   WebSocketConnection bindings           │
-├─────────────────────────────────────────┤
-│       tokio-tungstenite (Rust)          │
-│   • Async message sending/receiving      │
-│   • Frame encoding/decoding             │
-│   • Ping/pong handling                  │
-└─────────────────────────────────────────┘
-```
+WebSocket support is planned for the Zig HTTP core (Issue #24).
 
 ## Performance Tips
 
@@ -203,4 +190,4 @@ async def secure_handler(websocket):
 
 - [Architecture](./ARCHITECTURE.md)
 - [Async Handlers](./ASYNC_HANDLERS.md)
-- [hyper-tungstenite Documentation](https://docs.rs/hyper-tungstenite/)
+- [RFC 6455 - WebSocket Protocol](https://datatracker.ietf.org/doc/html/rfc6455)

@@ -38,7 +38,7 @@ class Response:
         return content.encode(self.charset)
 
     def model_dump(self) -> Any:
-        """Return the content for JSON serialization (used by Rust SIMD JSON)."""
+        """Return the content for JSON serialization."""
         # Decode body back to content
         if isinstance(self.body, bytes):
             try:

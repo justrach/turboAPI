@@ -16,7 +16,7 @@ setup(
     packages=find_packages(),
     python_requires=">=3.12",  # Will be 3.14+ when no-GIL is stable
     install_requires=[
-        # The Rust extension will be built separately
+        # The Zig extension is built separately via zig/build_turbonet.py
     ],
     extras_require={
         "dev": [
@@ -37,9 +37,9 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.14",
-        "Programming Language :: Rust",
+        "Programming Language :: Other :: Zig",
         "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
         "Topic :: Software Development :: Libraries :: Application Frameworks",
     ],
-    keywords="web framework http server rust performance no-gil",
+    keywords="web framework http server zig performance no-gil free-threading",
 )

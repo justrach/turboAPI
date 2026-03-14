@@ -152,7 +152,7 @@ The benchmark suite integrates with GitHub Actions for automated performance reg
 ## Requirements
 
 - **Python 3.13+** (free-threading recommended for TurboAPI)
-- **TurboAPI** - `pip install -e python/` + `maturin develop`
+- **TurboAPI** - `pip install -e python/`
 - **FastAPI** - `pip install fastapi uvicorn`
 - **requests** - `pip install requests`
 

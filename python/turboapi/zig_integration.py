@@ -89,7 +89,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
         if method in ("POST", "PUT", "PATCH", "DELETE"):
             return "model_sync", param_types, model_info
 
-    # Async handlers - Phase 4 async fast paths via Tokio
+    # Async handlers - async fast paths
     if is_async:
         if method in ("POST", "PUT", "PATCH", "DELETE"):
             if needs_body:
@@ -492,7 +492,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
                     )
                     print(f"{CHECK_MARK} [{handler_type}] {route.method.value} {route.path}")
                 elif handler_type in ("simple_async", "body_async"):
-                    # ASYNC FAST PATH: Register with Tokio async runtime
+                    # ASYNC FAST PATH: Register with async runtime
                     enhanced_handler = create_enhanced_handler(route.handler, route)
                     if self._middleware_instances:
                         enhanced_handler = self._wrap_with_middleware(enhanced_handler)

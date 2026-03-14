@@ -315,7 +315,7 @@ Key Findings:
 - Concurrent requests: Async handlers scale better under load
 - High concurrency: Async handlers maintain lower latency at scale
 
-The async fast paths in TurboAPI use Tokio's work-stealing scheduler
+The async fast paths in TurboAPI use Zig's thread pool
 for efficient concurrent execution without Python GIL contention.
 """)
     print("=" * 70)

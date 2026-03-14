@@ -273,7 +273,7 @@ def run_benchmarks():
     ]
 
     # Run TurboAPI benchmarks
-    print("\n--- TurboAPI (Rust + Python 3.13 Free-Threading) ---")
+    print("\n--- TurboAPI (Zig + Python 3.14 Free-Threading) ---")
     try:
         turbo_proc = start_server(
             ['python', '/tmp/turboapi_bench.py'],

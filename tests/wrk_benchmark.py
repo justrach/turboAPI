@@ -47,10 +47,10 @@ def start_server(script_path, port, server_name):
     else:
         # TurboAPI with free-threading Python - disable rate limiting for benchmarking
         env = os.environ.copy()
-        env["PYTHONPATH"] = "/Users/rachpradhan/rusty/turboAPI/python"
+        env["PYTHONPATH"] = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python")
         env["TURBO_DISABLE_RATE_LIMITING"] = "1"  # Environment flag
         process = subprocess.Popen([
-            "/Users/rachpradhan/rusty/turboAPI/turbo-freethreaded/bin/python", script_path
+            sys.executable, script_path
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     
     # Wait for server to start
@@ -360,7 +360,7 @@ def main():
     print("\n🚀 TURBOAPI BENCHMARKS")
     print("-" * 40)
     
-    turbo_process = start_server("/Users/rachpradhan/rusty/turboAPI/tests/test.py", 8080, "TurboAPI")
+    turbo_process = start_server(os.path.join(os.path.dirname(os.path.abspath(__file__)), "test.py"), 8080, "TurboAPI")
     if turbo_process:
         results["TurboAPI"] = {}
         
@@ -387,7 +387,7 @@ def main():
     print("\n⚡ FASTAPI BENCHMARKS")
     print("-" * 40)
     
-    fastapi_process = start_server("/Users/rachpradhan/rusty/turboAPI/tests/fastapi_equivalent.py", 8081, "FastAPI")
+    fastapi_process = start_server(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fastapi_equivalent.py"), 8081, "FastAPI")
     if fastapi_process:
         results["FastAPI"] = {}
         

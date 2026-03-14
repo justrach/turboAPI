@@ -112,7 +112,7 @@ def ensure_event_loop() -> asyncio.AbstractEventLoop:
     """
     Ensure an event loop exists for the current thread.
     
-    This is the primary function to call from Rust to get an event loop.
+    This is the primary function to call from Zig to get an event loop.
     
     Returns:
         The event loop for the current thread.

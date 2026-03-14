@@ -35,7 +35,7 @@ def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "runtime": "Pure Rust Async (Tokio)",
+        "runtime": "Zig HTTP Core",
         "performance": "12x faster than baseline"
     }
 
@@ -73,7 +73,7 @@ async def async_data():
     return {
         "type": "async",
         "message": "Data fetched asynchronously",
-        "scheduler": "Tokio work-stealing",
+        "scheduler": "Zig thread pool",
         "performance": "24K+ RPS"
     }
 
@@ -189,7 +189,7 @@ async def get_stats():
         "avg_latency_ms": 1.98,
         "rps": 24_240,
         "uptime_hours": 720,
-        "runtime": "Tokio",
+        "runtime": "Zig",
         "cpu_cores": 14,
         "concurrent_capacity": 7_168
     }
@@ -250,5 +250,5 @@ if __name__ == "__main__":
     print("=" * 60)
     print()
     
-    # Start server with Pure Rust Async Runtime
+    # Start server with Zig HTTP core
     app.run(host="127.0.0.1", port=8000)

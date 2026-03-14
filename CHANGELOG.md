@@ -9,11 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Async Handler Fast Paths** - True async support via Tokio runtime
+- **Async Handler Fast Paths** - True async support via Zig thread pool
   - `SimpleAsyncFast` handler type for GET async handlers
   - `BodyAsyncFast` handler type for POST/PUT async handlers
   - `add_route_async_fast()` method for async handler registration
-  - pyo3-async-runtimes integration for Python coroutine conversion
   - Automatic handler classification for sync vs async detection
 
 - **HTTP/2 Support** - Full HTTP/2 implementation
@@ -21,9 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Server push capabilities via `ServerPush`
   - Stream multiplexing for concurrent requests
 
-- **TLS Support** - Secure HTTPS connections
-  - rustls backend (default, pure Rust)
-  - Optional OpenSSL backend via feature flag
+- **TLS Support** - Secure HTTPS connections (planned)
   - PEM certificate and key loading
 
 - **WebSocket Improvements** - Better message handling
@@ -34,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Comprehensive Benchmarks** - Performance testing suite
   - `python_benchmark.py` - Full framework benchmarks
   - `async_comparison_bench.py` - Sync vs async comparison
-  - `performance_bench.rs` - Low-level Rust benchmarks
+  - Zig-native JSON parsing benchmarks
 
 - **Documentation**
   - `docs/ASYNC_HANDLERS.md` - Async handler guide
@@ -45,12 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Handler classification now detects coroutine functions
-- Async handlers route through Tokio instead of Enhanced path
-- Simplified TokioRuntime (removed loop sharding complexity)
+- Async handlers route through Zig thread pool instead of Enhanced path
+- Simplified runtime (removed loop sharding complexity)
 
 ### Performance
 
-- Async handlers use Tokio work-stealing scheduler
+- Async handlers use Zig 8-thread worker pool
 - Sequential latency: 1.3-1.4x faster than FastAPI
 - Concurrent latency: 1.2-1.8x faster than FastAPI
 - JSON endpoints show largest improvement (1.8x concurrent)
@@ -83,13 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Documentation updated with proper v0.3.1 installation instructions
-- Version consistency across Cargo.toml and pyproject.toml
+- Version consistency in pyproject.toml
 
 ## [0.3.0] - 2025-09-28
 
 ### Added
 - Initial release with FastAPI-compatible syntax
-- Rust-powered HTTP core for maximum performance
+- Zig-powered HTTP core for maximum performance
 - Python 3.13+ free-threading support
 - 5-10x performance improvement over FastAPI
 - Zero-copy optimizations and intelligent caching

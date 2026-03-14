@@ -1,121 +1,68 @@
 # TurboAPI GitHub Actions Workflows
 
-This directory contains GitHub Actions workflows for building, testing, and releasing TurboAPI.
-
 ## Workflows
 
-### 1. `ci.yml` - Continuous Integration
-**Triggers:** Push to `main`/`develop`, Pull Requests to `main`
+### `ci.yml` — Continuous Integration
+**Triggers:** Push to `main`/`feature/zig-backend`, PRs to `main`
 
-**What it does:**
-- Tests Rust components (formatting, clippy, tests)
-- Tests Python components (build, import tests)
-- Builds wheels for all platforms
-- Runs performance benchmarks
+Runs tests across Python 3.13, 3.14, and 3.14t (free-threaded) on Ubuntu and macOS. Also runs Zig unit tests and a thread-safety stress test.
 
-### 2. `build-wheels.yml` - Build and Publish Wheels
-**Triggers:** Push to tags (`v*`), Manual dispatch
+### `pre-release.yml` — Beta Release
+**Triggers:** Push to `feature/zig-backend`, manual dispatch
 
-**What it does:**
-- Builds wheels for all platforms (Linux x86_64/ARM64, macOS Intel/ARM, Windows)
-- Tests wheel installation
-- Publishes to PyPI
-- Creates GitHub releases
+1. Runs the full test matrix
+2. Auto-computes a beta version from commit count (e.g. `0.7.0b12`)
+3. Builds an sdist and publishes to PyPI as a pre-release
 
-### 3. `release.yml` - Release Process
-**Triggers:** Manual dispatch with version bump selection
+Install a beta: `pip install turboapi==0.7.0b1`
 
-**What it does:**
-- Bumps version in `python/pyproject.toml` and `Cargo.toml`
-- Creates git tag
-- Triggers wheel building workflow
-- Updates documentation
+### `release.yml` — Stable Release
+**Triggers:** Manual dispatch (choose patch/minor/major)
 
-### 4. `build-and-release.yml` - Streamlined Build and Release
-**Triggers:** Push to tags (`v*`), Manual dispatch
+1. Runs the full test matrix
+2. Bumps version in `pyproject.toml`
+3. Commits, tags (`v0.7.0`), and pushes
+4. Builds wheels for all platform × Python combos
+5. Publishes to PyPI + creates GitHub Release
 
-**What it does:**
-- All-in-one workflow for building and releasing
-- Builds wheels for all platforms
-- Tests installations
-- Publishes to PyPI
-- Creates GitHub releases with performance highlights
+### `build-and-release.yml` — Tag-triggered Build & Publish
+**Triggers:** Push tag `v*`
 
-## Platform Support
+Fallback for manual `git tag v0.7.0b3 && git push --tags`. Detects pre-release tags (containing `a`, `b`, `rc`, `dev`) and marks the GitHub Release accordingly.
 
-### Supported Platforms
-- **Linux:** x86_64, ARM64 (manylinux 2014)
-- **macOS:** Intel (x86_64), Apple Silicon (ARM64)
-- **Windows:** x64
+### `benchmark.yml` — Performance Benchmarks
+**Triggers:** Push to `main`, PRs to `main`, manual dispatch
 
-### Python Version
-- **Python 3.13+** (free-threading required for TurboAPI)
+Runs TurboAPI vs FastAPI benchmarks with `wrk`. Posts results as a PR comment.
 
-## Usage
+## Release Flow
 
-### Creating a Release
+```
+feature/zig-backend ──push──→ pre-release.yml ──→ PyPI 0.7.0b1 (beta)
+                     ──push──→ pre-release.yml ──→ PyPI 0.7.0b2 (beta)
+                     ──PR──→ main
+main                          release.yml (manual) ──→ PyPI 0.7.0 (stable)
+```
 
-#### Option 1: Manual Release Process
-1. Go to Actions → "Release Process"
-2. Click "Run workflow"
-3. Select version bump type (patch/minor/major)
-4. The workflow will:
-   - Bump versions
-   - Create and push git tag
-   - Trigger wheel building
-   - Publish to PyPI
+### Local release commands
 
-#### Option 2: Tag-based Release
-1. Create and push a version tag:
-   ```bash
-   git tag v2.0.1
-   git push origin v2.0.1
-   ```
-2. The `build-and-release.yml` workflow will automatically:
-   - Build wheels
-   - Test installations
-   - Publish to PyPI
-   - Create GitHub release
-
-### Testing Before Release
-1. Use the manual dispatch option in `build-wheels.yml`
-2. Set `test_pypi: true` to publish to Test PyPI first
-3. Test the installation from Test PyPI
+```bash
+make version        # show current version
+make bump-beta      # 0.7.0 → 0.7.0b1, 0.7.0b1 → 0.7.0b2
+make bump-patch     # 0.7.0 → 0.7.1
+make bump-minor     # 0.7.0 → 0.8.0
+make bump-major     # 0.7.0 → 1.0.0
+make pre-release    # run checks, bump beta, commit, tag (then push)
+```
 
 ## Secrets Required
 
-Add these secrets to your GitHub repository:
+- `PYPI_API_TOKEN` — PyPI API token for publishing
+- `GITHUB_TOKEN` — auto-provided by GitHub Actions
 
-- `PYPI_API_TOKEN` - PyPI API token for publishing
-- `TEST_PYPI_API_TOKEN` - Test PyPI API token (optional)
+## Platform × Python Matrix
 
-## Performance Highlights
-
-The workflows automatically include performance benchmarks in release notes:
-- **160K+ RPS** achieved in testing
-- **5-10x faster** than FastAPI
-- **True parallelism** with Python 3.13 free-threading
-- **Zero Python middleware overhead**
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Python 3.13 not available:** The workflows use Python 3.13 which is required for TurboAPI's free-threading features.
-
-2. **Maturin path issues:** All workflows use `--manifest-path python/pyproject.toml` to correctly locate the Python package.
-
-3. **Wheel compatibility:** The workflows build wheels with proper platform tags for maximum compatibility.
-
-### Debugging
-
-- Check the Actions tab for detailed logs
-- Wheel building failures are often due to missing system dependencies
-- Import test failures indicate packaging issues
-
-## Future Enhancements
-
-- [ ] Add Python 3.14 support when available
-- [ ] Add more comprehensive integration tests
-- [ ] Add automated performance regression detection
-- [ ] Add security scanning workflows
+| Platform | Python 3.13 | Python 3.14 | Python 3.14t |
+|----------|:-----------:|:-----------:|:------------:|
+| Ubuntu   | ✅          | ✅          | ✅           |
+| macOS    | ✅          | ✅          | ✅           |

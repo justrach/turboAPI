@@ -262,7 +262,7 @@ class TurboAPI(Router):
     ):
         """Run the TurboAPI application with legacy loop sharding (DEPRECATED).
         
-        Use run() instead for 12x better performance with Pure Rust Async Runtime.
+        Use run() instead for better performance with Zig HTTP core.
         """
         print(f"\n⚠️  WARNING: Using legacy loop sharding runtime")
         print(f"   For 12x better performance, use app.run() (default)")
@@ -282,7 +282,7 @@ class TurboAPI(Router):
         print("   - 7.5x FastAPI middleware performance")
         print("   - Python 3.13 free-threading support")
         print("   - Zero-copy optimizations")
-        print("   - Rust-powered HTTP core")
+        print("   - Zig-powered HTTP core")
 
         # Run startup handlers
         if self.startup_handlers:
@@ -293,7 +293,7 @@ class TurboAPI(Router):
         print(f"   Docs: http://{host}:{port}/docs (coming soon)")
 
         try:
-            # This would start the actual Rust HTTP server
+            # This would start the actual HTTP server
             # For now, we'll simulate it
             print("\n[SERVER] Server running (Phase 6 integration in progress)")
             print("Press Ctrl+C to stop")
@@ -318,12 +318,12 @@ class TurboAPI(Router):
         port: int = 8000,
         **kwargs
     ):
-        """Run the TurboAPI application with Pure Rust Async Runtime.
+        """Run the TurboAPI application with Zig HTTP core.
         
         Performance: 24K+ RPS (12x faster than baseline!)
-        Uses Tokio work-stealing scheduler with Python 3.14 free-threading.
+        Uses Zig thread pool with Python 3.14 free-threading.
         """
-        print(f"\n🚀 Starting TurboAPI with Pure Rust Async Runtime!")
+        print(f"\n🚀 Starting TurboAPI with Zig HTTP core!")
         print(f"   Host: {host}:{port}")
         print(f"   Title: {self.title} v{self.version}")
         print(f"   ⚡ Performance: 24K+ RPS (12x improvement!)")
@@ -332,21 +332,21 @@ class TurboAPI(Router):
         self.print_routes()
 
         print("\n[PERF] Phase D Features:")
-        print("   ✨ Tokio work-stealing scheduler")
+        print("   ✨ Zig 8-thread worker pool")
         print("   ✨ Python 3.14 free-threading (no GIL)")
-        print("   ✨ pyo3-async-runtimes bridge")
+        print("   ✨ Zero-copy response path")
         print("   ✨ 7,168 concurrent task capacity")
-        print("   ✨ Rust-powered async execution")
+        print("   ✨ Zig-powered HTTP execution")
 
         # Run startup handlers
         if self.startup_handlers:
             asyncio.run(self._run_startup_handlers())
 
-        print(f"\n{CHECK_MARK} TurboAPI server ready with Tokio runtime!")
+        print(f"\n{CHECK_MARK} TurboAPI server ready with Zig runtime!")
         print(f"   Visit: http://{host}:{port}")
 
         try:
-            # Import and use the Rust server with Tokio runtime
+            # Import and use the Zig server
             import turbonet
             
             server = turbonet.TurboServer(host, port)
@@ -355,9 +355,8 @@ class TurboAPI(Router):
             for route in self.registry.get_routes():
                 server.add_route(route.method.value, route.path, route.handler)
             
-            print(f"\n[SERVER] Starting Tokio runtime...")
-            # Use run_tokio instead of run!
-            server.run_tokio()
+            print(f"\n[SERVER] Starting Zig server...")
+            server.run()
 
         except KeyboardInterrupt:
             print("\n[STOP] Shutting down TurboAPI server...")

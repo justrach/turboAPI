@@ -1,6 +1,6 @@
 """
 TurboAPI HTTP Server Integration
-Connects FastAPI-compatible routing to Rust HTTP core with middleware pipeline
+Connects FastAPI-compatible routing to Zig HTTP core with middleware pipeline
 """
 
 import asyncio
@@ -13,12 +13,12 @@ from .main_app import TurboAPI
 from .version_check import CHECK_MARK, ROCKET
 
 try:
-    from turboapi import _rust as turbonet
-    RUST_CORE_AVAILABLE = True
+    from turboapi import turbonet
+    ZIG_CORE_AVAILABLE = True
 except ImportError:
-    RUST_CORE_AVAILABLE = False
+    ZIG_CORE_AVAILABLE = False
     turbonet = None
-    print("[WARN] Rust core not available - running in simulation mode")
+    print("[WARN] Zig core not available - running in simulation mode")
 
 class RequestContextAdapter:
     """Adapter to convert HTTP requests to middleware RequestContext."""
@@ -43,7 +43,7 @@ class RequestContextAdapter:
 
     def to_middleware_context(self):
         """Convert to middleware RequestContext."""
-        if RUST_CORE_AVAILABLE:
+        if ZIG_CORE_AVAILABLE:
             # Create actual RequestContext
             context = turbonet.RequestContext()
             context.method = self.method
@@ -89,8 +89,8 @@ class ResponseContextAdapter:
         else:
             body_bytes = b""
 
-        if RUST_CORE_AVAILABLE:
-            # Create actual Rust response
+        if ZIG_CORE_AVAILABLE:
+            # Create actual Zig response
             response = turbonet.ResponseView(self.status_code)
             for name, value in self.headers.items():
                 response.set_header(name, value)
@@ -113,7 +113,7 @@ class TurboHTTPServer:
         self.middleware_pipeline = None
 
         # Initialize middleware pipeline if available
-        if RUST_CORE_AVAILABLE:
+        if ZIG_CORE_AVAILABLE:
             try:
                 self.middleware_pipeline = turbonet.MiddlewarePipeline()
 
@@ -248,7 +248,7 @@ class TurboHTTPServer:
 
     async def _process_middleware_request(self, context):
         """Process request through middleware pipeline."""
-        if RUST_CORE_AVAILABLE:
+        if ZIG_CORE_AVAILABLE:
             # Use actual middleware pipeline
             try:
                 processed = await self.middleware_pipeline.process_request(context)
@@ -262,7 +262,7 @@ class TurboHTTPServer:
 
     async def _process_middleware_response(self, response_adapter):
         """Process response through middleware pipeline."""
-        if RUST_CORE_AVAILABLE:
+        if ZIG_CORE_AVAILABLE:
             # Use actual middleware pipeline
             try:
                 response_context = turbonet.ResponseContext()
@@ -397,7 +397,7 @@ class IntegratedTurboAPI(TurboAPI):
 
         # Print integration info
         print("\n[CONFIG] Integration Status:")
-        print(f"   Rust Core: {CHECK_MARK + ' Available' if RUST_CORE_AVAILABLE else '[WARN] Simulation Mode'}")
+        print(f"   Zig Core: {CHECK_MARK + ' Available' if ZIG_CORE_AVAILABLE else '[WARN] Simulation Mode'}")
         print(f"   Middleware Pipeline: {CHECK_MARK + ' Active' if self.http_server.middleware_pipeline else '[WARN] Simulated'}")
         print(f"   Route Registration: {CHECK_MARK} {len(self.registry.get_routes())} routes")
 
@@ -417,7 +417,7 @@ class IntegratedTurboAPI(TurboAPI):
         print(f"   Visit: http://{host}:{port}")
 
         try:
-            # This would start the actual Rust HTTP server
+            # This would start the actual Zig HTTP server
             print("\n[SERVER] HTTP Server Integration active (Phase 6.2)")
             print("Press Ctrl+C to stop")
 

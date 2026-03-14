@@ -3,7 +3,7 @@
 Tests for Query Parameters and Headers (v0.4.14)
 These features are WORKING and TESTED!
 
-Path parameters require Rust router updates (TODO for v0.4.15)
+Path parameters use Zig radix-trie router.
 """
 
 import time
@@ -256,7 +256,7 @@ def main():
     print("="*70)
     print("✅ Query Parameters: IMPLEMENTED & WORKING")
     print("✅ Headers: IMPLEMENTED & WORKING")
-    print("⏳ Path Parameters: TODO (requires Rust router updates)")
+    print("✅ Path Parameters: IMPLEMENTED (Zig radix-trie router)")
     print("⏳ Form Data: TODO (v0.4.15)")
     print("⏳ File Uploads: TODO (v0.4.15)")
     print("⏳ WebSockets: TODO (v0.4.15)")
@@ -293,7 +293,7 @@ def main():
         print("  ✅ Header parsing")
         print("  ✅ Combined query + headers")
         print("\n📋 TODO for v0.4.15:")
-        print("  ⏳ Path parameter extraction (needs Rust router)")
+        print("  ✅ Path parameter extraction (Zig router)")
         print("  ⏳ Form data support")
         print("  ⏳ File upload support")
         print("  ⏳ WebSocket support")

@@ -1,5 +1,5 @@
 // TurboNet – Zig HTTP core for TurboAPI
-// Drop-in replacement for the Rust/PyO3 turbonet module.
+// Zig HTTP core for TurboAPI — Python C extension module.
 
 const std = @import("std");
 pub const py = @import("py.zig");

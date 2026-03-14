@@ -118,7 +118,7 @@ print("\n⚡ PERFORMANCE BENEFITS:\n")
 
 print("✅ Automatic body parsing: Faster than manual json.loads()")
 print("✅ Dhi validation: ~2x faster than Pydantic")
-print("✅ Type conversion: Zero overhead with Rust core")
+print("✅ Type conversion: Zero overhead with Zig core")
 print("✅ Overall: Same FastAPI syntax, 5-10x performance!")
 
 # ============================================================================
@@ -136,7 +136,7 @@ improvements = [
     ("Startup/shutdown events", "✅ @app.on_event() supported"),
     ("Type-safe parameters", "✅ Automatic conversion"),
     ("100% FastAPI compatible", "✅ Drop-in replacement"),
-    ("5-10x performance boost", "✅ Rust-powered core"),
+    ("5-10x performance boost", "✅ Zig-powered core"),
 ]
 
 for feature, status in improvements:

@@ -812,7 +812,17 @@ fn callPythonHandlerDirect(entry: HandlerEntry, query_string: []const u8, body: 
         }
     }
 
-    // Content — read pre-serialized string directly from Python object
+    // Content-type — check if handler returned a custom content_type
+    var content_type: []const u8 = "application/json";
+    if (c.PyDict_GetItemString(result, "content_type")) |ct_obj| {
+        if (c.PyUnicode_Check(ct_obj) != 0) {
+            if (c.PyUnicode_AsUTF8(ct_obj)) |cs| {
+                content_type = std.mem.span(cs);
+            }
+        }
+    }
+
+    // Content — read pre-serialized string or bytes directly from Python object
     // and write to stream without copying (zero-copy)
     var body_slice: []const u8 = "null";
     if (c.PyDict_GetItemString(result, "content")) |content_obj| {
@@ -820,12 +830,19 @@ fn callPythonHandlerDirect(entry: HandlerEntry, query_string: []const u8, body: 
             if (c.PyUnicode_AsUTF8(content_obj)) |cs| {
                 body_slice = std.mem.span(cs);
             }
+        } else if (c.PyBytes_Check(content_obj) != 0) {
+            // Binary content (e.g. audio/wav, image/png)
+            var size: c.Py_ssize_t = 0;
+            var buf: [*c]u8 = undefined;
+            if (c.PyBytes_AsStringAndSize(content_obj, @ptrCast(&buf), &size) == 0) {
+                body_slice = buf[0..@intCast(size)];
+            }
         }
     }
 
-    // Write response directly — body_slice points into the Python string,
+    // Write response directly — body_slice points into the Python object,
     // which is alive because we hold `result` ref until after the write.
-    sendResponse(stream, status_code, "application/json", body_slice);
+    sendResponse(stream, status_code, content_type, body_slice);
 }
 
 // ── JSON-to-Python conversion (eliminates Python json.loads round-trip) ──────

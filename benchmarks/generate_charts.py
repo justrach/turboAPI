@@ -303,8 +303,8 @@ def generate_architecture_diagram(output_path: Path):
     layers = [
         (1, 7, 8, 0.8, 'Your Python App', '#E8F4FD', '#2196F3'),
         (1, 5.8, 8, 0.8, 'TurboAPI (FastAPI-compatible)', '#FFF3E0', COLORS['turboapi']),
-        (1, 4.6, 8, 0.8, 'PyO3 Bridge (zero-copy)', '#F3E5F5', '#9C27B0'),
-        (1, 2.6, 8, 1.6, 'TurboNet (Rust HTTP Core)', '#E8F5E9', '#4CAF50'),
+        (1, 4.6, 8, 0.8, 'Python C-API Bridge (zero-copy)', '#F3E5F5', '#9C27B0'),
+        (1, 2.6, 8, 1.6, 'TurboNet (Zig HTTP Core)', '#E8F5E9', '#4CAF50'),
     ]
 
     for x, y, width, height, label, facecolor, edgecolor in layers:
@@ -320,7 +320,7 @@ def generate_architecture_diagram(output_path: Path):
 
     # Add features to TurboNet
     features = [
-        'Hyper + Tokio async runtime',
+        'Zig std.net + thread pool',
         'SIMD-accelerated JSON',
         'Radix tree routing',
         'Zero-copy buffers'

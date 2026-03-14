@@ -1,10 +1,10 @@
 # Async Handler Support in TurboAPI
 
-TurboAPI now supports true async handlers with Tokio-powered execution. This document explains how async handlers work and when to use them.
+TurboAPI now supports true async handlers. This document explains how async handlers work and when to use them.
 
 ## Overview
 
-TurboAPI uses a hybrid async architecture that bridges Python's asyncio with Rust's Tokio runtime:
+TurboAPI uses a hybrid async architecture that bridges Python's asyncio with the Zig thread pool:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -15,11 +15,8 @@ TurboAPI uses a hybrid async architecture that bridges Python's asyncio with Rus
 │              Handler Classification                      │
 │   simple_sync │ body_sync │ simple_async │ body_async  │
 ├─────────────────────────────────────────────────────────┤
-│              Tokio Runtime (Rust)                        │
-│         Work-stealing scheduler • 14 workers            │
-├─────────────────────────────────────────────────────────┤
-│              pyo3-async-runtimes                         │
-│     Python coroutines ↔ Rust futures conversion         │
+│              Zig Thread Pool                             │
+│         Per-thread event loops • io_uring/kqueue         │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -94,15 +91,15 @@ Based on benchmarks with 100-500 concurrent connections:
 3. **Registration**: The handler is registered via `add_route_async_fast()` which stores it with the appropriate metadata.
 
 4. **Execution Flow**:
-   - Request arrives at Tokio runtime
+   - Request arrives at Zig server
    - Handler metadata is looked up
-   - For async handlers, `pyo3-async-runtimes` converts the Python coroutine to a Rust future
-   - Tokio awaits the future using its work-stealing scheduler
+   - For async handlers, the handler is called with the GIL acquired
+   - Response is written to the socket
    - Response is serialized with SIMD JSON
 
 ## Configuration
 
-No special configuration is needed. Async handlers are automatically detected and routed through the Tokio runtime.
+No special configuration is needed. Async handlers are automatically detected and routed through the Zig thread pool.
 
 For maximum performance, run with Python's free-threading mode:
 
@@ -122,4 +119,4 @@ PYTHON_GIL=0 python app.py
 
 - [Benchmarks](../README.md#benchmarks)
 - [Migration Guide](../README.md#migration-guide)
-- [pyo3-async-runtimes Documentation](https://github.com/PyO3/pyo3-async-runtimes)
+- [Zig HTTP Server](https://ziglang.org/)

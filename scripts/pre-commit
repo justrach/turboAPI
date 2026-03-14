@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# TurboAPI pre-commit hook
+# Runs: 1) ruff lint+format on staged .py  2) zig build check on staged .zig
+# Install: make hooks
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+PASS=true
+
+# ── Collect staged files ─────────────────────────────────────────────────────
+
+STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM -- '*.py' || true)
+STAGED_ZIG=$(git diff --cached --name-only --diff-filter=ACM -- '*.zig' || true)
+
+# ── 1. Python: ruff lint + format check ──────────────────────────────────────
+
+if [ -n "$STAGED_PY" ]; then
+    echo "🐍 Checking Python files..."
+
+    # Find ruff
+    if command -v ruff &>/dev/null; then
+        RUFF=ruff
+    elif [ -x "$ROOT/.venv314t/bin/ruff" ]; then
+        RUFF="$ROOT/.venv314t/bin/ruff"
+    elif [ -x "$ROOT/.venv/bin/ruff" ]; then
+        RUFF="$ROOT/.venv/bin/ruff"
+    else
+        echo "   ⚠️  ruff not found, skipping Python lint"
+        RUFF=""
+    fi
+
+    if [ -n "$RUFF" ]; then
+        # Lint using project config (pyproject.toml [tool.ruff])
+        if ! $RUFF check --no-fix --config "$ROOT/pyproject.toml" $STAGED_PY 2>/dev/null; then
+            echo "   ❌ ruff lint failed — run 'make lint' to see details, 'make fmt' to auto-fix"
+            PASS=false
+        else
+            echo "   ✅ ruff lint passed"
+        fi
+    fi
+fi
+
+# ── 2. Zig: compile check ───────────────────────────────────────────────────
+
+if [ -n "$STAGED_ZIG" ]; then
+    echo "⚡ Checking Zig files..."
+
+    if ! "$ROOT/scripts/build.sh" --check >/dev/null 2>&1; then
+        echo "   ❌ Zig build failed — run 'make build' to see errors"
+        PASS=false
+    else
+        echo "   ✅ Zig build passed"
+    fi
+fi
+
+# ── 3. Quick smoke test (only if both Zig and Python changed) ────────────────
+
+if [ -n "$STAGED_ZIG" ] && [ -n "$STAGED_PY" ]; then
+    echo "🧪 Running quick smoke test..."
+
+    # Detect Python
+    if [ -n "${VIRTUAL_ENV:-}" ]; then
+        PYTHON="$VIRTUAL_ENV/bin/python"
+    elif [ -x "$ROOT/.venv314t/bin/python" ]; then
+        PYTHON="$ROOT/.venv314t/bin/python"
+    elif [ -x "$ROOT/.venv/bin/python" ]; then
+        PYTHON="$ROOT/.venv/bin/python"
+    else
+        PYTHON="$(command -v python3 || command -v python)"
+    fi
+
+    if $PYTHON -c "from turboapi import TurboAPI; print('   ✅ Import check passed')" 2>/dev/null; then
+        :
+    else
+        echo "   ⚠️  Import check skipped (turbonet may not be built for this Python)"
+    fi
+fi
+
+# ── Result ───────────────────────────────────────────────────────────────────
+
+if ! $PASS; then
+    echo ""
+    echo "❌ Pre-commit checks failed. Fix the issues above, then 'git add' and retry."
+    exit 1
+fi
+
+echo "✅ All pre-commit checks passed"

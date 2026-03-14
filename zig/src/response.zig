@@ -1,5 +1,5 @@
 // ResponseView – Zig-backed HTTP response builder.
-// Instead of trying to replicate PyO3's class system via raw C-API (painful),
+// Instead of a Python C-API class (complex),
 // we expose fast C functions that a Python wrapper class calls.
 
 const std = @import("std");
@@ -9,7 +9,7 @@ const c = py.c;
 // ── Module-level functions exposed to Python ────────────────────────────────
 
 // All response state is held in a Python dict. The Python-side ResponseView
-// class wraps these calls for an identical API to the Rust version.
+// class wraps these calls for a clean Python API.
 
 pub fn response_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var status_code: c_long = 200;

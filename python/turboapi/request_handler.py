@@ -7,7 +7,7 @@ Supports query parameters, path parameters, headers, request body, and dependenc
 import inspect
 import json
 import urllib.parse
-from typing import Any, get_args, get_origin
+from typing import Any, get_origin
 
 from dhi import BaseModel as Model
 
@@ -16,7 +16,9 @@ class DependencyResolver:
     """Resolve Depends() dependencies recursively with caching and cleanup."""
 
     @staticmethod
-    def resolve_dependencies(handler_signature: inspect.Signature, context: dict[str, Any]) -> dict[str, Any]:
+    def resolve_dependencies(
+        handler_signature: inspect.Signature, context: dict[str, Any]
+    ) -> dict[str, Any]:
         """
         Resolve all Depends/Security parameters.
 
@@ -27,7 +29,7 @@ class DependencyResolver:
         Returns:
             Dictionary of resolved dependency values
         """
-        from turboapi.security import Depends, Security, SecurityBase
+        from turboapi.security import Depends
 
         cache = {}
         cleanups = []  # generators to close after request
@@ -46,7 +48,7 @@ class DependencyResolver:
                 resolved[param_name] = value
 
         # Store cleanups in context for later teardown
-        context['_cleanups'] = cleanups
+        context["_cleanups"] = cleanups
         return resolved
 
     @staticmethod
@@ -68,14 +70,13 @@ class DependencyResolver:
                         sub_dep = p.default
                         if sub_dep.dependency is not None:
                             sub_kwargs[p_name] = DependencyResolver._resolve_single(
-                                sub_dep.dependency, sub_dep.use_cache,
-                                context, cache, cleanups
+                                sub_dep.dependency, sub_dep.use_cache, context, cache, cleanups
                             )
             except (ValueError, TypeError):
                 pass
 
         # Check if it's a security scheme callable
-        if isinstance(dep_fn, SecurityBase) and hasattr(dep_fn, '__call__'):
+        if isinstance(dep_fn, SecurityBase) and hasattr(dep_fn, "__call__"):
             # Inspect __call__ signature to pass the right context
             try:
                 call_sig = inspect.signature(dep_fn.__call__)
@@ -83,24 +84,27 @@ class DependencyResolver:
             except (ValueError, TypeError):
                 call_params = []
 
-            if 'headers' in call_params:
+            if "headers" in call_params:
                 # APIKeyHeader — pass full headers dict
-                result = dep_fn(headers=context.get('headers', {}))
-            elif 'query_params' in call_params:
+                result = dep_fn(headers=context.get("headers", {}))
+            elif "query_params" in call_params:
                 # APIKeyQuery — parse query string into dict
                 from urllib.parse import parse_qs
-                qs = context.get('query_string', '')
-                qp = {k: v[0] for k, v in parse_qs(qs, keep_blank_values=True).items()} if qs else {}
+
+                qs = context.get("query_string", "")
+                qp = (
+                    {k: v[0] for k, v in parse_qs(qs, keep_blank_values=True).items()} if qs else {}
+                )
                 result = dep_fn(query_params=qp)
-            elif 'cookies' in call_params:
+            elif "cookies" in call_params:
                 # APIKeyCookie — pass cookies dict
-                result = dep_fn(cookies=context.get('cookies', {}))
+                result = dep_fn(cookies=context.get("cookies", {}))
             else:
                 # OAuth2/HTTPBearer/HTTPBasic — pass authorization header
-                headers = context.get('headers', {})
+                headers = context.get("headers", {})
                 auth_header = None
                 for k, v in headers.items():
-                    if k.lower() == 'authorization':
+                    if k.lower() == "authorization":
                         auth_header = v
                         break
                 result = dep_fn(auth_header)
@@ -110,14 +114,17 @@ class DependencyResolver:
             cleanups.append(gen)
         elif inspect.isasyncgenfunction(dep_fn):
             import asyncio
+
             async def _resolve_async_gen():
                 agen = dep_fn(**sub_kwargs)
                 val = await agen.__anext__()
                 cleanups.append(agen)
                 return val
+
             result = asyncio.run(_resolve_async_gen())
         elif inspect.iscoroutinefunction(dep_fn):
             import asyncio
+
             result = asyncio.run(dep_fn(**sub_kwargs))
         else:
             result = dep_fn(**sub_kwargs)
@@ -129,58 +136,60 @@ class DependencyResolver:
 
 class QueryParamParser:
     """Parse query parameters from query string."""
-    
+
     @staticmethod
     def parse_query_params(query_string: str) -> dict[str, Any]:
         """
         Parse query string into dict of parameters.
         Supports multiple values for same key (returns list).
-        
+
         Args:
             query_string: URL query string (e.g., "q=test&limit=10")
-            
+
         Returns:
             Dictionary of parsed query parameters
         """
         if not query_string:
             return {}
-        
+
         params = {}
         parsed = urllib.parse.parse_qs(query_string, keep_blank_values=True)
-        
+
         for key, values in parsed.items():
             # If only one value, return as string; otherwise return as list
             if len(values) == 1:
                 params[key] = values[0]
             else:
                 params[key] = values
-        
+
         return params
 
 
 class PathParamParser:
     """Parse path parameters from URL path."""
-    
+
     @staticmethod
-    def extract_path_params(route_pattern: str, actual_path: str, handler_signature: inspect.Signature | None = None) -> dict[str, Any]:
+    def extract_path_params(
+        route_pattern: str, actual_path: str, handler_signature: inspect.Signature | None = None
+    ) -> dict[str, Any]:
         """
         Extract path parameters from actual path using route pattern.
-        
+
         Args:
             route_pattern: Route pattern with {param} placeholders (e.g., "/users/{user_id}")
             actual_path: Actual request path (e.g., "/users/123")
             handler_signature: Optional handler signature for type coercion
-            
+
         Returns:
             Dictionary of extracted path parameters (type-coerced if signature provided)
         """
         import re
-        
+
         # Convert route pattern to regex
         # Replace {param} with named capture groups
-        pattern = re.sub(r'\{(\w+)\}', r'(?P<\1>[^/]+)', route_pattern)
-        pattern = f'^{pattern}$'
-        
+        pattern = re.sub(r"\{(\w+)\}", r"(?P<\1>[^/]+)", route_pattern)
+        pattern = f"^{pattern}$"
+
         match = re.match(pattern, actual_path)
         if not match:
             return {}
@@ -209,7 +218,9 @@ class HeaderParser:
     """Parse and extract headers from request."""
 
     @staticmethod
-    def parse_headers(headers_dict: dict[str, str], handler_signature: inspect.Signature) -> dict[str, Any]:
+    def parse_headers(
+        headers_dict: dict[str, str], handler_signature: inspect.Signature
+    ) -> dict[str, Any]:
         """
         Parse headers and extract parameters needed by handler.
 
@@ -235,7 +246,7 @@ class HeaderParser:
                 if header_marker.alias:
                     header_key = header_marker.alias.lower()
                 elif header_marker.convert_underscores:
-                    header_key = param_name.replace('_', '-').lower()
+                    header_key = param_name.replace("_", "-").lower()
                 else:
                     header_key = param_name.lower()
 
@@ -250,7 +261,7 @@ class HeaderParser:
                         parsed_headers[param_name] = header_marker.default
             else:
                 # Not a Header marker, but still try to match by name
-                header_key = param_name.replace('_', '-').lower()
+                header_key = param_name.replace("_", "-").lower()
                 for header_name, header_value in headers_dict.items():
                     if header_name.lower() == header_key:
                         parsed_headers[param_name] = header_value
@@ -261,21 +272,21 @@ class HeaderParser:
 
 class RequestBodyParser:
     """Parse and validate request bodies using Satya models."""
-    
+
     @staticmethod
     def parse_json_body(body: bytes, handler_signature: inspect.Signature) -> dict[str, Any]:
         """
         Parse JSON body and extract parameters for handler.
-        
+
         Supports multiple patterns:
         1. Single parameter (dict/list/Model) - receives entire body
         2. Multiple parameters - extracts fields from JSON
         3. Satya Model - validates entire body
-        
+
         Args:
             body: Raw request body bytes
             handler_signature: Signature of the handler function
-            
+
         Returns:
             Dictionary of parsed parameters ready for handler
         """
@@ -286,31 +297,35 @@ class RequestBodyParser:
             # CRITICAL: Make a defensive copy immediately using bytearray to force real copy
             # Free-threaded Python with Metal/MLX can have concurrent memory access issues
             body_copy = bytes(bytearray(body))
-            json_data = json.loads(body_copy.decode('utf-8'))
+            json_data = json.loads(body_copy.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise ValueError(f"Invalid JSON body: {e}")
-        
+
         parsed_params = {}
         params_list = list(handler_signature.parameters.items())
-        
+
         # Filter out Depends/Security parameters — they are resolved separately
         from turboapi.security import Depends, SecurityBase
+
         body_params_list = [
-            (name, p) for name, p in params_list
+            (name, p)
+            for name, p in params_list
             if not isinstance(p.default, Depends) and not isinstance(p.default, SecurityBase)
         ]
-        
+
         # PATTERN 1: Single parameter that should receive entire body
         # Examples: handler(data: dict), handler(items: list), handler(request: Model)
         if len(body_params_list) == 1:
             param_name, param = body_params_list[0]
-            
+
             # Check if parameter is a Satya Model
             try:
-                is_satya_model = inspect.isclass(param.annotation) and issubclass(param.annotation, Model)
+                is_satya_model = inspect.isclass(param.annotation) and issubclass(
+                    param.annotation, Model
+                )
             except Exception:
                 is_satya_model = False
-            
+
             if is_satya_model:
                 # Validate entire JSON body against Satya model
                 try:
@@ -319,18 +334,18 @@ class RequestBodyParser:
                     return parsed_params
                 except Exception as e:
                     raise ValueError(f"Validation error for {param_name}: {e}")
-            
+
             # If annotated as dict or list, pass entire body
             elif param.annotation in (dict, list) or param.annotation == inspect.Parameter.empty:
                 parsed_params[param_name] = json_data
                 return parsed_params
-            
+
             # Check for typing.Dict, typing.List, etc.
             origin = get_origin(param.annotation)
             if origin in (dict, list):
                 parsed_params[param_name] = json_data
                 return parsed_params
-        
+
         # PATTERN 2: Multiple parameters - extract individual fields
         # Example: handler(name: str, age: int, email: str)
         for param_name, param in body_params_list:
@@ -339,13 +354,15 @@ class RequestBodyParser:
                 if param_name in json_data:
                     parsed_params[param_name] = json_data[param_name]
                 continue
-            
+
             # Check if parameter is a Satya Model
             try:
-                is_satya_model = inspect.isclass(param.annotation) and issubclass(param.annotation, Model)
+                is_satya_model = inspect.isclass(param.annotation) and issubclass(
+                    param.annotation, Model
+                )
             except Exception:
                 is_satya_model = False
-            
+
             if is_satya_model:
                 # Validate entire JSON body against Satya model
                 try:
@@ -353,16 +370,16 @@ class RequestBodyParser:
                     parsed_params[param_name] = validated_model
                 except Exception as e:
                     raise ValueError(f"Validation error for {param_name}: {e}")
-            
+
             # Check if parameter name exists in JSON data
             elif param_name in json_data:
                 value = json_data[param_name]
-                
+
                 # Type conversion for basic types
                 if param.annotation in (int, float, str, bool):
                     try:
                         if param.annotation is bool and isinstance(value, str):
-                            parsed_params[param_name] = value.lower() in ('true', '1', 'yes', 'on')
+                            parsed_params[param_name] = value.lower() in ("true", "1", "yes", "on")
                         else:
                             parsed_params[param_name] = param.annotation(value)
                     except (ValueError, TypeError) as e:
@@ -370,11 +387,11 @@ class RequestBodyParser:
                 else:
                     # Use value as-is for other types (lists, dicts, etc.)
                     parsed_params[param_name] = value
-            
+
             # Handle default values
             elif param.default != inspect.Parameter.empty:
                 parsed_params[param_name] = param.default
-        
+
         return parsed_params
 
 
@@ -385,21 +402,21 @@ def _is_binary_content_type(content_type: str) -> bool:
     ct_lower = content_type.lower()
     # Binary content types that should not be JSON serialized
     binary_prefixes = (
-        'audio/',
-        'video/',
-        'image/',
-        'application/octet-stream',
-        'application/pdf',
-        'application/zip',
-        'application/gzip',
-        'application/x-tar',
+        "audio/",
+        "video/",
+        "image/",
+        "application/octet-stream",
+        "application/pdf",
+        "application/zip",
+        "application/gzip",
+        "application/x-tar",
     )
     return ct_lower.startswith(binary_prefixes)
 
 
 class ResponseHandler:
     """Handle different response formats including FastAPI-style tuples."""
-    
+
     @staticmethod
     def normalize_response(result: Any) -> tuple[Any, int]:
         """
@@ -421,6 +438,7 @@ class ResponseHandler:
         """
         # Handle Response objects (JSONResponse, HTMLResponse, etc.)
         from turboapi.responses import Response
+
         if isinstance(result, Response):
             # Extract content from Response object
             body = result.body
@@ -435,11 +453,12 @@ class ResponseHandler:
                 # Try to decode as JSON for JSONResponse
                 try:
                     import json
-                    body = json.loads(body.decode('utf-8'))
+
+                    body = json.loads(body.decode("utf-8"))
                 except json.JSONDecodeError:
                     # Not JSON, try as plain text
                     try:
-                        body = body.decode('utf-8')
+                        body = body.decode("utf-8")
                     except UnicodeDecodeError:
                         # Binary data - return with content_type
                         return body, result.status_code, content_type
@@ -468,9 +487,11 @@ class ResponseHandler:
 
         # Default: treat as 200 OK response
         return result, 200
-    
+
     @staticmethod
-    def format_response(content: Any, status_code: int, content_type: str | None = None) -> dict[str, Any]:
+    def format_response(
+        content: Any, status_code: int, content_type: str | None = None
+    ) -> dict[str, Any]:
         """
         Format content as response. Handles both JSON and binary responses.
 
@@ -484,11 +505,11 @@ class ResponseHandler:
         """
         # For binary content (bytes with binary content_type), return directly
         if isinstance(content, bytes) and content_type and _is_binary_content_type(content_type):
-            # Return bytes directly - Rust will handle as raw binary
+            # Return bytes directly - Zig will handle as raw binary
             return {
-                "content": content,  # Keep as bytes for Rust to extract
+                "content": content,  # Keep as bytes for Zig to extract
                 "status_code": status_code,
-                "content_type": content_type
+                "content_type": content_type,
             }
 
         # Handle Satya models
@@ -502,10 +523,11 @@ class ResponseHandler:
             elif isinstance(obj, bytes):
                 # Non-binary bytes - try to decode as UTF-8, otherwise base64 encode
                 try:
-                    return obj.decode('utf-8')
+                    return obj.decode("utf-8")
                 except UnicodeDecodeError:
                     import base64
-                    return base64.b64encode(obj).decode('ascii')
+
+                    return base64.b64encode(obj).decode("ascii")
             elif isinstance(obj, dict):
                 return {k: make_serializable(v) for k, v in obj.items()}
             elif isinstance(obj, (list, tuple)):
@@ -521,11 +543,13 @@ class ResponseHandler:
         return {
             "content": content,
             "status_code": status_code,
-            "content_type": content_type or "application/json"
+            "content_type": content_type or "application/json",
         }
 
     @staticmethod
-    def format_json_response(content: Any, status_code: int, content_type: str | None = None) -> dict[str, Any]:
+    def format_json_response(
+        content: Any, status_code: int, content_type: str | None = None
+    ) -> dict[str, Any]:
         """Alias for format_response for backwards compatibility."""
         return ResponseHandler.format_response(content, status_code, content_type)
 
@@ -533,17 +557,17 @@ class ResponseHandler:
 def create_enhanced_handler(original_handler, route_definition):
     """
     Create an enhanced handler with automatic body parsing and response normalization.
-    
+
     This wrapper:
     1. Parses JSON body automatically using Satya validation
     2. Normalizes responses (supports tuple returns)
     3. Provides better error messages
     4. Properly handles both sync and async handlers
-    
+
     Args:
         original_handler: The original Python handler function
         route_definition: RouteDefinition with metadata
-        
+
     Returns:
         Enhanced handler function (async if original is async, sync otherwise)
     """
@@ -552,14 +576,13 @@ def create_enhanced_handler(original_handler, route_definition):
 
     # Pre-compile path param regex and type converters at registration time
     import re as _re
+
     _path_pattern = None
     _path_param_types = {}
-    if hasattr(route_definition, 'path') and route_definition.path:
+    if hasattr(route_definition, "path") and route_definition.path:
         rp = route_definition.path
-        if '{' in rp:
-            _path_pattern = _re.compile(
-                '^' + _re.sub(r'\{(\w+)\}', r'(?P<\1>[^/]+)', rp) + '$'
-            )
+        if "{" in rp:
+            _path_pattern = _re.compile("^" + _re.sub(r"\{(\w+)\}", r"(?P<\1>[^/]+)", rp) + "$")
         for pname, param in sig.parameters.items():
             ann = param.annotation
             if ann is int:
@@ -574,55 +597,58 @@ def create_enhanced_handler(original_handler, route_definition):
     _has_dependencies = False
     _has_header_params = False
     from turboapi.datastructures import Header
+
     try:
         from turboapi.security import Depends, SecurityBase
+
         _has_security = True
     except ImportError:
         _has_security = False
     for pname, param in sig.parameters.items():
         if isinstance(param.default, Header):
             _has_header_params = True
-        if _has_security and (isinstance(param.default, Depends) or isinstance(param.default, SecurityBase)):
+        if _has_security and (
+            isinstance(param.default, Depends) or isinstance(param.default, SecurityBase)
+        ):
             _has_dependencies = True
-    
+
     if is_async:
         # Create async enhanced handler for async original handlers
         async def enhanced_handler(**kwargs):
             """Enhanced handler with automatic parsing of body, query params, path params, and headers."""
             try:
                 parsed_params = {}
-                
+
                 # 1. Parse query parameters
                 if "query_string" in kwargs:
                     query_string = kwargs.get("query_string", "")
                     if query_string:
                         query_params = QueryParamParser.parse_query_params(query_string)
                         parsed_params.update(query_params)
-                
+
                 # 2. Parse path parameters (if route pattern is available)
-                if "path" in kwargs and hasattr(route_definition, 'path'):
+                if "path" in kwargs and hasattr(route_definition, "path"):
                     actual_path = kwargs.get("path", "")
                     route_pattern = route_definition.path
                     if actual_path and route_pattern:
-                        path_params = PathParamParser.extract_path_params(route_pattern, actual_path, sig)
+                        path_params = PathParamParser.extract_path_params(
+                            route_pattern, actual_path, sig
+                        )
                         parsed_params.update(path_params)
-                
+
                 # 3. Parse headers
                 if "headers" in kwargs:
                     headers_dict = kwargs.get("headers", {})
                     if headers_dict:
                         header_params = HeaderParser.parse_headers(headers_dict, sig)
                         parsed_params.update(header_params)
-                
+
                 # 4. Parse request body (JSON)
                 if "body" in kwargs:
                     body_data = kwargs["body"]
 
                     if body_data:  # Only parse if body is not empty
-                        parsed_body = RequestBodyParser.parse_json_body(
-                            body_data,
-                            sig
-                        )
+                        parsed_body = RequestBodyParser.parse_json_body(body_data, sig)
                         # Merge parsed body params (body params take precedence)
                         parsed_params.update(parsed_body)
 
@@ -636,16 +662,13 @@ def create_enhanced_handler(original_handler, route_definition):
                 parsed_params.update(dependency_params)
 
                 # Filter to only pass expected parameters
-                filtered_kwargs = {
-                    k: v for k, v in parsed_params.items()
-                    if k in sig.parameters
-                }
+                filtered_kwargs = {k: v for k, v in parsed_params.items() if k in sig.parameters}
 
                 # Call original async handler and await it
                 result = await original_handler(**filtered_kwargs)
 
                 # Run dependency cleanups (generator teardown)
-                cleanups = context.get('_cleanups', [])
+                cleanups = context.get("_cleanups", [])
                 for gen in cleanups:
                     try:
                         next(gen)
@@ -663,46 +686,44 @@ def create_enhanced_handler(original_handler, route_definition):
                     content_type = None
 
                 return ResponseHandler.format_json_response(content, status_code, content_type)
-                
+
             except ValueError as e:
                 # Validation or parsing error (400 Bad Request)
                 return ResponseHandler.format_json_response(
-                    {"error": "Bad Request", "detail": str(e)},
-                    400
+                    {"error": "Bad Request", "detail": str(e)}, 400
                 )
             except Exception as e:
                 from turboapi.security import HTTPException
+
                 if isinstance(e, HTTPException):
-                    return ResponseHandler.format_json_response(
-                        {"detail": e.detail},
-                        e.status_code
-                    )
+                    return ResponseHandler.format_json_response({"detail": e.detail}, e.status_code)
                 # Unexpected error (500 Internal Server Error)
                 import traceback
+
                 return ResponseHandler.format_json_response(
                     {
                         "error": "Internal Server Error",
                         "detail": str(e),
-                        "traceback": traceback.format_exc()
+                        "traceback": traceback.format_exc(),
                     },
-                    500
+                    500,
                 )
-        
+
         return enhanced_handler
-    
+
     else:
         # Create sync enhanced handler for sync original handlers
         def enhanced_handler(**kwargs):
             """Enhanced handler with automatic parsing of body, query params, path params, and headers."""
             try:
                 parsed_params = {}
-                
+
                 # 1. Parse query parameters
                 query_string = kwargs.get("query_string", "")
                 if query_string:
                     query_params = QueryParamParser.parse_query_params(query_string)
                     parsed_params.update(query_params)
-                
+
                 # 2. Parse path parameters using pre-compiled regex
                 if _path_pattern is not None:
                     actual_path = kwargs.get("path", "")
@@ -718,14 +739,14 @@ def create_enhanced_handler(original_handler, route_definition):
                                     except (ValueError, TypeError):
                                         pass
                             parsed_params.update(params)
-                
+
                 # 3. Parse headers (only if handler needs them)
                 if _has_header_params:
                     headers_dict = kwargs.get("headers", {})
                     if headers_dict:
                         header_params = HeaderParser.parse_headers(headers_dict, sig)
                         parsed_params.update(header_params)
-                
+
                 # 4. Parse request body (JSON)
                 body_data = kwargs.get("body", b"")
                 if body_data:
@@ -743,17 +764,14 @@ def create_enhanced_handler(original_handler, route_definition):
                     parsed_params.update(dependency_params)
 
                 # Filter to only pass expected parameters
-                filtered_kwargs = {
-                    k: v for k, v in parsed_params.items()
-                    if k in _param_names
-                }
+                filtered_kwargs = {k: v for k, v in parsed_params.items() if k in _param_names}
 
                 # Call original sync handler
                 result = original_handler(**filtered_kwargs)
 
                 # Run dependency cleanups (generator teardown)
                 if _has_dependencies:
-                    cleanups = context.get('_cleanups', [])
+                    cleanups = context.get("_cleanups", [])
                     for gen in cleanups:
                         try:
                             next(gen)
@@ -771,31 +789,29 @@ def create_enhanced_handler(original_handler, route_definition):
                     content_type = None
 
                 return ResponseHandler.format_json_response(content, status_code, content_type)
-                
+
             except ValueError as e:
                 # Validation or parsing error (400 Bad Request)
                 return ResponseHandler.format_json_response(
-                    {"error": "Bad Request", "detail": str(e)},
-                    400
+                    {"error": "Bad Request", "detail": str(e)}, 400
                 )
             except Exception as e:
                 from turboapi.security import HTTPException
+
                 if isinstance(e, HTTPException):
-                    return ResponseHandler.format_json_response(
-                        {"detail": e.detail},
-                        e.status_code
-                    )
+                    return ResponseHandler.format_json_response({"detail": e.detail}, e.status_code)
                 # Unexpected error (500 Internal Server Error)
                 import traceback
+
                 return ResponseHandler.format_json_response(
                     {
                         "error": "Internal Server Error",
                         "detail": str(e),
-                        "traceback": traceback.format_exc()
+                        "traceback": traceback.format_exc(),
                     },
-                    500
+                    500,
                 )
-        
+
         return enhanced_handler
 
 
@@ -820,36 +836,52 @@ def create_fast_handler(original_handler, route_definition):
         elif ann is float:
             _converters[pname] = float
 
-    # Check if handler takes body params
+    # Check if handler takes body params.
+    # For POST/PUT/PATCH/DELETE, any parameter not resolvable from path/query
+    # should be extracted from the JSON body (FastAPI parity).
     _needs_body = False
-    method_str = route_definition.method.value.upper() if hasattr(route_definition, 'method') else "GET"
+    method_str = (
+        route_definition.method.value.upper() if hasattr(route_definition, "method") else "GET"
+    )
     if method_str in ("POST", "PUT", "PATCH", "DELETE"):
-        for pname, param in sig.parameters.items():
-            ann = param.annotation
-            if ann in (dict, list, bytes):
-                _needs_body = True
-                break
-            try:
-                from dhi import BaseModel as DhiModel
-                if inspect.isclass(ann) and issubclass(ann, DhiModel):
-                    _needs_body = True
-                    break
-            except ImportError:
-                pass
+        _needs_body = True
 
     # Pre-import json.dumps for hot path
     _dumps = _json.dumps
+
+    from turboapi.responses import Response as _Response
 
     if not param_names:
         # Zero-arg handler: fastest possible path
         def fast_handler_noargs(**kwargs):
             try:
                 result = original_handler()
-                if hasattr(result, 'model_dump'):
+                if isinstance(result, _Response):
+                    ct = result.media_type or "application/json"
+                    if isinstance(result.body, bytes) and _is_binary_content_type(ct):
+                        return {
+                            "content": result.body,
+                            "status_code": result.status_code,
+                            "content_type": ct,
+                        }
+                    body_str = (
+                        result.body.decode("utf-8")
+                        if isinstance(result.body, bytes)
+                        else str(result.body)
+                    )
+                    return {
+                        "content": body_str,
+                        "status_code": result.status_code,
+                        "content_type": ct,
+                    }
+                if isinstance(result, tuple) and len(result) == 2:
+                    return {"content": _dumps(result[0]), "status_code": result[1]}
+                if hasattr(result, "model_dump"):
                     result = result.model_dump()
                 return {"content": _dumps(result), "status_code": 200}
             except Exception as e:
                 return {"content": _dumps({"error": str(e)}), "status_code": 500}
+
         return fast_handler_noargs
 
     def fast_handler(**kwargs):
@@ -872,6 +904,7 @@ def create_fast_handler(original_handler, route_definition):
                 qs = kwargs.get("query_string", "")
                 if qs:
                     from urllib.parse import parse_qs
+
                     for k, v in parse_qs(qs, keep_blank_values=True).items():
                         if k in param_names and k not in call_kwargs:
                             call_kwargs[k] = v[0]
@@ -885,8 +918,24 @@ def create_fast_handler(original_handler, route_definition):
 
             result = original_handler(**call_kwargs)
 
+            # Handle Response objects (JSONResponse, HTMLResponse, binary, etc.)
+            if isinstance(result, _Response):
+                ct = result.media_type or "application/json"
+                if isinstance(result.body, bytes) and _is_binary_content_type(ct):
+                    return {
+                        "content": result.body,
+                        "status_code": result.status_code,
+                        "content_type": ct,
+                    }
+                body_str = (
+                    result.body.decode("utf-8")
+                    if isinstance(result.body, bytes)
+                    else str(result.body)
+                )
+                return {"content": body_str, "status_code": result.status_code, "content_type": ct}
+
             # Pre-serialize so Zig skips json.dumps
-            if hasattr(result, 'model_dump'):
+            if hasattr(result, "model_dump"):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
                 return {"content": _dumps(result[0]), "status_code": result[1]}
@@ -894,6 +943,7 @@ def create_fast_handler(original_handler, route_definition):
         except Exception as e:
             try:
                 from turboapi.security import HTTPException
+
                 if isinstance(e, HTTPException):
                     return {"content": _dumps({"detail": e.detail}), "status_code": e.status_code}
             except ImportError:
@@ -912,6 +962,7 @@ def create_fast_model_handler(original_handler, model_class, param_name):
     User gets a real model instance with all methods -- zero DX change.
     """
     import json as _json
+
     _loads = _json.loads
     _dumps = _json.dumps
 
@@ -922,7 +973,10 @@ def create_fast_model_handler(original_handler, model_class, param_name):
             if data is None:
                 body = kwargs.get("body", b"")
                 if not body:
-                    return {"content": _dumps({"detail": "Request body is empty"}), "status_code": 400}
+                    return {
+                        "content": _dumps({"detail": "Request body is empty"}),
+                        "status_code": 400,
+                    }
                 data = _loads(body)
 
             # Zig already validated -- instantiate model
@@ -932,7 +986,7 @@ def create_fast_model_handler(original_handler, model_class, param_name):
             result = original_handler(**{param_name: model})
 
             # Serialize response
-            if hasattr(result, 'model_dump'):
+            if hasattr(result, "model_dump"):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
                 return {"content": _dumps(result[0]), "status_code": result[1]}
@@ -940,6 +994,7 @@ def create_fast_model_handler(original_handler, model_class, param_name):
         except Exception as e:
             try:
                 from turboapi.security import HTTPException
+
                 if isinstance(e, HTTPException):
                     return {"content": _dumps({"detail": e.detail}), "status_code": e.status_code}
             except ImportError:

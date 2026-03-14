@@ -26,7 +26,7 @@ def read_root():
         "features": [
             "FastAPI-identical decorators",
             "5-10x faster performance",
-            "Rust-powered HTTP core",
+            "Zig-powered HTTP core",
             "Adaptive rate testing",
             "Comprehensive benchmarking"
         ],

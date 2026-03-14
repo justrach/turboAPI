@@ -44,7 +44,7 @@ Focused comparison of handler types:
 - **aiohttp Client**: True async client testing at 50-500 concurrency
 - **Handler Variants**: Simple, compute, I/O wait, JSON response
 
-### 4. Rust Benchmarks (`benches/performance_bench.rs`)
+### 4. Native Benchmarks
 
 Low-level Criterion benchmarks (requires special build):
 
