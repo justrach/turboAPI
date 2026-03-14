@@ -13,12 +13,12 @@ from dhi import BaseModel as Model
 
 
 class DependencyResolver:
-    """Resolve Depends() dependencies recursively."""
+    """Resolve Depends() dependencies recursively with caching and cleanup."""
 
     @staticmethod
     def resolve_dependencies(handler_signature: inspect.Signature, context: dict[str, Any]) -> dict[str, Any]:
         """
-        Resolve all Depends() parameters in a handler signature.
+        Resolve all Depends/Security parameters.
 
         Args:
             handler_signature: Signature of the handler function
@@ -27,70 +27,83 @@ class DependencyResolver:
         Returns:
             Dictionary of resolved dependency values
         """
-        from turboapi.security import Depends
+        from turboapi.security import Depends, Security, SecurityBase
 
+        cache = {}
+        cleanups = []  # generators to close after request
         resolved = {}
-        cache = {}  # Cache for use_cache=True dependencies
 
         for param_name, param in handler_signature.parameters.items():
             if isinstance(param.default, Depends):
                 depends = param.default
-                dependency_fn = depends.dependency
-
-                if dependency_fn is None:
+                dep_fn = depends.dependency
+                if dep_fn is None:
                     continue
 
-                # Check cache
-                cache_key = id(dependency_fn)
-                if depends.use_cache and cache_key in cache:
-                    resolved[param_name] = cache[cache_key]
-                    continue
+                value = DependencyResolver._resolve_single(
+                    dep_fn, depends.use_cache, context, cache, cleanups
+                )
+                resolved[param_name] = value
 
-                # Resolve the dependency
-                result = DependencyResolver._call_dependency(dependency_fn, context, cache)
-
-                # Cache if needed
-                if depends.use_cache:
-                    cache[cache_key] = result
-
-                resolved[param_name] = result
-
+        # Store cleanups in context for later teardown
+        context['_cleanups'] = cleanups
         return resolved
 
     @staticmethod
-    def _call_dependency(dependency_fn, context: dict[str, Any], cache: dict) -> Any:
-        """Call a dependency function, resolving any nested dependencies."""
-        from turboapi.security import Depends
+    def _resolve_single(dep_fn, use_cache, context, cache, cleanups):
+        """Resolve a single dependency, handling sub-deps, caching, generators."""
+        from turboapi.security import Depends, SecurityBase
 
-        sig = inspect.signature(dependency_fn)
-        kwargs = {}
+        cache_key = id(dep_fn)
+        if use_cache and cache_key in cache:
+            return cache[cache_key]
 
-        for param_name, param in sig.parameters.items():
-            if isinstance(param.default, Depends):
-                # Nested dependency
-                nested_fn = param.default.dependency
-                if nested_fn is not None:
-                    cache_key = id(nested_fn)
-                    if param.default.use_cache and cache_key in cache:
-                        kwargs[param_name] = cache[cache_key]
-                    else:
-                        result = DependencyResolver._call_dependency(nested_fn, context, cache)
-                        if param.default.use_cache:
-                            cache[cache_key] = result
-                        kwargs[param_name] = result
-
-        # Call the dependency function
-        if inspect.iscoroutinefunction(dependency_fn):
-            # For async dependencies, we need to handle this differently
-            # For now, just call sync functions
-            import asyncio
-            loop = asyncio.new_event_loop()
+        # First resolve any sub-dependencies this function needs
+        sub_kwargs = {}
+        if callable(dep_fn):
             try:
-                return loop.run_until_complete(dependency_fn(**kwargs))
-            finally:
-                loop.close()
+                sig = inspect.signature(dep_fn)
+                for p_name, p in sig.parameters.items():
+                    if isinstance(p.default, Depends):
+                        sub_dep = p.default
+                        if sub_dep.dependency is not None:
+                            sub_kwargs[p_name] = DependencyResolver._resolve_single(
+                                sub_dep.dependency, sub_dep.use_cache,
+                                context, cache, cleanups
+                            )
+            except (ValueError, TypeError):
+                pass
+
+        # Check if it's a security scheme callable
+        if isinstance(dep_fn, SecurityBase) and hasattr(dep_fn, '__call__'):
+            headers = context.get('headers', {})
+            auth_header = None
+            for k, v in headers.items():
+                if k.lower() == 'authorization':
+                    auth_header = v
+                    break
+            result = dep_fn(auth_header)
+        elif inspect.isgeneratorfunction(dep_fn):
+            gen = dep_fn(**sub_kwargs)
+            result = next(gen)
+            cleanups.append(gen)
+        elif inspect.isasyncgenfunction(dep_fn):
+            import asyncio
+            async def _resolve_async_gen():
+                agen = dep_fn(**sub_kwargs)
+                val = await agen.__anext__()
+                cleanups.append(agen)
+                return val
+            result = asyncio.run(_resolve_async_gen())
+        elif inspect.iscoroutinefunction(dep_fn):
+            import asyncio
+            result = asyncio.run(dep_fn(**sub_kwargs))
         else:
-            return dependency_fn(**kwargs)
+            result = dep_fn(**sub_kwargs)
+
+        if use_cache:
+            cache[cache_key] = result
+        return result
 
 
 class QueryParamParser:
@@ -550,6 +563,16 @@ def create_enhanced_handler(original_handler, route_definition):
                 # Call original async handler and await it
                 result = await original_handler(**filtered_kwargs)
 
+                # Run dependency cleanups (generator teardown)
+                cleanups = context.get('_cleanups', [])
+                for gen in cleanups:
+                    try:
+                        next(gen)
+                    except StopIteration:
+                        pass
+                    except Exception:
+                        pass
+
                 # Normalize response - may return (content, status) or (content, status, content_type)
                 normalized = ResponseHandler.normalize_response(result)
                 if len(normalized) == 3:
@@ -638,6 +661,16 @@ def create_enhanced_handler(original_handler, route_definition):
 
                 # Call original sync handler
                 result = original_handler(**filtered_kwargs)
+
+                # Run dependency cleanups (generator teardown)
+                cleanups = context.get('_cleanups', [])
+                for gen in cleanups:
+                    try:
+                        next(gen)
+                    except StopIteration:
+                        pass
+                    except Exception:
+                        pass
 
                 # Normalize response - may return (content, status) or (content, status, content_type)
                 normalized = ResponseHandler.normalize_response(result)
