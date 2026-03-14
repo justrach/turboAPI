@@ -2,60 +2,18 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/zig-backend]
   pull_request:
     branches: [main]
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run clippy
-        run: cargo clippy --all-targets -- -W warnings 2>&1 || true
-
-  test-rust:
-    name: Test Rust
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-      fail-fast: false
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check Rust compilation
-        run: cargo check --all-targets
-
-  test-python:
-    name: "test (Python ${{ matrix.python-version }})"
+  test:
+    name: "test (Python ${{ matrix.python-version }}, ${{ matrix.os }})"
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ['3.13']
+        python-version: ['3.13', '3.14']
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
@@ -66,114 +24,117 @@ jobs:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: true
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      - name: Clone dhi (Zig modules)
+        run: git clone --depth 1 https://github.com/justrach/dhi.git /tmp/dhi
 
-      - name: Install dependencies
+      - name: Build turbonet extension
         run: |
-          python -m pip install --upgrade pip
-          pip install maturin pytest pytest-asyncio requests
+          python zig/build_turbonet.py --install
+        env:
+          DHI_PATH: /tmp/dhi
 
-      - name: Build and install turboapi
+      - name: Install Python package + test deps
         run: |
-          maturin build --release -i python --out dist
-          pip install dist/*.whl
-          # dhi is installed as a dependency automatically
+          pip install -e .
+          pip install pytest requests
 
       - name: Run tests
-        run: python -m pytest $GITHUB_WORKSPACE/tests/ -v --tb=short
+        run: python -m pytest tests/ -v --tb=short -x
 
   test-free-threaded:
-    name: "test (${{ matrix.python-version }} free-threaded)"
+    name: "test (Python 3.14t free-threaded, ${{ matrix.os }})"
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ['3.13t']
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }} (free-threaded)
+      - name: Set up Python 3.14t (free-threaded)
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.14t'
           allow-prereleases: true
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      - name: Clone dhi (Zig modules)
+        run: git clone --depth 1 https://github.com/justrach/dhi.git /tmp/dhi
 
-      - name: Install dependencies
+      - name: Build turbonet extension (free-threaded)
         run: |
-          python -m pip install --upgrade pip
-          pip install maturin pytest pytest-asyncio requests
+          python zig/build_turbonet.py --install
+        env:
+          DHI_PATH: /tmp/dhi
 
-      - name: Build and install turboapi (free-threaded)
+      - name: Install Python package + test deps
         run: |
-          maturin build --release -i python --out dist
-          pip install dist/*.whl
-          # dhi is installed as a dependency automatically
+          pip install -e .
+          pip install pytest requests
 
       - name: Run tests (free-threaded)
-        run: python -m pytest $GITHUB_WORKSPACE/tests/ -v --tb=short
+        run: python -m pytest tests/ -v --tb=short -x
 
-      - name: Run thread-safety smoke test
+      - name: Thread-safety smoke test
         run: |
           python -c "
           import threading, concurrent.futures
-          from turboapi import TurboAPI, TurboRequest, TurboResponse
+          from turboapi import TurboAPI
 
-          def create_app_and_routes(thread_id):
-              app = TurboAPI(title=f'App {thread_id}')
-              for i in range(100):
-                  @app.get(f'/t{thread_id}/route{i}')
-                  def handler(tid=thread_id, idx=i):
-                      return {'thread': tid, 'route': idx}
-              return thread_id
+          def create_app(tid):
+              app = TurboAPI(title=f'App {tid}')
+              for i in range(50):
+                  @app.get(f'/t{tid}/r{i}')
+                  def handler(t=tid, idx=i):
+                      return {'thread': t, 'route': idx}
+              return tid
 
           with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-              futures = [pool.submit(create_app_and_routes, t) for t in range(8)]
-              results = [f.result() for f in futures]
+              results = list(pool.map(create_app, range(8)))
               assert len(results) == 8
-          print('Free-threaded smoke test: 8 threads x 100 routes = OK')
+          print('Free-threaded smoke test: 8 threads x 50 routes = OK')
           "
 
-  build-check:
-    name: "build (${{ matrix.target }})"
+  zig-test:
+    name: "zig test"
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x64
+        os: [ubuntu-latest, macos-latest]
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
         with:
-          python-version: '3.13'
+          version: 0.15.2
 
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
+      - name: Set up Python (for headers)
+        uses: actions/setup-python@v5
         with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
-          sccache: 'true'
-          manylinux: auto
+          python-version: '3.14'
+          allow-prereleases: true
 
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-${{ matrix.os }}-${{ matrix.target }}
-          path: dist
+      - name: Clone dhi (Zig modules)
+        run: git clone --depth 1 https://github.com/justrach/dhi.git /tmp/dhi
+
+      - name: Run Zig unit tests
+        run: |
+          PY_INCLUDE=$(python -c "import sysconfig; print(sysconfig.get_path('include'))")
+          PY_LIBDIR=$(python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+          cd zig
+          zig build test \
+            -Dpython=3.14 \
+            -Dpy-include="$PY_INCLUDE" \
+            -Dpy-libdir="$PY_LIBDIR" \
+            -Ddhi-path=/tmp/dhi

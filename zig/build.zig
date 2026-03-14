@@ -22,7 +22,8 @@ pub fn build(b: *std.Build) void {
         "python3.13";
 
     // ── dhi modules ──
-    const dhi_path = b.option([]const u8, "dhi-path", "Path to dhi repository") orelse "/Users/rachpradhan/dhi";
+    const dhi_path = b.option([]const u8, "dhi-path", "Path to dhi repository (or set DHI_PATH env)") orelse
+        @panic("pass -Ddhi-path=<path> or set DHI_PATH env var");
     const dhi_root: std.Build.LazyPath = .{ .cwd_relative = dhi_path };
 
     const validator_mod = b.createModule(.{

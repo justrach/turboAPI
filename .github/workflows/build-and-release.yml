@@ -2,7 +2,6 @@ name: Build & Publish
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
@@ -12,151 +11,97 @@ permissions:
 
 jobs:
   check-version:
-    name: Check if version is new
+    name: Check version
     runs-on: ubuntu-latest
     outputs:
-      should_publish: ${{ steps.check.outputs.should_publish }}
-      version: ${{ steps.check.outputs.version }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - name: Check PyPI for existing version
-        id: check
+      - name: Extract version
+        id: version
         run: |
-          VERSION=$(grep -m1 'version = "' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)"/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "should_publish=true" >> $GITHUB_OUTPUT
-            echo "Tag push detected, will publish v$VERSION"
-            exit 0
-          fi
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/turboapi/$VERSION/json")
-          if [ "$HTTP_STATUS" = "404" ]; then
-            echo "should_publish=true" >> $GITHUB_OUTPUT
-            echo "Version $VERSION not on PyPI, will publish"
-          else
-            echo "should_publish=false" >> $GITHUB_OUTPUT
-            echo "Version $VERSION already on PyPI, skipping"
-          fi
+          echo "Version: $VERSION"
 
-  linux-x86_64:
-    runs-on: ubuntu-latest
+  build:
+    name: "build (${{ matrix.os }}, ${{ matrix.python }})"
+    runs-on: ${{ matrix.os }}
     needs: [check-version]
-    if: needs.check-version.outputs.should_publish == 'true'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: |
-            3.13
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: x86_64
-          args: --release --out dist --find-interpreter
-          sccache: 'true'
-          manylinux: auto
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-linux-x86_64
-          path: dist
-
-  linux-aarch64:
-    runs-on: ubuntu-24.04-arm
-    needs: [check-version]
-    if: needs.check-version.outputs.should_publish == 'true'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: |
-            3.13
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: aarch64
-          args: --release --out dist --find-interpreter
-          sccache: 'true'
-          manylinux: auto
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-linux-aarch64
-          path: dist
-
-  windows:
-    runs-on: windows-latest
-    needs: [check-version]
-    if: needs.check-version.outputs.should_publish == 'true'
     strategy:
       matrix:
-        target: [x64]
+        include:
+          - os: ubuntu-latest
+            python: '3.13'
+          - os: ubuntu-latest
+            python: '3.14'
+          - os: ubuntu-latest
+            python: '3.14t'
+          - os: macos-latest
+            python: '3.13'
+          - os: macos-latest
+            python: '3.14'
+          - os: macos-latest
+            python: '3.14t'
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: |
-            3.13
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          args: --release --out dist --find-interpreter
-          sccache: 'true'
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-windows-${{ matrix.target }}
-          path: dist
 
-  macos:
-    runs-on: macos-latest
-    needs: [check-version]
-    if: needs.check-version.outputs.should_publish == 'true'
-    strategy:
-      matrix:
-        target: [x86_64-apple-darwin, aarch64-apple-darwin]
-      fail-fast: false
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
         with:
-          python-version: |
-            3.13
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
         with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
-          sccache: 'true'
-      - uses: actions/upload-artifact@v4
+          version: 0.15.2
+
+      - name: Clone dhi
+        run: git clone --depth 1 https://github.com/justrach/dhi.git /tmp/dhi
+
+      - name: Build turbonet extension
+        run: python zig/build_turbonet.py --install --release
+        env:
+          DHI_PATH: /tmp/dhi
+
+      - name: Build wheel
+        run: |
+          pip install build
+          python -m build --wheel --outdir dist/
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-${{ matrix.target }}
-          path: dist
+          name: wheel-${{ matrix.os }}-py${{ matrix.python }}
+          path: dist/*.whl
 
   sdist:
+    name: Build sdist
     runs-on: ubuntu-latest
-    needs: [check-version]
-    if: needs.check-version.outputs.should_publish == 'true'
     steps:
       - uses: actions/checkout@v4
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist
+        run: |
+          pip install build
+          python -m build --sdist --outdir dist/
       - uses: actions/upload-artifact@v4
         with:
           name: sdist
-          path: dist
+          path: dist/*.tar.gz
 
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [linux-x86_64, linux-aarch64, windows, macos, sdist]
+    needs: [build, sdist]
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: '{wheels-*,sdist}'
+          pattern: '{wheel-*,sdist}'
           path: dist
           merge-multiple: true
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
@@ -164,7 +109,7 @@ jobs:
           skip-existing: true
 
   release:
-    name: Create GitHub Release
+    name: GitHub Release
     runs-on: ubuntu-latest
     needs: [check-version, publish]
     if: startsWith(github.ref, 'refs/tags/v')
@@ -174,44 +119,11 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
-          pattern: '{wheels-*,sdist}'
+          pattern: '{wheel-*,sdist}'
           path: dist
           merge-multiple: true
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
-          generate_release_notes: true
-
-  tag-and-release:
-    name: Tag new version
-    runs-on: ubuntu-latest
-    needs: [check-version, publish]
-    if: github.ref == 'refs/heads/main' && needs.check-version.outputs.should_publish == 'true'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Configure git
-        run: |
-          git config user.email "action@github.com"
-          git config user.name "GitHub Action"
-      - name: Create tag
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION="${{ needs.check-version.outputs.version }}"
-          git tag "v${VERSION}"
-          git push origin "v${VERSION}"
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: '{wheels-*,sdist}'
-          path: dist
-          merge-multiple: true
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ needs.check-version.outputs.version }}
           files: dist/*
           generate_release_notes: true
