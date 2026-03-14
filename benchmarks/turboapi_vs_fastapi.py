@@ -11,19 +11,16 @@ Usage:
 """
 
 import argparse
-import json
-import multiprocessing
-import os
 import re
-import signal
 import socket
 import subprocess
 import sys
 import textwrap
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
 
 def wait_for_server(port: int, timeout: float = 10.0):
     """Block until a TCP connection to localhost:port succeeds."""
@@ -37,8 +34,15 @@ def wait_for_server(port: int, timeout: float = 10.0):
     return False
 
 
-def run_wrk(port: int, path: str, *, duration: int, threads: int,
-            connections: int, script: str | None = None) -> dict:
+def run_wrk(
+    port: int,
+    path: str,
+    *,
+    duration: int,
+    threads: int,
+    connections: int,
+    script: str | None = None,
+) -> dict:
     """Run wrk and return parsed results."""
     cmd = [
         "wrk",
@@ -61,12 +65,12 @@ def parse_wrk_output(output: str) -> dict:
     data: dict = {"raw": output}
 
     # Requests/sec:  12345.67
-    m = re.search(r'Requests/sec:\s+([\d.]+)', output)
+    m = re.search(r"Requests/sec:\s+([\d.]+)", output)
     data["rps"] = float(m.group(1)) if m else 0.0
 
     # Latency   avg    stdev   max   +/- Stdev
     #           1.23ms  0.45ms 12.34ms  78.90%
-    m = re.search(r'Latency\s+([\d.]+\w+)\s+([\d.]+\w+)\s+([\d.]+\w+)', output)
+    m = re.search(r"Latency\s+([\d.]+\w+)\s+([\d.]+\w+)\s+([\d.]+\w+)", output)
     if m:
         data["lat_avg"] = m.group(1)
         data["lat_stdev"] = m.group(2)
@@ -75,24 +79,27 @@ def parse_wrk_output(output: str) -> dict:
         data["lat_avg"] = data["lat_stdev"] = data["lat_max"] = "N/A"
 
     # Transfer/sec
-    m = re.search(r'Transfer/sec:\s+([\d.]+\w+)', output)
+    m = re.search(r"Transfer/sec:\s+([\d.]+\w+)", output)
     data["transfer"] = m.group(1) if m else "N/A"
 
     # Socket errors
-    m = re.search(r'Socket errors:.*?(\d+)\s+connect.*?(\d+)\s+read.*?(\d+)\s+write.*?(\d+)\s+timeout', output)
+    m = re.search(
+        r"Socket errors:.*?(\d+)\s+connect.*?(\d+)\s+read.*?(\d+)\s+write.*?(\d+)\s+timeout", output
+    )
     if m:
         data["errors"] = sum(int(m.group(i)) for i in range(1, 5))
     else:
         data["errors"] = 0
 
     # Total requests
-    m = re.search(r'(\d+)\s+requests\s+in', output)
+    m = re.search(r"(\d+)\s+requests\s+in", output)
     data["total_requests"] = int(m.group(1)) if m else 0
 
     return data
 
 
 # ── server launchers ─────────────────────────────────────────────────────────
+
 
 def run_fastapi_server(port: int):
     """Run FastAPI + Uvicorn in a subprocess."""
@@ -130,14 +137,15 @@ def run_fastapi_server(port: int):
     """)
     return subprocess.Popen(
         [sys.executable, "-c", code],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
 
 def run_turboapi_server(port: int):
     """Run TurboAPI + Zig backend in a subprocess."""
     code = textwrap.dedent(f"""\
-        import os
+        import os, sys
         os.environ["TURBO_DISABLE_RATE_LIMITING"] = "1"
 
         from turboapi import TurboAPI
@@ -174,7 +182,8 @@ def run_turboapi_server(port: int):
     """)
     return subprocess.Popen(
         [sys.executable, "-c", code],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
 
 
@@ -188,6 +197,7 @@ wrk.headers["Content-Type"] = "application/json"
 
 
 # ── benchmark runner ─────────────────────────────────────────────────────────
+
 
 @dataclass
 class TestCase:
@@ -213,9 +223,13 @@ class Result:
 
 def main():
     parser = argparse.ArgumentParser(description="TurboAPI vs FastAPI benchmark")
-    parser.add_argument("-d", "--duration", type=int, default=10, help="Seconds per test (default: 10)")
+    parser.add_argument(
+        "-d", "--duration", type=int, default=10, help="Seconds per test (default: 10)"
+    )
     parser.add_argument("-t", "--threads", type=int, default=4, help="wrk threads (default: 4)")
-    parser.add_argument("-c", "--connections", type=int, default=100, help="wrk connections (default: 100)")
+    parser.add_argument(
+        "-c", "--connections", type=int, default=100, help="wrk connections (default: 100)"
+    )
     args = parser.parse_args()
 
     # Check wrk is available
@@ -225,6 +239,14 @@ def main():
 
     turbo_port = 9100
     fastapi_port = 9200
+
+    # Kill any leftover processes on these ports
+    for port in (turbo_port, fastapi_port):
+        subprocess.run(
+            ["fuser", "-k", f"{port}/tcp"],
+            capture_output=True,
+        )
+    time.sleep(0.5)
 
     # Write POST lua script
     lua_path = "/tmp/turbo_bench_post.lua"
@@ -242,7 +264,9 @@ def main():
     print("=" * 78)
     print("  TurboAPI (Zig backend) vs FastAPI (Uvicorn) — HTTP Benchmark")
     print("=" * 78)
-    print(f"  wrk: {args.threads} threads, {args.connections} connections, {args.duration}s per test")
+    print(
+        f"  wrk: {args.threads} threads, {args.connections} connections, {args.duration}s per test"
+    )
     print(f"  Python: {sys.version.split()[0]}")
     print()
 
@@ -257,9 +281,14 @@ def main():
 
     print("  Starting TurboAPI (Zig)...", end=" ", flush=True)
     turbo_proc = run_turboapi_server(turbo_port)
-    if not wait_for_server(turbo_port):
+    if not wait_for_server(turbo_port, timeout=15.0):
         print("FAILED (timeout)")
         turbo_proc.kill()
+        out, err = turbo_proc.communicate(timeout=5)
+        if out:
+            print("  stdout:", out.decode(errors="replace")[-500:])
+        if err:
+            print("  stderr:", err.decode(errors="replace")[-500:])
         fastapi_proc.kill()
         sys.exit(1)
     print(f"✅  port {turbo_port}")
@@ -279,28 +308,40 @@ def main():
         print(f"  ▸ {t.name}", flush=True)
 
         # TurboAPI
-        print(f"    TurboAPI ...", end=" ", flush=True)
-        turbo = run_wrk(turbo_port, t.path,
-                        duration=args.duration, threads=args.threads,
-                        connections=args.connections, script=t.script)
+        print("    TurboAPI ...", end=" ", flush=True)
+        turbo = run_wrk(
+            turbo_port,
+            t.path,
+            duration=args.duration,
+            threads=args.threads,
+            connections=args.connections,
+            script=t.script,
+        )
         print(f"{turbo['rps']:,.0f} req/s")
 
         # FastAPI
-        print(f"    FastAPI  ...", end=" ", flush=True)
-        fast = run_wrk(fastapi_port, t.path,
-                       duration=args.duration, threads=args.threads,
-                       connections=args.connections, script=t.script)
+        print("    FastAPI  ...", end=" ", flush=True)
+        fast = run_wrk(
+            fastapi_port,
+            t.path,
+            duration=args.duration,
+            threads=args.threads,
+            connections=args.connections,
+            script=t.script,
+        )
         print(f"{fast['rps']:,.0f} req/s")
 
-        results.append(Result(
-            test=t.name,
-            turbo_rps=turbo["rps"],
-            fastapi_rps=fast["rps"],
-            turbo_lat=turbo["lat_avg"],
-            fastapi_lat=fast["lat_avg"],
-            turbo_errors=turbo["errors"],
-            fastapi_errors=fast["errors"],
-        ))
+        results.append(
+            Result(
+                test=t.name,
+                turbo_rps=turbo["rps"],
+                fastapi_rps=fast["rps"],
+                turbo_lat=turbo["lat_avg"],
+                fastapi_lat=fast["lat_avg"],
+                turbo_errors=turbo["errors"],
+                fastapi_errors=fast["errors"],
+            )
+        )
         print()
 
     # ── Stop servers ─────────────────────────────────────────────────────────
@@ -311,13 +352,17 @@ def main():
 
     # ── Results table ────────────────────────────────────────────────────────
     print("=" * 78)
-    print(f"  {'Endpoint':<28} {'TurboAPI':>12} {'FastAPI':>12} {'Speedup':>10} {'Latency (T/F)':>16}")
+    print(
+        f"  {'Endpoint':<28} {'TurboAPI':>12} {'FastAPI':>12} {'Speedup':>10} {'Latency (T/F)':>16}"
+    )
     print("-" * 78)
 
     for r in results:
         arrow = "🟢" if r.speedup >= 1.0 else "🔴"
-        print(f"  {r.test:<28} {r.turbo_rps:>10,.0f}/s {r.fastapi_rps:>10,.0f}/s "
-              f"{arrow} {r.speedup:>6.2f}x  {r.turbo_lat:>6}/{r.fastapi_lat:<6}")
+        print(
+            f"  {r.test:<28} {r.turbo_rps:>10,.0f}/s {r.fastapi_rps:>10,.0f}/s "
+            f"{arrow} {r.speedup:>6.2f}x  {r.turbo_lat:>6}/{r.fastapi_lat:<6}"
+        )
 
     print("=" * 78)
 
