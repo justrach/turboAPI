@@ -115,4 +115,19 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+
+    // ── Fuzz ─────────────────────────────────────────────────────────────────
+    // Fuzz tests live inline in server.zig, router.zig, and dhi_validator.zig
+    // as test blocks that call std.testing.fuzz().
+    //
+    // Run seed corpus (CI mode — passes through all corpus inputs once):
+    //   zig build test
+    //
+    // Run continuous coverage-guided fuzzing (developer mode):
+    //   zig build test --fuzz
+    //
+    // The fuzz tests are:
+    //   server.zig       — fuzz_percentDecode, fuzz_queryStringGet, fuzz_requestLineParsing
+    //   router.zig       — fuzz_findRoute
+    //   dhi_validator.zig — fuzz_validateJson
 }

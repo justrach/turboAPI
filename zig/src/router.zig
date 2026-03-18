@@ -406,3 +406,64 @@ test "no match returns null" {
     const m = r.findRoute("GET", "/posts");
     try std.testing.expect(m == null);
 }
+
+
+// ── Fuzz tests ───────────────────────────────────────────────────────────────
+// Run: zig build fuzz-router  (then execute the binary with --fuzz)
+
+fn fuzz_findRoute(_: void, input: []const u8) anyerror!void {
+    if (input.len == 0) return;
+
+    // First byte selects the HTTP method
+    const methods = [_][]const u8{ "GET", "POST", "PUT", "DELETE", "PATCH", "" };
+    const method = methods[input[0] % methods.len];
+    // Remainder is the path (may be empty, may be garbage)
+    const path = if (input.len > 1) input[1..] else "/";
+
+    var r = Router.init(std.heap.c_allocator);
+    defer r.deinit();
+
+    // Seed with representative routes
+    r.addRoute("GET",    "/",                  "GET /")                 catch return;
+    r.addRoute("GET",    "/users",             "GET /users")            catch return;
+    r.addRoute("GET",    "/users/{id}",        "GET /users/{id}")       catch return;
+    r.addRoute("POST",   "/users",             "POST /users")           catch return;
+    r.addRoute("PUT",    "/users/{id}",        "PUT /users/{id}")       catch return;
+    r.addRoute("DELETE", "/users/{id}",        "DELETE /users/{id}")    catch return;
+    r.addRoute("GET",    "/items/{cat}/{id}",  "GET /items/{cat}/{id}") catch return;
+    r.addRoute("GET",    "/files/*",           "GET /files/*")          catch return;
+    r.addRoute("GET",    "/health",            "GET /health")           catch return;
+
+    // Invariant: findRoute must never panic regardless of method or path content
+    if (r.findRoute(method, path)) |match_c| {
+        var match = match_c; // mutable copy so deinit(*self) compiles
+        defer match.deinit();
+        // Invariant: matched handler_key must always be non-empty
+        try std.testing.expect(match.handler_key.len > 0);
+    }
+    // null is also valid — means no match, not an error
+}
+
+test "fuzz: router findRoute — never panics, no OOB on any path" {
+    try std.testing.fuzz({}, fuzz_findRoute, .{ .corpus = &.{
+        // method byte + path
+        "\x00/",                        // GET /
+        "\x00/users/42",                // GET /users/42
+        "\x01/users",                   // POST /users
+        "\x00/users/",                  // trailing slash
+        "\x00/items/books/99",          // multi-param
+        "\x00/health",                  // static route
+        "\x00/files/deep/nested/path",  // wildcard
+        // Adversarial inputs
+        "\x00" ++ "/" ++ ("a/" ** 70),  // 70 segments — exceeds 64-segment limit → null
+        "\x00/\x00secret",              // null byte in path
+        "\x00/" ++ ("a" ** 4096),       // very long single segment
+        "\x00/%2F%2F/../admin",         // path traversal attempt
+        "\x00/users/%00/profile",       // null byte percent-encoded
+        "\x00//double//slash//path",    // double slashes
+        "\x00/users/{injected}",        // brace injection in request path
+        "\x00/\xFF\xFE\xFD",           // invalid UTF-8
+        "\x05/anything",                // empty method string
+        "\x00",                         // no path (just method byte)
+    }});
+}

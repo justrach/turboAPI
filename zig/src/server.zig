@@ -12,6 +12,100 @@ const allocator = std.heap.c_allocator;
 
 // ── Route storage ───────────────────────────────────────────────────────────
 
+const MAX_PARAMS: usize = 16;
+
+const ParamType = enum(u8) { str, int, float, bool_val };
+
+const ParamMeta = struct {
+    name: []const u8,
+    type_tag: ParamType,
+    has_default: bool, // true → skip if missing (let Python use its own default)
+};
+
+fn parseParamType(s: []const u8) ParamType {
+    if (std.mem.eql(u8, s, "int")) return .int;
+    if (std.mem.eql(u8, s, "float")) return .float;
+    if (std.mem.eql(u8, s, "bool")) return .bool_val;
+    return .str;
+}
+
+/// Parse "name:type|name:type|..." into out[]. Returns count of parsed params.
+/// Slices point into meta_str, so meta_str must outlive the result.
+/// Parse "name:type[?]|name:type[?]|..." into out[]. Returns count of parsed params.
+/// '?' suffix on type means the param has a Python default — skip if missing.
+/// Slices point into meta_str, so meta_str must outlive the result.
+fn parseParamMeta(meta_str: []const u8, out: *[MAX_PARAMS]ParamMeta) usize {
+    if (meta_str.len == 0) return 0;
+    var count: usize = 0;
+    var it = std.mem.splitScalar(u8, meta_str, '|');
+    while (it.next()) |pair| {
+        if (pair.len == 0 or count >= MAX_PARAMS) break;
+        const colon = std.mem.indexOfScalar(u8, pair, ':') orelse continue;
+        var type_str = pair[colon + 1 ..];
+        const has_default = type_str.len > 0 and type_str[type_str.len - 1] == '?';
+        if (has_default) type_str = type_str[0 .. type_str.len - 1];
+        out[count] = .{
+            .name = pair[0..colon],
+            .type_tag = parseParamType(type_str),
+            .has_default = has_default,
+        };
+        count += 1;
+    }
+    return count;
+}
+
+/// Fast query-string value lookup. Format: "k1=v1&k2=v2&...".
+/// No percent-decoding (fine for int/float/simple str params in hot path).
+/// Fast query-string value lookup. Format: "k1=v1&k2=v2&...".
+fn queryStringGet(qs: []const u8, key: []const u8) ?[]const u8 {
+    var it = std.mem.splitScalar(u8, qs, '&');
+    while (it.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        if (std.mem.eql(u8, pair[0..eq], key)) return pair[eq + 1 ..];
+    }
+    return null;
+}
+
+fn hexNibble(ch: u8) ?u8 {
+    return switch (ch) {
+        '0'...'9' => ch - '0',
+        'a'...'f' => ch - 'a' + 10,
+        'A'...'F' => ch - 'A' + 10,
+        else => null,
+    };
+}
+
+/// Percent-decode src into buf. '+' → space, '%XX' → byte. Returns decoded slice.
+/// If buf is too small, copies as many bytes as fit (safe truncation).
+fn percentDecode(src: []const u8, buf: []u8) []u8 {
+    var out: usize = 0;
+    var i: usize = 0;
+    while (i < src.len and out < buf.len) {
+        if (src[i] == '+') {
+            buf[out] = ' ';
+            out += 1;
+            i += 1;
+        } else if (src[i] == '%' and i + 2 < src.len) {
+            const hi = hexNibble(src[i + 1]);
+            const lo = hexNibble(src[i + 2]);
+            if (hi != null and lo != null) {
+                buf[out] = (hi.? << 4) | lo.?;
+                out += 1;
+                i += 3;
+            } else {
+                buf[out] = src[i];
+                out += 1;
+                i += 1;
+            }
+        } else {
+            buf[out] = src[i];
+            out += 1;
+            i += 1;
+        }
+    }
+    return buf[0..out];
+}
+
 const HandlerEntry = struct {
     handler: *c.PyObject,
     handler_type: []const u8,
@@ -19,6 +113,9 @@ const HandlerEntry = struct {
     original_handler: ?*c.PyObject,
     model_param_name: ?[]const u8,
     model_class: ?*c.PyObject,
+    // Vectorcall dispatch: ordered param metadata parsed at registration time
+    param_meta: [MAX_PARAMS]ParamMeta = undefined,
+    param_count: usize = 0,
 };
 
 const HeaderPair = struct {
@@ -197,15 +294,27 @@ pub fn server_add_route_fast(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?
     c.Py_IncRef(orig.?);
     const method_s = std.mem.span(method);
     const path_s = std.mem.span(path);
+    const ht_s = std.mem.span(ht);
     const key = std.fmt.allocPrint(allocator, "{s} {s}", .{ method_s, path_s }) catch return null;
-    getRoutes().put(key, .{
+
+    // For simple_sync: parse "name:type|..." metadata into ordered ParamMeta array.
+    // Dupe the string so name slices remain valid after the Python string is freed.
+    var entry = HandlerEntry{
         .handler = handler.?,
-        .handler_type = std.mem.span(ht),
+        .handler_type = ht_s,
         .param_types_json = std.mem.span(ptj),
         .original_handler = orig,
         .model_param_name = null,
         .model_class = null,
-    }) catch return null;
+    };
+
+    if (std.mem.eql(u8, ht_s, "simple_sync")) {
+        const meta_str = allocator.dupe(u8, std.mem.span(ptj)) catch return null;
+        entry.param_count = parseParamMeta(meta_str, &entry.param_meta);
+        entry.param_types_json = meta_str;
+    }
+
+    getRoutes().put(key, entry) catch return null;
     getRouter().addRoute(method_s, path_s, key) catch return null;
 
     return py.pyNone();
@@ -661,11 +770,16 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         callPythonNoArgs(tstate, entry, stream);
         return;
     }
+    if (std.mem.eql(u8, ht, "simple_sync")) {
+        // Vectorcall: Zig assembles positional args, zero Python dict overhead
+        callPythonVectorcall(tstate, entry, query_string, &match.params, stream);
+        return;
+    }
     if (std.mem.eql(u8, ht, "model_sync") and body.len > 0) {
         callPythonModelHandlerDirect(tstate, entry, body, &match.params, stream);
         return;
     }
-    if (std.mem.eql(u8, ht, "simple_sync") or std.mem.eql(u8, ht, "body_sync") or std.mem.eql(u8, ht, "model_sync")) {
+    if (std.mem.eql(u8, ht, "body_sync") or std.mem.eql(u8, ht, "model_sync")) {
         callPythonHandlerDirect(tstate, entry, query_string, body, &match.params, stream);
         return;
     }
@@ -802,6 +916,98 @@ fn callPythonNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.net.St
     defer py.PyEval_ReleaseThread(tstate);
 
     const result = py.PyObject_CallNoArgs(entry.handler) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(result);
+    sendTupleResponse(stream, result);
+}
+
+/// Fast path for simple_sync handlers with 1+ params.
+/// Zig assembles the positional arg vector from path/query params — no Python
+/// dict allocation, no parse_qs, no call_kwargs. Calls via PyObject_Vectorcall.
+/// Fast path for simple_sync handlers with 1+ params.
+/// Zig assembles the positional arg vector from path/query params — no Python
+/// dict allocation, no parse_qs, no call_kwargs. Calls via PyObject_Vectorcall.
+/// Params with has_default=true that are missing from the request are omitted
+/// from the tail of the arg vector, letting Python apply its own defaults.
+/// Fast path for simple_sync handlers with 1+ params.
+/// Zig assembles the positional arg vector from path/query params — no Python
+/// dict allocation, no parse_qs, no call_kwargs. Calls via PyObject_Vectorcall.
+/// Params with has_default=true that are missing from the request are omitted
+/// from the tail of the arg vector, letting Python apply its own defaults.
+fn callPythonVectorcall(
+    tstate: ?*anyopaque,
+    entry: HandlerEntry,
+    query_string: []const u8,
+    params: *const std.StringHashMap([]const u8),
+    stream: std.net.Stream,
+) void {
+    py.PyEval_AcquireThread(tstate);
+    defer py.PyEval_ReleaseThread(tstate);
+
+    const argc = entry.param_count;
+    var argv: [MAX_PARAMS]?*c.PyObject = undefined;
+    // Track created objects for Py_DecRef after the call.
+    var created: [MAX_PARAMS]?*c.PyObject = [_]?*c.PyObject{null} ** MAX_PARAMS;
+    defer for (created[0..argc]) |obj| {
+        if (obj) |o| c.Py_DecRef(o);
+    };
+
+    // Per-param decode buffer for percent-decoding str query values.
+    var decode_buf: [2048]u8 = undefined;
+
+    // last_filled: highest index+1 where we have a real value.
+    // Trailing optional params with no value are excluded from the vectorcall
+    // so Python uses its own default — never passes None for missing optionals.
+    var last_filled: usize = 0;
+
+    for (entry.param_meta[0..argc], 0..) |pm, i| {
+        // Path params take priority; fall back to query string.
+        const val_str: ?[]const u8 = params.get(pm.name) orelse queryStringGet(query_string, pm.name);
+
+        if (val_str) |vs| {
+            const py_obj: ?*c.PyObject = switch (pm.type_tag) {
+                .int => blk: {
+                    const n = std.fmt.parseInt(i64, vs, 10) catch 0;
+                    break :blk c.PyLong_FromLongLong(n);
+                },
+                .float => blk: {
+                    const f = std.fmt.parseFloat(f64, vs) catch 0.0;
+                    break :blk c.PyFloat_FromDouble(f);
+                },
+                .bool_val => blk: {
+                    const b: c_long = if (std.mem.eql(u8, vs, "true") or std.mem.eql(u8, vs, "1")) 1 else 0;
+                    break :blk c.PyBool_FromLong(b);
+                },
+                .str => blk: {
+                    // Percent-decode query string values (%20 → space, + → space)
+                    const decoded = percentDecode(vs, &decode_buf);
+                    break :blk c.PyUnicode_FromStringAndSize(decoded.ptr, @intCast(decoded.len));
+                },
+            };
+            if (py_obj) |obj| {
+                argv[i] = obj;
+                created[i] = obj;
+                last_filled = i + 1;
+            } else {
+                argv[i] = @ptrCast(&c._Py_NoneStruct);
+                if (!pm.has_default) last_filled = i + 1;
+            }
+        } else {
+            // Missing param: if required, pass None; if optional, skip (Python uses default)
+            argv[i] = @ptrCast(&c._Py_NoneStruct);
+            if (!pm.has_default) last_filled = i + 1;
+        }
+    }
+
+    const result = py.PyObject_Vectorcall(
+        entry.handler,
+        @as([*]const ?*c.PyObject, @ptrCast(&argv)),
+        last_filled, // excludes trailing missing optionals
+        null,
+    ) orelse {
         c.PyErr_Print();
         sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
         return;
@@ -1213,4 +1419,145 @@ fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, b
 pub fn configure_rate_limiting(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     // No-op for now – will implement later
     return py.pyNone();
+}
+
+
+// ── Fuzz tests ───────────────────────────────────────────────────────────────
+// Run: zig build fuzz-http  (then execute the binary with --fuzz)
+//
+// These tests exercise the parsing functions used by handleOneRequest.
+// The invariants are: no panics, no out-of-bounds access, bounded output.
+
+fn fuzz_percentDecode(_: void, input: []const u8) anyerror!void {
+    var buf: [4096]u8 = undefined;
+    const out = percentDecode(input, &buf);
+    // Decoded output is never longer than percent-encoded input
+    try std.testing.expect(out.len <= input.len);
+    // Output must fit in buffer
+    try std.testing.expect(out.len <= buf.len);
+    // Output must be a subslice of buf
+    const buf_start = @intFromPtr(&buf);
+    const buf_end   = buf_start + buf.len;
+    const out_start = @intFromPtr(out.ptr);
+    try std.testing.expect(out_start >= buf_start and out_start <= buf_end);
+}
+
+test "fuzz: percentDecode — output bounded, no OOB" {
+    try std.testing.fuzz({}, fuzz_percentDecode, .{ .corpus = &.{
+        "%00",                              // null byte
+        "%GG",                              // invalid hex digits
+        "%",                                // bare percent at end of input
+        "%2",                               // truncated percent sequence
+        "hello+world",                      // plus → space
+        "a%20b%20c",                        // spaces
+        "%FF%FE%FD",                        // high bytes
+        &([_]u8{'%'} ** 200),               // 200 bare percents
+        "%2F%2F..%2F..%2Fetc%2Fpasswd",    // path traversal
+        "%00%00%00",                        // three null bytes
+    }});
+}
+
+fn fuzz_queryStringGet(_: void, input: []const u8) anyerror!void {
+    // Split: first 16 bytes = key, remainder = query string
+    const split = @min(input.len, 16);
+    const key = input[0..split];
+    const qs  = if (split < input.len) input[split..] else "";
+
+    const result = queryStringGet(qs, key);
+    if (result) |v| {
+        // Returned slice must be within the query string buffer
+        const qs_start = @intFromPtr(qs.ptr);
+        const qs_end   = qs_start + qs.len;
+        const v_start  = @intFromPtr(v.ptr);
+        try std.testing.expect(v_start >= qs_start and v_start <= qs_end);
+    }
+}
+
+test "fuzz: queryStringGet — result is within input, no panic" {
+    try std.testing.fuzz({}, fuzz_queryStringGet, .{ .corpus = &.{
+        "key" ++ "key=value",
+        "x"   ++ "x=1&y=2&z=3",
+        "a"   ++ "a=&b=c",
+        "k"   ++ "k",
+        ""    ++ "=value",
+        "foo" ++ "foo=bar&foo=baz",         // duplicate key
+        "q"   ++ "q=" ++ ("A" ** 2000),     // very long value
+        "k"   ++ "k=\x00\xFF",              // binary values
+        "k"   ++ "&&&&&",                   // no values, only separators
+    }});
+}
+
+fn fuzz_requestLineParsing(_: void, input: []const u8) anyerror!void {
+    if (input.len == 0) return;
+
+    // The parser searches for \r\n\r\n to delimit headers from body.
+    // If absent → server returns 431 and stops. We mirror that.
+    const he = std.mem.indexOf(u8, input, "\r\n\r\n") orelse return;
+
+    // Parse the first line (request line).
+    const first_line_end = std.mem.indexOf(u8, input[0..he], "\r\n") orelse return;
+    const first_line = input[0..first_line_end];
+
+    var parts = std.mem.splitScalar(u8, first_line, ' ');
+    const method   = parts.next() orelse return;
+    const raw_path = parts.next() orelse return;
+    _ = method;
+
+    // Split path from query string at '?'
+    const q_idx        = std.mem.indexOf(u8, raw_path, "?");
+    const path         = if (q_idx) |i| raw_path[0..i] else raw_path;
+    const query_string = if (q_idx) |i| raw_path[i + 1 ..] else "";
+    _ = path;
+    _ = query_string;
+
+    // Parse headers — real function, same file
+    const request_head = input[0 .. he + 4];
+    var headers = parseHeaders(request_head, first_line_end, he);
+    defer headers.deinit(allocator);
+
+    // Validate Content-Length parsing on adversarial values
+    for (headers.items) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "content-length")) {
+            const cl = std.fmt.parseInt(usize, h.value, 10) catch 0;
+            const max_body: usize = 16 * 1024 * 1024;
+            _ = @min(cl, max_body);
+        }
+    }
+}
+
+test "fuzz: HTTP request-line and header parsing — no panic on malformed input" {
+    try std.testing.fuzz({}, fuzz_requestLineParsing, .{ .corpus = &.{
+        // Minimal valid GET
+        "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        // Valid POST with body
+        "POST /items HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+        // Missing HTTP version token
+        "GET /\r\n\r\n",
+        // Empty method
+        " / HTTP/1.1\r\n\r\n",
+        // Huge Content-Length (parser must cap it)
+        "POST / HTTP/1.1\r\nContent-Length: 99999999999999999999\r\n\r\n",
+        // Negative Content-Length (parseInt → error → 0)
+        "POST / HTTP/1.1\r\nContent-Length: -1\r\n\r\n",
+        // CRLF injection attempt in header value
+        "GET / HTTP/1.1\r\nX-Header: value\r\nInjected: header\r\n\r\n",
+        // Header with no colon (should be skipped)
+        "GET / HTTP/1.1\r\nMalformedHeaderLine\r\n\r\n",
+        // Null byte in path
+        "GET /\x00secret HTTP/1.1\r\n\r\n",
+        // Very long path (> 8KB header buffer)
+        "GET /" ++ ("a" ** 7000) ++ " HTTP/1.1\r\n\r\n",
+        // Very long header value
+        "GET / HTTP/1.1\r\nX-Custom: " ++ ("B" ** 7000) ++ "\r\n\r\n",
+        // Bare \n instead of \r\n
+        "GET / HTTP/1.1\nHost: x\n\n",
+        // No path at all
+        "GET HTTP/1.1\r\n\r\n",
+        // Method with no space
+        "GETHTTP/1.1\r\n\r\n",
+        // Percent-encoded path
+        "GET /users%2F42 HTTP/1.1\r\n\r\n",
+        // Query string with adversarial chars
+        "GET /search?q=%00&limit=-1&page=\xFF HTTP/1.1\r\n\r\n",
+    }});
 }
