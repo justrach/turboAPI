@@ -1,7 +1,7 @@
 """
 TurboAPI - Revolutionary Python web framework
 FastAPI-compatible API with a native backend.
-Requires Python 3.13+ free-threading for maximum performance.
+Requires Python 3.14+ free-threading for maximum performance.
 """
 
 # Core application

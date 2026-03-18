@@ -1,0 +1,123 @@
+name: Pre-release (Beta)
+
+on:
+  push:
+    branches: [feature/zig-backend]
+  workflow_dispatch:
+    inputs:
+      beta_number:
+        description: 'Beta number (e.g. 1, 2, 3). Leave empty to auto-increment.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  test:
+    name: "test (${{ matrix.os }}, py${{ matrix.python }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.14t'
+          - os: macos-latest
+            python: '3.14t'
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Clone dhi
+        run: git clone --depth 1 https://github.com/justrach/dhi.git /tmp/dhi
+
+      - name: Build turbonet extension
+        run: python zig/build_turbonet.py --install
+        env:
+          DHI_PATH: /tmp/dhi
+
+      - name: Install Python package + test deps
+        run: |
+          pip install -e .
+          pip install pytest requests
+
+      - name: Run tests
+        run: |
+          python -m pytest tests/ -v --tb=short -k "not websocket"
+
+  pre-release:
+    name: Build & publish beta
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          allow-prereleases: true
+
+      - name: Compute beta version
+        id: version
+        run: |
+          BASE=$(grep -m1 'version' pyproject.toml | sed 's/.*"\(.*\)"/\1/')
+          echo "base=$BASE"
+
+          # If manual beta number provided, use it
+          if [ -n "${{ github.event.inputs.beta_number }}" ]; then
+            BETA="${{ github.event.inputs.beta_number }}"
+          else
+            # Auto-increment: count commits on this branch since diverging from main
+            BETA=$(git rev-list --count origin/main..HEAD 2>/dev/null || echo "1")
+            [ "$BETA" = "0" ] && BETA=1
+          fi
+
+          VERSION="${BASE}b${BETA}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Beta version: $VERSION"
+
+      - name: Set beta version in pyproject.toml
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
+          cat pyproject.toml | head -8
+
+      - name: Build sdist
+        run: |
+          pip install build
+          python -m build --sdist --outdir dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: beta-sdist
+          path: dist/*.tar.gz
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
+
+      - name: Summary
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "## 🚀 Published turboapi==$VERSION (beta)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "pip install turboapi==$VERSION" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
