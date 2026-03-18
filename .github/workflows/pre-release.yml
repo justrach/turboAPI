@@ -1,12 +1,14 @@
-name: Pre-release (Beta)
+name: Pre-release (RC / Beta)
 
 on:
   push:
-    branches: [feature/zig-backend]
+    branches:
+      - 'rc/**'
+      - 'feature/zig-backend'
   workflow_dispatch:
     inputs:
-      beta_number:
-        description: 'Beta number (e.g. 1, 2, 3). Leave empty to auto-increment.'
+      pre_number:
+        description: 'Pre-release number (e.g. 1, 2, 3). Leave empty to auto-increment.'
         required: false
         type: string
 
@@ -58,7 +60,7 @@ jobs:
           python -m pytest tests/ -v --tb=short -k "not websocket"
 
   pre-release:
-    name: Build & publish beta
+    name: Build & publish pre-release
     runs-on: ubuntu-latest
     needs: [test]
     steps:
@@ -72,26 +74,35 @@ jobs:
           python-version: '3.14'
           allow-prereleases: true
 
-      - name: Compute beta version
+      - name: Compute pre-release version
         id: version
         run: |
-          BASE=$(grep -m1 'version' pyproject.toml | sed 's/.*"\(.*\)"/\1/')
-          echo "base=$BASE"
+          BASE=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)"/\1/')
+          # Strip any existing pre-release suffix to get the clean base (e.g. 1.0.0rc1 -> 1.0.0)
+          BASE_CLEAN=$(echo "$BASE" | sed 's/[a-z].*//')
+          echo "base=$BASE_CLEAN"
 
-          # If manual beta number provided, use it
-          if [ -n "${{ github.event.inputs.beta_number }}" ]; then
-            BETA="${{ github.event.inputs.beta_number }}"
+          # rc/* branches get rcN suffix; everything else gets bN (beta)
+          BRANCH="${GITHUB_REF_NAME}"
+          if echo "$BRANCH" | grep -q '^rc/'; then
+            PREFIX="rc"
           else
-            # Auto-increment: count commits on this branch since diverging from main
-            BETA=$(git rev-list --count origin/main..HEAD 2>/dev/null || echo "1")
-            [ "$BETA" = "0" ] && BETA=1
+            PREFIX="b"
           fi
 
-          VERSION="${BASE}b${BETA}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Beta version: $VERSION"
+          # Manual number overrides auto-increment
+          if [ -n "${{ github.event.inputs.pre_number }}" ]; then
+            N="${{ github.event.inputs.pre_number }}"
+          else
+            N=$(git rev-list --count origin/main..HEAD 2>/dev/null || echo "1")
+            [ "$N" = "0" ] && N=1
+          fi
 
-      - name: Set beta version in pyproject.toml
+          VERSION="${BASE_CLEAN}${PREFIX}${N}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Pre-release version: $VERSION"
+
+      - name: Set version in pyproject.toml
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
@@ -104,7 +115,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: beta-sdist
+          name: pre-release-sdist
           path: dist/*.tar.gz
 
       - name: Publish to PyPI
@@ -116,7 +127,7 @@ jobs:
       - name: Summary
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          echo "## 🚀 Published turboapi==$VERSION (beta)" >> $GITHUB_STEP_SUMMARY
+          echo "## 🚀 Published turboapi==$VERSION" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "pip install turboapi==$VERSION" >> $GITHUB_STEP_SUMMARY
