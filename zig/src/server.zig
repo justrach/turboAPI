@@ -84,6 +84,11 @@ var router: ?router_mod.Router = null;
 var server_host: []const u8 = "127.0.0.1";
 var server_port: u16 = 8000;
 
+// Interpreter reference captured before releasing the GIL at server start.
+// Workers use this to create their own PyThreadState rather than calling
+// PyGILState_Ensure (which pays a per-call thread-state lookup cost).
+var py_interp: ?*anyopaque = null;
+
 fn getRoutes() *std.StringHashMap(HandlerEntry) {
     if (routes == null) {
         routes = std.StringHashMap(HandlerEntry).init(allocator);
@@ -366,7 +371,7 @@ pub fn server_add_middleware(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.
 
 // ── Thread pool for connection handling ─────────────────────────────────────
 
-const POOL_SIZE = 8;
+const POOL_SIZE = 24; // 2x 12-core M-series; overridden at runtime below if needed
 
 const ConnectionPool = struct {
     queue: Queue,
@@ -384,7 +389,6 @@ const ConnectionPool = struct {
             self.mutex.lock();
             defer self.mutex.unlock();
             if (self.count >= self.items.len) {
-                // Queue full — drop connection
                 stream.close();
                 return;
             }
@@ -414,10 +418,20 @@ const ConnectionPool = struct {
         }
     }
 
+    // Each worker creates its own PyThreadState once and reuses it for every
+    // request. This replaces PyGILState_Ensure/Release (which re-does a
+    // thread-state lookup on every call) with the cheaper AcquireThread path.
     fn workerLoop(queue: *Queue) void {
+        const tstate = py.PyThreadState_New(py_interp) orelse @panic("PyThreadState_New failed");
+        defer {
+            py.PyEval_AcquireThread(tstate);
+            py.PyThreadState_Clear(tstate);
+            py.PyThreadState_DeleteCurrent();
+        }
+
         while (true) {
             const stream = queue.pop();
-            handleConnection(stream);
+            handleConnection(stream, tstate);
         }
     }
 };
@@ -436,14 +450,18 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     };
     defer tcp_server.deinit();
 
-    // Start thread pool
+    // Capture interpreter state before releasing the GIL.
+    // Workers need this to create their own PyThreadState.
+    py_interp = py.PyInterpreterState_Get();
+
+    // Start thread pool (workers create their tstates after this point,
+    // but py_interp is set before SaveThread so there's no race).
     pool.init();
 
     std.debug.print("🚀 TurboNet-Zig server listening on {s}:{d}\n", .{ server_host, server_port });
-    std.debug.print("🎯 Zig HTTP core active – {d}-thread pool!\n", .{POOL_SIZE});
+    std.debug.print("🎯 Zig HTTP core active – {d}-thread pool, per-worker tstate!\n", .{POOL_SIZE});
 
-    // Release the GIL before entering the accept loop so spawned threads
-    // can acquire it to call Python handlers.
+    // Release the GIL — workers acquire it per-request via AcquireThread.
     const save = py.PyEval_SaveThread();
 
     while (true) {
@@ -451,10 +469,10 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
         pool.queue.push(conn.stream);
     }
 
-    // Restore GIL (unreachable in practice, but correct)
     py.PyEval_RestoreThread(save);
     return py.pyNone();
 }
+
 
 const HeaderList = std.ArrayListUnmanaged(HeaderPair);
 
@@ -480,16 +498,14 @@ fn parseHeaders(request_data: []const u8, first_line_end: usize, header_end_pos:
     return headers;
 }
 
-fn handleConnection(stream: std.net.Stream) void {
+fn handleConnection(stream: std.net.Stream, tstate: ?*anyopaque) void {
     defer stream.close();
-
-    // Keep-alive loop — handle multiple requests on the same connection
     while (true) {
-        handleOneRequest(stream) catch return;
+        handleOneRequest(stream, tstate) catch return;
     }
 }
 
-fn handleOneRequest(stream: std.net.Stream) !void {
+fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     // Phase 1: Read headers into a fixed buffer (headers are typically < 8KB)
     var header_buf: [8192]u8 = undefined;
     var total_read: usize = 0;
@@ -639,19 +655,22 @@ fn handleOneRequest(stream: std.net.Stream) !void {
         }
     }
 
-    // Use fast dispatch for simple_sync/body_sync/model_sync handlers —
-    // writes response directly to stream while holding the GIL (zero-copy)
+    // Fast dispatch: write response directly while holding GIL
     const ht = entry.handler_type;
+    if (std.mem.eql(u8, ht, "simple_sync_noargs")) {
+        callPythonNoArgs(tstate, entry, stream);
+        return;
+    }
     if (std.mem.eql(u8, ht, "model_sync") and body.len > 0) {
-        callPythonModelHandlerDirect(entry, body, &match.params, stream);
+        callPythonModelHandlerDirect(tstate, entry, body, &match.params, stream);
         return;
     }
     if (std.mem.eql(u8, ht, "simple_sync") or std.mem.eql(u8, ht, "body_sync") or std.mem.eql(u8, ht, "model_sync")) {
-        callPythonHandlerDirect(entry, query_string, body, &match.params, stream);
+        callPythonHandlerDirect(tstate, entry, query_string, body, &match.params, stream);
         return;
     }
 
-    const resp = callPythonHandler(entry, method, path, query_string, body, headers.items, &match.params);
+    const resp = callPythonHandler(tstate, entry, method, path, query_string, body, headers.items, &match.params);
     defer resp.deinit();
     sendResponse(stream, resp.status_code, resp.content_type, resp.body);
 }
@@ -738,13 +757,65 @@ fn ffiError() FfiResponse {
     };
 }
 
-// ── Fast Python handler dispatch (simple_sync/body_sync) ────────────────────
-// Zero-copy: calls Python, reads response string, writes to stream — all while
-// holding the GIL. No heap allocations for the response.
+// ── Tuple ABI helper ─────────────────────────────────────────────────────────
+// Python fast handlers return (status_code, content_type, body_str).
+// Unpack and send — no dict key lookups, no hash computation.
 
-fn callPythonHandlerDirect(entry: HandlerEntry, query_string: []const u8, body: []const u8, params: *const std.StringHashMap([]const u8), stream: std.net.Stream) void {
-    const state = c.PyGILState_Ensure();
-    defer c.PyGILState_Release(state);
+fn sendTupleResponse(stream: std.net.Stream, result: *c.PyObject) void {
+    const sc_obj = py.PyTuple_GetItem(result, 0) orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"bad tuple[0]\"}");
+        return;
+    };
+    const ct_obj = py.PyTuple_GetItem(result, 1) orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"bad tuple[1]\"}");
+        return;
+    };
+    const body_obj = py.PyTuple_GetItem(result, 2) orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"bad tuple[2]\"}");
+        return;
+    };
+
+    const status_code: u16 = @intCast(c.PyLong_AsLong(sc_obj));
+    const ct_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(ct_obj) orelse "application/json";
+    const content_type = std.mem.span(ct_cstr);
+
+    if (c.PyUnicode_Check(body_obj) != 0) {
+        if (c.PyUnicode_AsUTF8(body_obj)) |cs| {
+            sendResponse(stream, status_code, content_type, std.mem.span(cs));
+            return;
+        }
+    } else if (c.PyBytes_Check(body_obj) != 0) {
+        var size: c.Py_ssize_t = 0;
+        var buf: [*c]u8 = undefined;
+        if (c.PyBytes_AsStringAndSize(body_obj, @ptrCast(&buf), &size) == 0) {
+            sendResponse(stream, status_code, content_type, buf[0..@intCast(size)]);
+            return;
+        }
+    }
+    sendResponse(stream, 500, "application/json", "{\"error\":\"bad tuple body\"}");
+}
+
+// ── simple_sync_noargs: PyObject_CallNoArgs — no tuple/dict construction ─────
+
+fn callPythonNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.net.Stream) void {
+    py.PyEval_AcquireThread(tstate);
+    defer py.PyEval_ReleaseThread(tstate);
+
+    const result = py.PyObject_CallNoArgs(entry.handler) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(result);
+    sendTupleResponse(stream, result);
+}
+
+// ── Fast Python handler dispatch (simple_sync/body_sync) ─────────────────────
+// Calls Python with kwargs dict, unpacks 3-tuple response — zero extra allocs.
+
+fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_string: []const u8, body: []const u8, params: *const std.StringHashMap([]const u8), stream: std.net.Stream) void {
+    py.PyEval_AcquireThread(tstate);
+    defer py.PyEval_ReleaseThread(tstate);
 
     const kwargs = c.PyDict_New() orelse {
         sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
@@ -752,7 +823,6 @@ fn callPythonHandlerDirect(entry: HandlerEntry, query_string: []const u8, body: 
     };
     defer c.Py_DecRef(kwargs);
 
-    // Only pass what fast handlers need: path_params, query_string, body
     const py_path_params = c.PyDict_New() orelse {
         sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
         return;
@@ -789,7 +859,6 @@ fn callPythonHandlerDirect(entry: HandlerEntry, query_string: []const u8, body: 
         c.Py_DecRef(py_body);
     }
 
-    // Call handler
     const empty_tuple = c.PyTuple_New(0) orelse {
         sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
         return;
@@ -803,46 +872,8 @@ fn callPythonHandlerDirect(entry: HandlerEntry, query_string: []const u8, body: 
     };
     defer c.Py_DecRef(result);
 
-    // Extract status_code
-    var status_code: u16 = 200;
-    if (c.PyDict_GetItemString(result, "status_code")) |sc| {
-        const code = c.PyLong_AsLong(sc);
-        if (code >= 100 and code <= 599) {
-            status_code = @intCast(code);
-        }
-    }
-
-    // Content-type — check if handler returned a custom content_type
-    var content_type: []const u8 = "application/json";
-    if (c.PyDict_GetItemString(result, "content_type")) |ct_obj| {
-        if (c.PyUnicode_Check(ct_obj) != 0) {
-            if (c.PyUnicode_AsUTF8(ct_obj)) |cs| {
-                content_type = std.mem.span(cs);
-            }
-        }
-    }
-
-    // Content — read pre-serialized string or bytes directly from Python object
-    // and write to stream without copying (zero-copy)
-    var body_slice: []const u8 = "null";
-    if (c.PyDict_GetItemString(result, "content")) |content_obj| {
-        if (c.PyUnicode_Check(content_obj) != 0) {
-            if (c.PyUnicode_AsUTF8(content_obj)) |cs| {
-                body_slice = std.mem.span(cs);
-            }
-        } else if (c.PyBytes_Check(content_obj) != 0) {
-            // Binary content (e.g. audio/wav, image/png)
-            var size: c.Py_ssize_t = 0;
-            var buf: [*c]u8 = undefined;
-            if (c.PyBytes_AsStringAndSize(content_obj, @ptrCast(&buf), &size) == 0) {
-                body_slice = buf[0..@intCast(size)];
-            }
-        }
-    }
-
-    // Write response directly — body_slice points into the Python object,
-    // which is alive because we hold `result` ref until after the write.
-    sendResponse(stream, status_code, content_type, body_slice);
+    // Unpack (status_code, content_type, body_str) 3-tuple
+    sendTupleResponse(stream, result);
 }
 
 // ── JSON-to-Python conversion (eliminates Python json.loads round-trip) ──────
@@ -894,18 +925,16 @@ fn jsonValueToPyObject(val: std.json.Value) ?*c.PyObject {
 
 // ── model_sync fast dispatch: Zig-parsed JSON → Python dict (no json.loads) ──
 
-fn callPythonModelHandlerDirect(entry: HandlerEntry, body: []const u8, params: *const std.StringHashMap([]const u8), stream: std.net.Stream) void {
-    // Parse JSON in Zig — no Python json.loads needed
+fn callPythonModelHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, body: []const u8, params: *const std.StringHashMap([]const u8), stream: std.net.Stream) void {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch {
         sendResponse(stream, 400, "application/json", "{\"error\":\"Invalid JSON\"}");
         return;
     };
     defer parsed.deinit();
 
-    const state = c.PyGILState_Ensure();
-    defer c.PyGILState_Release(state);
+    py.PyEval_AcquireThread(tstate);
+    defer py.PyEval_ReleaseThread(tstate);
 
-    // Convert parsed JSON to Python dict
     const py_body_dict = jsonValueToPyObject(parsed.value) orelse {
         sendResponse(stream, 500, "application/json", "{\"error\":\"JSON conversion failed\"}");
         return;
@@ -918,10 +947,8 @@ fn callPythonModelHandlerDirect(entry: HandlerEntry, body: []const u8, params: *
     };
     defer c.Py_DecRef(kwargs);
 
-    // Pass body_dict instead of raw body bytes
     _ = c.PyDict_SetItemString(kwargs, "body_dict", py_body_dict);
 
-    // path_params
     const py_path_params = c.PyDict_New() orelse {
         sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
         return;
@@ -942,7 +969,6 @@ fn callPythonModelHandlerDirect(entry: HandlerEntry, body: []const u8, params: *
     }
     _ = c.PyDict_SetItemString(kwargs, "path_params", py_path_params);
 
-    // Call handler
     const empty_tuple = c.PyTuple_New(0) orelse {
         sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
         return;
@@ -956,36 +982,17 @@ fn callPythonModelHandlerDirect(entry: HandlerEntry, body: []const u8, params: *
     };
     defer c.Py_DecRef(result);
 
-    // Extract status_code
-    var status_code: u16 = 200;
-    if (c.PyDict_GetItemString(result, "status_code")) |sc| {
-        const code = c.PyLong_AsLong(sc);
-        if (code >= 100 and code <= 599) {
-            status_code = @intCast(code);
-        }
-    }
-
-    // Content — read pre-serialized string directly
-    var body_slice: []const u8 = "null";
-    if (c.PyDict_GetItemString(result, "content")) |content_obj| {
-        if (c.PyUnicode_Check(content_obj) != 0) {
-            if (c.PyUnicode_AsUTF8(content_obj)) |cs| {
-                body_slice = std.mem.span(cs);
-            }
-        }
-    }
-
-    sendResponse(stream, status_code, "application/json", body_slice);
+    sendTupleResponse(stream, result);
 }
 
 // ── Python handler dispatch (full kwargs — enhanced/model handlers) ──────────
 
-fn callPythonHandler(entry: HandlerEntry, method: []const u8, path: []const u8, query_string: []const u8, body: []const u8, headers: []const HeaderPair, params: *const std.StringHashMap([]const u8)) PythonResponse {
+fn callPythonHandler(tstate: ?*anyopaque, entry: HandlerEntry, method: []const u8, path: []const u8, query_string: []const u8, body: []const u8, headers: []const HeaderPair, params: *const std.StringHashMap([]const u8)) PythonResponse {
     const err_body = "{\"error\": \"Internal Server Error\"}";
     const err_ct = "application/json";
 
-    const state = c.PyGILState_Ensure();
-    defer c.PyGILState_Release(state);
+    py.PyEval_AcquireThread(tstate);
+    defer py.PyEval_ReleaseThread(tstate);
 
     // ── Build the kwargs dict for enhanced_handler(**kwargs) ──
     const kwargs = c.PyDict_New() orelse return errorResponse(err_ct, err_body);
@@ -1180,18 +1187,25 @@ fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, b
         else => "Unknown",
     };
 
-    var header_buf: [512]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n", .{ status, status_text, content_type, body.len }) catch return;
+    // Single heap buffer: header + body in one write — halves syscall count
+    const header = std.fmt.allocPrint(
+        allocator,
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n",
+        .{ status, status_text, content_type, body.len },
+    ) catch return;
+    defer allocator.free(header);
 
-    stream.writeAll(header) catch |err| {
-        std.debug.print("[ZIG] write header error: {}\n", .{err});
+    const response = allocator.alloc(u8, header.len + body.len) catch {
+        // Fallback: two writes
+        stream.writeAll(header) catch return;
+        stream.writeAll(body) catch return;
         return;
     };
-    stream.writeAll(body) catch |err| {
-        std.debug.print("[ZIG] write body error: {}\n", .{err});
-        return;
-    };
-    // std.debug.print("[ZIG] response sent ({d} bytes)\n", .{header.len + body.len});
+    defer allocator.free(response);
+
+    @memcpy(response[0..header.len], header);
+    @memcpy(response[header.len..], body);
+    stream.writeAll(response) catch return;
 }
 
 // ── configure_rate_limiting(enabled, requests_per_minute) ──

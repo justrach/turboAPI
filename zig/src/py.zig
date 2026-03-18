@@ -98,3 +98,24 @@ const std = @import("std");
 // which Zig's @cImport can't translate. We declare them manually.
 pub extern fn PyEval_SaveThread() ?*anyopaque;
 pub extern fn PyEval_RestoreThread(state: ?*anyopaque) void;
+
+// Per-worker thread state — cheaper than PyGILState_Ensure/Release on every call.
+// Create one PyThreadState per OS thread at startup; reuse for every request.
+pub extern fn PyEval_AcquireThread(tstate: ?*anyopaque) void;
+pub extern fn PyEval_ReleaseThread(tstate: ?*anyopaque) void;
+pub extern fn PyThreadState_New(interp: ?*anyopaque) ?*anyopaque;
+pub extern fn PyThreadState_Clear(tstate: ?*anyopaque) void;
+pub extern fn PyThreadState_DeleteCurrent() void;
+pub extern fn PyInterpreterState_Get() ?*anyopaque;
+
+// Fast call API — avoids arg tuple/dict construction for simple cases.
+pub extern fn PyObject_CallNoArgs(callable: *c.PyObject) ?*c.PyObject;
+pub extern fn PyObject_Vectorcall(
+    callable: *c.PyObject,
+    args: [*]const ?*c.PyObject,
+    nargsf: usize,
+    kwnames: ?*c.PyObject,
+) ?*c.PyObject;
+
+// Tuple access — used to unpack (status, content_type, body) response tuples.
+pub extern fn PyTuple_GetItem(op: *c.PyObject, i: c.Py_ssize_t) ?*c.PyObject;

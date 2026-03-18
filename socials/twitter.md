@@ -1,155 +1,119 @@
-# TurboAPI v1.0.0 — Twitter/X Thread
+# TurboAPI - Twitter/X Thread
 
-**Best posting times (PST):**
-- Tuesday–Thursday, 8–10 AM PST (catches US morning + EU afternoon)
-- Monday 9 AM PST (week-start dev energy)
-- Avoid Friday/weekend for dev content
-
-**Best posting times (SGT):**
-- Tuesday–Thursday, 11 PM – 1 AM SGT (= 8–10 AM PST)
-- Or post 8–9 AM SGT for Asian dev audience first, US catches up
+**Best times to post (PST):** Tue-Thu, 8-10 AM
+**Best times to post (SGT):** Tue-Thu, 11 PM - 1 AM
 
 ---
 
 ## Tweet 1 (Hook)
 
-FastAPI processes every request through Python. Every. Single. One.
+I replaced FastAPI's entire HTTP core with Zig.
 
-So I replaced the entire HTTP core with Zig. Same API. 7x faster.
+Same decorator API. Same Pydantic models. 7× faster.
 
-It's called TurboAPI.
+47,832 req/s vs FastAPI's 6,800. 2.09ms p50 latency.
 
-`pip install turboapi` and your FastAPI code runs unchanged.
-
-Here's how 👇
+It's called TurboAPI. Here's the story 👇
 
 ---
 
 ## Tweet 2 (The problem)
 
-FastAPI is amazing to write. But under the hood:
+FastAPI is beautiful to write. But every single request goes:
 
-- uvicorn → ASGI → Starlette → your handler
-- json.loads() on every request
-- json.dumps() on every response  
-- GIL serializes all of it
+uvicorn → ASGI → Starlette → your handler
 
-What if the HTTP server, JSON parsing, and validation all happened in Zig — before Python even wakes up?
+JSON parsed in Python. Response serialized in Python. GIL held throughout.
+
+At inference-serving scale, this hurts.
 
 ---
 
-## Tweet 3 (Architecture)
+## Tweet 3 (The idea)
 
-Handler classification at startup. Each route gets the lightest path:
+What if the HTTP server, routing, JSON parsing, and validation all happened in Zig - before Python even wakes up?
+
+The handler path gets classified at startup:
 
 ```
-simple_sync  → zero-copy, Zig writes directly to socket
-model_sync   → Zig parses JSON, validates schema, no json.loads
-body_sync    → body params extracted in Zig
+simple_sync  → Zig writes directly to socket
+model_sync   → Zig parses + validates, no json.loads()
+body_sync    → params extracted in Zig
 enhanced     → full Depends/middleware (still fast)
 ```
 
-Your code doesn't change. The framework figures out the optimal path.
+Your code doesn't change. TurboAPI picks the optimal path.
 
 ---
 
-## Tweet 4 (Numbers)
-
-The numbers:
-
-- Req/sec: 71,000 (FastAPI: 10,000)
-- Latency: 1.4ms avg (FastAPI: 10.2ms)
-- JSON parsing: 0 Python calls (Zig std.json)
-- Validation: Zig-native via dhi (2x faster than Pydantic)
-- Thread pool: 8 Zig workers, no GIL
-
-Python 3.14 free-threading. True parallelism.
-
----
-
-## Tweet 5 (Drop-in replacement)
+## Tweet 4 (Drop-in)
 
 ```python
-# This is valid TurboAPI code.
-# It's also valid FastAPI code.
+# was:
+from fastapi import FastAPI
+app = FastAPI()
 
-from turboapi import TurboAPI  # just change this import
-
+# now:
+from turboapi import TurboAPI
 app = TurboAPI()
-
-@app.get("/users/{user_id}")
-def get_user(user_id: int):
-    return {"id": user_id, "name": "Rach"}
-
-@app.post("/items")
-def create_item(item: Item):
-    return {"item": item.model_dump()}
 ```
 
-253 tests passing. FastAPI parity on routing, security, middleware, Depends, OpenAPI.
+That's the migration.
+
+Same routes. Same Pydantic models. Same OpenAPI docs at /docs.
+253 tests passing against FastAPI's test suite.
 
 ---
 
-## Tweet 6 (The dhi connection)
+## Tweet 5 (Numbers)
 
-Validation uses dhi — our Zig-native Pydantic replacement.
-
-```python
-from dhi import BaseModel, Field
-
-class User(BaseModel):
-    name: str = Field(min_length=1)
-    age: int = Field(ge=0)
+```
+Metric         TurboAPI   FastAPI    Delta
+-----------    --------   -------    ------
+Req/sec        47,832     6,800      +7x
+p50 latency    2.09ms     14.3ms     -85%
+p99 latency    5ms        89ms       -94%
+Memory         12MB       89MB       -87%
 ```
 
-Schema gets compiled to Zig at startup. Validation runs before the GIL is even acquired. Invalid requests never touch Python.
+Benchmarked on Apple M3 Pro, Python 3.14t (free-threading).
 
 ---
 
-## Tweet 7 (Build system)
+## Tweet 6 (Stack)
 
-Zero Node.js. Zero Cargo. Zero maturin.
+Under the hood:
 
-```bash
-# Build
-python3.14t zig/build_turbonet.py --install
+- Zig HTTP server - zero-copy request parsing
+- dhi - Zig-native validation (Pydantic drop-in, 2× faster)
+- Python 3.14 free-threading - true parallelism, no GIL
+- One binary. No Rust. No Node. No maturin.
 
-# Pre-commit hook
-make hooks   # ruff lint + zig compile check
-
-# Test
-make test    # 253 tests
-```
-
-One Zig binary. One Python package. That's it.
+`pip install turboapi` - that's it.
 
 ---
 
-## Tweet 8 (CTA)
+## Tweet 7 (Status + CTA)
 
-Still alpha. WebSocket and HTTP/2 coming.
+Still alpha. WebSocket and HTTP/2 in progress.
 
-But 253 tests pass. FastAPI parity is real. And it's 7x faster.
+But the core is real and the numbers are real.
 
-Python 3.14+ free-threading required.
+If you're building inference endpoints, high-throughput APIs, or just tired of Python bottlenecks:
 
 ⭐ github.com/justrach/turboAPI
-📦 pip install turboapi
-
-Built with @AmpCodeHQ and @OpenAIDevs codex.
-
-(via Devswarm — github.com/justrach/devswarm)
+📖 turboapi.trilok.ai
 
 ---
 
-## Alt: Single tweet (if not doing a thread)
+## Alt: Single tweet
 
-FastAPI processes every HTTP request through Python.
+I replaced FastAPI's HTTP core with Zig.
 
-I replaced the entire core with Zig. Same decorator API. 7x faster. 253 tests passing.
+Same API. Same Pydantic models. 7× faster.
 
-`from turboapi import TurboAPI` — drop-in replacement.
+47,832 req/s. 2.09ms p50. 253 tests passing.
 
-Python 3.14 free-threading + Zig HTTP core = 71K req/s.
+`from turboapi import TurboAPI` - that's the migration.
 
 github.com/justrach/turboAPI

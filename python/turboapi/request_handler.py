@@ -341,10 +341,28 @@ class RequestBodyParser:
                 return parsed_params
 
             # Check for typing.Dict, typing.List, etc.
+            # Check for typing.Dict, typing.List, etc.
             origin = get_origin(param.annotation)
             if origin in (dict, list):
                 parsed_params[param_name] = json_data
                 return parsed_params
+
+            # Check for Pydantic-like models (model_validate, e.g. pydantic.BaseModel)
+            if inspect.isclass(param.annotation) and hasattr(param.annotation, "model_validate"):
+                try:
+                    validated_model = param.annotation.model_validate(json_data)
+                    parsed_params[param_name] = validated_model
+                    return parsed_params
+                except Exception as e:
+                    raise ValueError(f"Validation error for {param_name}: {e}")
+
+            # Unknown class annotation with single param — try direct construction
+            if inspect.isclass(param.annotation):
+                try:
+                    parsed_params[param_name] = param.annotation(**json_data)
+                    return parsed_params
+                except Exception:
+                    pass
 
         # PATTERN 2: Multiple parameters - extract individual fields
         # Example: handler(name: str, age: int, email: str)
@@ -371,6 +389,12 @@ class RequestBodyParser:
                 except Exception as e:
                     raise ValueError(f"Validation error for {param_name}: {e}")
 
+            # Check for Pydantic-like model (model_validate but not Satya)
+            elif inspect.isclass(param.annotation) and hasattr(param.annotation, "model_validate"):
+                try:
+                    parsed_params[param_name] = param.annotation.model_validate(json_data)
+                except Exception as e:
+                    raise ValueError(f"Validation error for {param_name}: {e}")
             # Check if parameter name exists in JSON data
             elif param_name in json_data:
                 value = json_data[param_name]
@@ -818,9 +842,8 @@ def create_enhanced_handler(original_handler, route_definition):
 def create_fast_handler(original_handler, route_definition):
     """Create a minimal-overhead handler for simple sync routes.
 
-    Returns content as a pre-serialized JSON string so Zig skips json.dumps.
-    Uses Zig's pre-extracted path_params. No regex, no header parsing,
-    no dependency resolution, no make_serializable.
+    Returns a 3-tuple (status_code, content_type, body_str) so Zig can unpack
+    via PyTuple_GET_ITEM — eliminates 3x PyDict_GetItemString per request.
     """
     import json as _json
 
@@ -836,51 +859,41 @@ def create_fast_handler(original_handler, route_definition):
         elif ann is float:
             _converters[pname] = float
 
-    # Check if handler takes body params.
-    # For POST/PUT/PATCH/DELETE, any parameter not resolvable from path/query
-    # should be extracted from the JSON body (FastAPI parity).
-    _needs_body = False
     method_str = (
         route_definition.method.value.upper() if hasattr(route_definition, "method") else "GET"
     )
-    if method_str in ("POST", "PUT", "PATCH", "DELETE"):
-        _needs_body = True
+    _needs_body = method_str in ("POST", "PUT", "PATCH", "DELETE")
 
-    # Pre-import json.dumps for hot path
     _dumps = _json.dumps
 
     from turboapi.responses import Response as _Response
 
     if not param_names:
-        # Zero-arg handler: fastest possible path
+        # Zero-arg handler: fastest possible path — returns 3-tuple for Zig
         def fast_handler_noargs(**kwargs):
             try:
                 result = original_handler()
                 if isinstance(result, _Response):
                     ct = result.media_type or "application/json"
-                    if isinstance(result.body, bytes) and _is_binary_content_type(ct):
-                        return {
-                            "content": result.body,
-                            "status_code": result.status_code,
-                            "content_type": ct,
-                        }
                     body_str = (
                         result.body.decode("utf-8")
                         if isinstance(result.body, bytes)
                         else str(result.body)
                     )
-                    return {
-                        "content": body_str,
-                        "status_code": result.status_code,
-                        "content_type": ct,
-                    }
+                    return (result.status_code, ct, body_str)
                 if isinstance(result, tuple) and len(result) == 2:
-                    return {"content": _dumps(result[0]), "status_code": result[1]}
+                    return (result[1], "application/json", _dumps(result[0]))
                 if hasattr(result, "model_dump"):
                     result = result.model_dump()
-                return {"content": _dumps(result), "status_code": 200}
+                return (200, "application/json", _dumps(result))
             except Exception as e:
-                return {"content": _dumps({"error": str(e)}), "status_code": 500}
+                try:
+                    from turboapi.exceptions import HTTPException as _HTTPException
+                    if isinstance(e, _HTTPException):
+                        return (e.status_code, "application/json", _dumps({"detail": e.detail}))
+                except ImportError:
+                    pass
+                return (500, "application/json", _dumps({"error": str(e)}))
 
         return fast_handler_noargs
 
@@ -888,28 +901,21 @@ def create_fast_handler(original_handler, route_definition):
         try:
             call_kwargs = {}
 
-            # Path params from Zig (already extracted by router)
             path_params = kwargs.get("path_params")
             if path_params:
                 for k, v in path_params.items():
                     if k in param_names:
                         converter = _converters.get(k)
-                        if converter:
-                            call_kwargs[k] = converter(v)
-                        else:
-                            call_kwargs[k] = v
+                        call_kwargs[k] = converter(v) if converter else v
 
-            # Query params (only if handler has unresolved params)
             if len(call_kwargs) < len(param_names):
                 qs = kwargs.get("query_string", "")
                 if qs:
                     from urllib.parse import parse_qs
-
                     for k, v in parse_qs(qs, keep_blank_values=True).items():
                         if k in param_names and k not in call_kwargs:
                             call_kwargs[k] = v[0]
 
-            # Body (only for POST/PUT/PATCH)
             if _needs_body:
                 body = kwargs.get("body", b"")
                 if body:
@@ -918,48 +924,35 @@ def create_fast_handler(original_handler, route_definition):
 
             result = original_handler(**call_kwargs)
 
-            # Handle Response objects (JSONResponse, HTMLResponse, binary, etc.)
             if isinstance(result, _Response):
                 ct = result.media_type or "application/json"
-                if isinstance(result.body, bytes) and _is_binary_content_type(ct):
-                    return {
-                        "content": result.body,
-                        "status_code": result.status_code,
-                        "content_type": ct,
-                    }
                 body_str = (
                     result.body.decode("utf-8")
                     if isinstance(result.body, bytes)
                     else str(result.body)
                 )
-                return {"content": body_str, "status_code": result.status_code, "content_type": ct}
+                return (result.status_code, ct, body_str)
 
-            # Pre-serialize so Zig skips json.dumps
             if hasattr(result, "model_dump"):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
-                return {"content": _dumps(result[0]), "status_code": result[1]}
-            return {"content": _dumps(result), "status_code": 200}
+                return (result[1], "application/json", _dumps(result[0]))
+            return (200, "application/json", _dumps(result))
         except Exception as e:
             try:
-                from turboapi.security import HTTPException
-
+                from turboapi.exceptions import HTTPException
                 if isinstance(e, HTTPException):
-                    return {"content": _dumps({"detail": e.detail}), "status_code": e.status_code}
+                    return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
                 pass
-            return {"content": _dumps({"error": str(e)}), "status_code": 500}
+            return (500, "application/json", _dumps({"error": str(e)}))
 
     return fast_handler
-
-
 def create_fast_model_handler(original_handler, model_class, param_name):
     """Create a minimal handler for model_sync routes.
 
     Zig has already validated the JSON body against the schema.
-    When Zig passes body_dict (pre-parsed), we skip json.loads entirely.
-    Fallback: json.loads -> model_class(**data) -> handler -> json.dumps.
-    User gets a real model instance with all methods -- zero DX change.
+    Returns a 3-tuple (status_code, content_type, body_str) for tuple ABI.
     """
     import json as _json
 
@@ -968,37 +961,28 @@ def create_fast_model_handler(original_handler, model_class, param_name):
 
     def fast_model_handler(**kwargs):
         try:
-            # Prefer body_dict (Zig-parsed JSON, skips json.loads entirely)
             data = kwargs.get("body_dict")
             if data is None:
                 body = kwargs.get("body", b"")
                 if not body:
-                    return {
-                        "content": _dumps({"detail": "Request body is empty"}),
-                        "status_code": 400,
-                    }
+                    return (400, "application/json", _dumps({"detail": "Request body is empty"}))
                 data = _loads(body)
 
-            # Zig already validated -- instantiate model
             model = model_class(**data)
-
-            # Call handler with model instance
             result = original_handler(**{param_name: model})
 
-            # Serialize response
             if hasattr(result, "model_dump"):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
-                return {"content": _dumps(result[0]), "status_code": result[1]}
-            return {"content": _dumps(result), "status_code": 200}
+                return (result[1], "application/json", _dumps(result[0]))
+            return (200, "application/json", _dumps(result))
         except Exception as e:
             try:
-                from turboapi.security import HTTPException
-
+                from turboapi.exceptions import HTTPException
                 if isinstance(e, HTTPException):
-                    return {"content": _dumps({"detail": e.detail}), "status_code": e.status_code}
+                    return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
                 pass
-            return {"content": _dumps({"error": str(e)}), "status_code": 500}
+            return (500, "application/json", _dumps({"error": str(e)}))
 
     return fast_model_handler

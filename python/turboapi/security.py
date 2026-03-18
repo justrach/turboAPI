@@ -13,7 +13,6 @@ import base64
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
 
 # ============================================================================
 # Base Security Classes
@@ -500,18 +499,9 @@ class SecurityScopes:
 # ============================================================================
 
 
-class HTTPException(Exception):
-    """HTTP exception for authentication errors."""
-
-    def __init__(
-        self,
-        status_code: int,
-        detail: Any = None,
-        headers: dict[str, str] | None = None,
-    ):
-        self.status_code = status_code
-        self.detail = detail
-        self.headers = headers
+# Re-export the canonical HTTPException from exceptions.py so all modules
+# that raise or catch it use the same class.
+from .exceptions import HTTPException  # noqa: F401, E402
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

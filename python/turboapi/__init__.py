@@ -6,7 +6,7 @@ Requires Python 3.14+ free-threading for maximum performance.
 
 # Core application
 # Status codes module (import as 'status')
-from . import status
+from . import status  # noqa: F401
 
 # Background tasks
 from .background import BackgroundTasks
@@ -30,6 +30,18 @@ from .encoders import jsonable_encoder
 from .exceptions import (
     RequestValidationError,
     WebSocketException,
+)
+
+# JWT Authentication
+from .jwt_auth import (
+    JWTBearer,
+    JWTSettings,
+    TokenData,
+    create_access_token,
+    create_refresh_token,
+    decode_token,
+    hash_password,
+    verify_password,
 )
 
 # Middleware
@@ -80,7 +92,7 @@ from .version_check import check_free_threading_support, get_python_threading_in
 # WebSocket
 from .websockets import WebSocket, WebSocketDisconnect
 
-__version__ = "1.0.0a1"
+__version__ = "1.0.0"
 __all__ = [
     # Core
     "TurboAPI",
@@ -139,9 +151,16 @@ __all__ = [
     "format_sse_event",
     # Encoders
     "jsonable_encoder",
-    # Status module
-    "status",
     # Utils
     "check_free_threading_support",
     "get_python_threading_info",
+    # JWT Auth
+    "JWTBearer",
+    "JWTSettings",
+    "TokenData",
+    "create_access_token",
+    "create_refresh_token",
+    "decode_token",
+    "hash_password",
+    "verify_password",
 ]

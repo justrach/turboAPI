@@ -113,6 +113,9 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
             return "enhanced", param_types, {}
         return "body_sync", param_types, {}
 
+    # Zero-arg GET: use the PyObject_CallNoArgs fast path in Zig
+    if not param_types:
+        return "simple_sync_noargs", param_types, {}
     return "simple_sync", param_types, {}
 
 
@@ -510,8 +513,8 @@ class ZigIntegratedTurboAPI(TurboAPI):
                             route.handler,
                         )
                         print(f"{CHECK_MARK} [model_sync] {route.method.value} {route.path}")
-                elif handler_type in ("simple_sync", "body_sync"):
-                    # SYNC FAST PATH: Use minimal-overhead fast handler
+                elif handler_type in ("simple_sync", "simple_sync_noargs", "body_sync"):
+                    # SYNC FAST PATH: Use minimal-overhead fast handler (returns 3-tuple)
                     if self._middleware_instances:
                         enhanced_handler = create_enhanced_handler(route.handler, route)
                         enhanced_handler = self._wrap_with_middleware(enhanced_handler)
@@ -522,10 +525,10 @@ class ZigIntegratedTurboAPI(TurboAPI):
                     self.zig_server.add_route_fast(
                         route.method.value,
                         route.path,
-                        enhanced_handler,  # Fallback wrapper
+                        enhanced_handler,
                         handler_type,
                         param_types_json,
-                        route.handler,  # Original unwrapped handler
+                        route.handler,
                     )
                     print(f"{CHECK_MARK} [{handler_type}] {route.method.value} {route.path}")
                 elif handler_type in ("simple_async", "body_async"):
