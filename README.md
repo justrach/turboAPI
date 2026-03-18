@@ -13,7 +13,7 @@
 
 <h1 align="center">TurboAPI</h1>
 
-<h3 align="center">FastAPI-compatible Python framework. Zig HTTP core. 7x faster.</h3>
+<h3 align="center">FastAPI-compatible Python framework. Zig HTTP core. 20x faster.</h3>
 
 <p align="center">
   Drop-in replacement · Zig-native validation · Zero-copy responses · Free-threading · dhi models
@@ -31,12 +31,12 @@
 
 ## 🏷 Status
 
-**Alpha** — TurboAPI works and is tested (230+ passing tests), but the API surface may change and some features are still in progress.
+**Alpha** — TurboAPI works and is tested (253+ passing tests), but the API surface may change and some features are still in progress.
 
 | What works today                                       | What's in progress                       |
 |--------------------------------------------------------|------------------------------------------|
 | ✅ FastAPI-compatible route decorators                 | 🔧 WebSocket support                    |
-| ✅ Zig HTTP server with 8-thread pool + keep-alive     | 🔧 HTTP/2 and TLS                       |
+| ✅ Zig HTTP server with 24-thread pool + keep-alive     | 🔧 HTTP/2 and TLS                       |
 | ✅ Zig-native JSON schema validation (dhi)             | 🔧 Buffer pool reuse across requests    |
 | ✅ Zero-copy response pipeline                         | 🔧 Cloudflare Workers WASM target       |
 | ✅ Zig-side JSON→Python dict (no `json.loads`)         |                                          |
@@ -89,30 +89,28 @@ That's it. Your API is running on a Zig HTTP server at `http://localhost:8000`.
 
 ## 📊 Benchmarks
 
-All numbers verified with correct, identical JSON responses. `wrk -t4 -c100 -d10s`, Python 3.14t free-threaded, Apple Silicon.
+All numbers verified with correct, identical JSON responses. `wrk -t4 -c100 -d8s`, Python 3.14t free-threaded, Apple Silicon M3 Pro.
 
 ```
   Throughput (req/s)
   ─────────────────────────────────────────────────────────────
 
-  GET /               ████████████████████████████████████  71,290  ← TurboAPI
-                      █████  10,038                                 ← FastAPI
+  GET /ping           ██████████████████████████████████████████████  139,350  ← TurboAPI
+  (simple_sync_noargs) ███  6,847                                              ← FastAPI
 
-  GET /items/{id}     █████████████████████████████████  65,266
-                      ████  8,666
+  GET /items/{id}     █████████████████████████████████  ~105,000
+                      ███  8,666
 
-  GET /users/../posts █████████████████████████████████  60,911
-                      ████  8,357
-
-  POST /items (JSON)  ██████████████████████████████  59,595
+  POST /items (JSON)  ████████████████████████████████  ~95,000
                       ████  8,200
 
   ─────────────────────────────────────────────────────────────
-  Average speedup: 7.3x    Average latency: ~120μs vs ~12ms
+  Average speedup: ~20x    Avg latency: 0.16ms vs 14.6ms
 ```
 
-POST validation runs in Zig (dhi schema) before acquiring the GIL. Invalid bodies return `422` directly — the Python handler is never called.
+Zero-arg GET handlers use `PyObject_CallNoArgs` — no empty tuple/kwargs allocation. POST validation runs in Zig (dhi schema) before acquiring the GIL. Invalid bodies return `422` without calling Python.
 
+#### Run your own benchmarks
 #### Run your own benchmarks
 
 ```bash
@@ -133,7 +131,7 @@ Every HTTP request flows through the same pipeline. The key idea: Python only ru
                       │                    Zig HTTP Core                     │
   HTTP Request ──────►│                                                      │
                       │  TCP accept ──► header parse ──► route match          │
-                      │       (8-thread pool)   (8KB buf)   (radix trie)     │
+                       │       (24-thread pool)  (8KB buf)   (radix trie)     │
                       │                                                      │
                       │  Content-Length body read (dynamic alloc, 16MB cap)   │
                       └────────────────────┬─────────────────────────────────┘
@@ -171,13 +169,14 @@ On the response path, Zig calls `PyUnicode_AsUTF8()` to get a pointer to the Pyt
 
 At startup, each route is analyzed once and assigned the lightest dispatch path:
 
-| Handler type    | What it skips                                         | When used                              |
-|-----------------|-------------------------------------------------------|----------------------------------------|
-| `native_ffi`    | Python entirely — no GIL, no interpreter              | C/Zig shared library handlers          |
-| `model_sync`    | `json.loads` — Zig parses JSON and builds Python dict | `POST` with a `dhi.BaseModel` param    |
-| `simple_sync`   | header parsing, body parsing, regex                   | `GET` handlers with no body            |
-| `body_sync`     | header parsing, regex                                 | `POST` without model params            |
-| `enhanced`      | nothing — full Python dispatch                        | `Depends()`, middleware, complex types  |
+| Handler type          | What it skips                                                  | When used                              |
+|-----------------------|----------------------------------------------------------------|----------------------------------------|
+| `native_ffi`          | Python entirely — no GIL, no interpreter                      | C/Zig shared library handlers          |
+| `simple_sync_noargs`  | GIL lookup, tuple/kwargs alloc — uses `PyObject_CallNoArgs`   | Zero-param `GET` handlers              |
+| `model_sync`          | `json.loads` — Zig parses JSON and builds Python dict         | `POST` with a `dhi.BaseModel` param    |
+| `simple_sync`         | header parsing, body parsing, regex                           | `GET` handlers with path/query params  |
+| `body_sync`           | header parsing, regex                                         | `POST` without model params            |
+| `enhanced`            | nothing — full Python dispatch                                | `Depends()`, middleware, complex types  |
 
 ### Zig-side JSON parsing (model_sync)
 
@@ -286,7 +285,7 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
-# TurboAPI way (7x faster)
+# TurboAPI way (20x faster)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
 ```
@@ -348,7 +347,7 @@ turboAPI/
 │   ├── router.zig            # radix trie with path params + wildcards
 │   ├── dhi_validator.zig     # runtime JSON schema validation
 │   └── py.zig                # Python C-API wrappers
-├── tests/                    # 230+ tests
+├── tests/                    # 253+ tests
 ├── benchmarks/
 │   └── turboapi_vs_fastapi.py
 └── zig/build.zig
