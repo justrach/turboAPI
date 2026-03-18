@@ -24,14 +24,28 @@
   <a href="#-quick-start">Quick Start</a> ·
   <a href="#-benchmarks">Benchmarks</a> ·
   <a href="#️-architecture">Architecture</a> ·
-  <a href="#-migrating-from-fastapi">Migrate</a>
+  <a href="#-migrating-from-fastapi">Migrate</a> ·
+  <a href="#-why-python">Why Python?</a> ·
+  <a href="#-observability">Observability</a> ·
+  <a href="SECURITY.md">Security</a>
 </p>
 
 ---
 
 ## 🏷 Status
 
-**Alpha** — TurboAPI works and is tested (253+ passing tests), but the API surface may change and some features are still in progress.
+> ⚠️ **Alpha software — read before using in production**
+>
+> TurboAPI works and has 269+ passing tests, but:
+> - **No fuzz testing yet** on the Zig HTTP parser (planned in [#37](https://github.com/justrach/turboAPI/issues/37))
+> - **No TLS** — put nginx or Caddy in front for HTTPS
+> - **No slow-loris protection** — requires a reverse proxy with read timeouts
+> - **No configurable max body size** — hardcoded 16MB cap
+> - **WebSocket support** is in progress, not production-ready
+> - **HTTP/2** is not yet implemented
+> - **Free-threaded Python 3.14t** is itself relatively new — some C extensions may not be thread-safe
+>
+> See [SECURITY.md](SECURITY.md) for the full threat model and deployment recommendations.
 
 | What works today                                       | What's in progress                       |
 |--------------------------------------------------------|------------------------------------------|
@@ -44,8 +58,8 @@
 | ✅ Full security stack (OAuth2, Bearer, API Key)       |                                          |
 | ✅ Python 3.14t free-threaded support                  |                                          |
 | ✅ Native FFI handlers (C/Zig, no Python at all)       |                                          |
+| ✅ CORS, GZip middleware                               |                                          |
 
-> **Use TurboAPI if** you want the fastest possible Python API framework and are comfortable with an alpha project. Don't use it for production workloads without thorough testing first.
 
 ---
 
@@ -376,6 +390,121 @@ python -m pytest tests/ -v
 ```
 
 ---
+
+## 🐍 Why Python?
+
+The "just use Go/Rust" criticism is fair for pure throughput. TurboAPI's value proposition is different: **Python ecosystem + near-native HTTP throughput**.
+
+### What you keep with Python
+
+- **ML / AI libraries** — PyTorch, transformers, LangChain, LlamaIndex, etc. None of these exist in Go or Rust at the same maturity level. If your API calls an LLM or does inference, Python is the only practical choice.
+- **ORM ecosystem** — SQLAlchemy, Tortoise, Django ORM, Alembic. Rewriting this in Go is months of work.
+- **Team familiarity** — most backend Python teams can be productive on day one. A Rust rewrite takes 6-12 months and a different hiring profile.
+- **Library coverage** — Stripe SDK, Twilio, boto3, Celery, Redis, every database driver. Go/Rust alternatives exist but are thinner.
+- **FastAPI compatibility** — if you're already on FastAPI, TurboAPI is a one-line import change, not a rewrite.
+
+### When to actually use Go or Rust instead
+
+| Scenario | Recommendation |
+|----------|---------------|
+| Pure JSON proxy, no business logic | Go (net/http or Gin) |
+| Embedded systems, < 1MB binary | Rust |
+| Existing Go/Rust team | Stay in your stack |
+| Need >200k req/s with <0.1ms p99 | Native server, no Python |
+| Need HTTP/2, gRPC today | Go (mature ecosystem) |
+| Heavy Python ML/data dependencies | TurboAPI |
+| FastAPI codebase, need 10-20x throughput | TurboAPI |
+| Background workers + AI inference + HTTP | TurboAPI |
+
+### The realistic throughput story
+
+```
+                     req/s     p50 latency    Python needed?
+Go net/http          250k+     0.05ms         No
+TurboAPI (noargs)    144k      0.16ms         Yes (thin layer)
+TurboAPI (CORS)      110k      0.22ms         Yes
+FastAPI + uvicorn    6-8k      14ms           Yes
+Django REST          2-4k      25ms+          Yes
+```
+
+TurboAPI won't out-run a native Go server on raw req/s. It closes most of the gap while keeping your Python codebase intact.
+
+---
+
+## 🔭 Observability
+
+TurboAPI handlers are regular Python functions — standard observability tools work without special adapters.
+
+### OpenTelemetry
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+trace.set_tracer_provider(provider)
+
+tracer = trace.get_tracer(__name__)
+
+app = TurboAPI()
+
+@app.get("/users/{user_id}")
+def get_user(user_id: int):
+    with tracer.start_as_current_span("get_user") as span:
+        span.set_attribute("user.id", user_id)
+        user = db.get(user_id)
+        return user.dict()
+```
+
+### Prometheus
+
+```python
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+import time
+
+REQUEST_COUNT = Counter("http_requests_total", "Total requests", ["method", "path", "status"])
+REQUEST_LATENCY = Histogram("http_request_duration_seconds", "Request latency", ["path"])
+
+class MetricsMiddleware:
+    async def __call__(self, request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        duration = time.perf_counter() - start
+        REQUEST_COUNT.labels(request.method, request.url.path, response.status_code).inc()
+        REQUEST_LATENCY.labels(request.url.path).observe(duration)
+        return response
+
+app = TurboAPI()
+app.add_middleware(MetricsMiddleware)
+
+@app.get("/metrics")
+def metrics():
+    from turboapi import Response
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+```
+
+### Structured logging
+
+```python
+import structlog
+
+log = structlog.get_logger()
+
+@app.get("/orders/{order_id}")
+def get_order(order_id: int):
+    log.info("order.fetch", order_id=order_id)
+    order = db.fetch(order_id)
+    if not order:
+        log.warning("order.not_found", order_id=order_id)
+        raise HTTPException(status_code=404)
+    return order.dict()
+```
+
+Middleware-based tracing works today on `enhanced`-path routes (those using `Depends()`, or any route when middleware is added). The Zig fast-path routes bypass the Python middleware stack for throughput — if you need per-request tracing on every route, add a middleware and accept the ~24% throughput overhead.
+
 
 ## 🤝 Contributing
 
