@@ -875,12 +875,8 @@ def create_fast_handler(original_handler, route_definition):
                 result = original_handler()
                 if isinstance(result, _Response):
                     ct = result.media_type or "application/json"
-                    body_str = (
-                        result.body.decode("utf-8")
-                        if isinstance(result.body, bytes)
-                        else str(result.body)
-                    )
-                    return (result.status_code, ct, body_str)
+                    body = result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
+                    return (result.status_code, ct, body)
                 if isinstance(result, tuple) and len(result) == 2:
                     return (result[1], "application/json", _dumps(result[0]))
                 if hasattr(result, "model_dump"):
@@ -889,12 +885,12 @@ def create_fast_handler(original_handler, route_definition):
             except Exception as e:
                 try:
                     from turboapi.exceptions import HTTPException as _HTTPException
+
                     if isinstance(e, _HTTPException):
                         return (e.status_code, "application/json", _dumps({"detail": e.detail}))
                 except ImportError:
                     pass
                 return (500, "application/json", _dumps({"error": str(e)}))
-
         return fast_handler_noargs
 
     def fast_handler(**kwargs):
@@ -912,6 +908,7 @@ def create_fast_handler(original_handler, route_definition):
                 qs = kwargs.get("query_string", "")
                 if qs:
                     from urllib.parse import parse_qs
+
                     for k, v in parse_qs(qs, keep_blank_values=True).items():
                         if k in param_names and k not in call_kwargs:
                             call_kwargs[k] = v[0]
@@ -926,12 +923,8 @@ def create_fast_handler(original_handler, route_definition):
 
             if isinstance(result, _Response):
                 ct = result.media_type or "application/json"
-                body_str = (
-                    result.body.decode("utf-8")
-                    if isinstance(result.body, bytes)
-                    else str(result.body)
-                )
-                return (result.status_code, ct, body_str)
+                body = result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
+                return (result.status_code, ct, body)
 
             if hasattr(result, "model_dump"):
                 result = result.model_dump()
@@ -941,6 +934,7 @@ def create_fast_handler(original_handler, route_definition):
         except Exception as e:
             try:
                 from turboapi.exceptions import HTTPException
+
                 if isinstance(e, HTTPException):
                     return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
@@ -948,6 +942,8 @@ def create_fast_handler(original_handler, route_definition):
             return (500, "application/json", _dumps({"error": str(e)}))
 
     return fast_handler
+
+
 def create_fast_model_handler(original_handler, model_class, param_name):
     """Create a minimal handler for model_sync routes.
 
@@ -979,6 +975,7 @@ def create_fast_model_handler(original_handler, model_class, param_name):
         except Exception as e:
             try:
                 from turboapi.exceptions import HTTPException
+
                 if isinstance(e, HTTPException):
                     return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
