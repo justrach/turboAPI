@@ -37,16 +37,33 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+# Lazy import — jwt is optional. ImportError is deferred to call time so that
+# `from turboapi import TurboAPI` works even without PyJWT installed.
+_jwt = None
+_jwt_import_error: Exception | None = None
 try:
-    import jwt as _jwt
+    import jwt as _jwt  # type: ignore[no-redef]
     from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
-except ImportError as e:
-    raise ImportError(
-        "PyJWT is required for turboapi.jwt_auth. Install it with: pip install PyJWT cryptography"
-    ) from e
+except ImportError:
+    _jwt_import_error = ImportError(
+        "PyJWT is required for JWT auth. Install it with: pip install PyJWT cryptography"
+    )
 
-from .exceptions import HTTPException
-from .security import SecurityBase
+    class ExpiredSignatureError(Exception):  # type: ignore[no-redef]
+        pass
+
+    class InvalidTokenError(Exception):  # type: ignore[no-redef]
+        pass
+
+
+def _require_jwt() -> None:
+    """Raise at call time if PyJWT is not installed."""
+    if _jwt_import_error is not None:
+        raise _jwt_import_error
+
+
+from .exceptions import HTTPException  # noqa: E402
+from .security import SecurityBase  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Settings
@@ -109,12 +126,13 @@ def create_access_token(
     Returns:
         Encoded JWT string.
     """
+    _require_jwt()
     payload = dict(data)
     expire = int(time.time()) + (expires_in or settings.access_token_expire_seconds)
     payload["exp"] = expire
 
     key = settings.private_key or settings.secret_key
-    return _jwt.encode(payload, key, algorithm=settings.algorithm)
+    return _jwt.encode(payload, key, algorithm=settings.algorithm)  # type: ignore[union-attr]
 
 
 def create_refresh_token(
@@ -123,13 +141,14 @@ def create_refresh_token(
     settings: JWTSettings,
     expires_in: int | None = None,
 ) -> str:
-    """Create a longer-lived refresh token."""
+    _require_jwt()
     payload = dict(data)
     expire = int(time.time()) + (expires_in or settings.refresh_token_expire_seconds)
     payload["exp"] = expire
     payload["type"] = "refresh"
 
     key = settings.private_key or settings.secret_key
+    return _jwt.encode(payload, key, algorithm=settings.algorithm)  # type: ignore[union-attr]
     return _jwt.encode(payload, key, algorithm=settings.algorithm)
 
 
@@ -150,9 +169,10 @@ def decode_token(
     Raises HTTPException(401) on invalid/expired tokens.
     Raises HTTPException(403) on insufficient scopes.
     """
+    _require_jwt()
     try:
         key = settings.public_key or settings.secret_key
-        payload = _jwt.decode(token, key, algorithms=[settings.algorithm])
+        payload = _jwt.decode(token, key, algorithms=[settings.algorithm])  # type: ignore[union-attr]
     except ExpiredSignatureError:
         raise HTTPException(
             status_code=401,
@@ -270,7 +290,7 @@ except ImportError:
     import hmac as _hmac
 
     def hash_password(password: str) -> str:  # type: ignore[misc]
-        """SHA-256 fallback — install passlib[bcrypt] for production use."""
+        """SHA-256 fallback -- install passlib[bcrypt] for production use."""
         import secrets as _secrets
 
         salt = _secrets.token_hex(16)

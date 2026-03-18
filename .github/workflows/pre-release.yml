@@ -53,7 +53,7 @@ jobs:
       - name: Install Python package + test deps
         run: |
           pip install -e .
-          pip install pytest requests
+          pip install pytest requests PyJWT cryptography passlib bcrypt pydantic
 
       - name: Run tests
         run: |
