@@ -89,34 +89,38 @@ That's it. Your API is running on a Zig HTTP server at `http://localhost:8000`.
 
 ## 📊 Benchmarks
 
-All numbers verified with correct, identical JSON responses. `wrk -t4 -c100 -d8s`, Python 3.14t free-threaded, Apple Silicon M3 Pro.
+All numbers verified with correct, identical JSON responses. `wrk -t4 -c100 -d10s`, Python 3.14t free-threaded, Apple Silicon M3 Pro.
 
 ```
-  Throughput (req/s)
+  Throughput (req/s) — no middleware
   ─────────────────────────────────────────────────────────────
 
-  GET /ping           ██████████████████████████████████████████████  139,350  ← TurboAPI
-  (simple_sync_noargs) ███  6,847                                              ← FastAPI
+  GET /ping             ████████████████████████████████████████████████  144,139  ← TurboAPI (noargs)
+  (simple_sync_noargs)  ███  6,847                                                 ← FastAPI
 
-  GET /items/{id}     █████████████████████████████████  ~105,000
-                      ███  8,666
+  GET /items/{id}       ███████████████████████████████████████████████  ~142,000  ← vectorcall (Zig arg assembly)
+                        ████  8,666
 
-  POST /items (JSON)  ████████████████████████████████  ~95,000
-                      ████  8,200
+  POST /users (dhi)     ████████████████████████████████████████  ~124,000         ← model_sync + pre-GIL validation
+                        ████  8,200
 
   ─────────────────────────────────────────────────────────────
-  Average speedup: ~20x    Avg latency: 0.16ms vs 14.6ms
+  With CORSMiddleware stacked (all routes, all methods):
+  ─────────────────────────────────────────────────────────────
+
+  GET /ping + CORS      ████████████████████████████████████  ~110,000             ← ~24% overhead, still 16x FastAPI
+  GET /items/{id} + CORS ███████████████████████████████████  ~103,000
+  POST /items + CORS    ████████████████████████████████████  ~107,000
+
+  ─────────────────────────────────────────────────────────────
+  Avg latency (no middleware): 0.16ms    FastAPI: 14.6ms (~20x)
+  Avg latency (with CORS):     0.22ms    FastAPI: 14.6ms (~16x)
 ```
 
-Zero-arg GET handlers use `PyObject_CallNoArgs` — no empty tuple/kwargs allocation. POST validation runs in Zig (dhi schema) before acquiring the GIL. Invalid bodies return `422` without calling Python.
-
-#### Run your own benchmarks
-#### Run your own benchmarks
-
-```bash
-python benchmarks/turboapi_vs_fastapi.py
-python benchmarks/turboapi_vs_fastapi.py --duration 10 --threads 4 --connections 100
-```
+- **Zero-arg GET**: `PyObject_CallNoArgs` — no tuple/kwargs allocation
+- **Parameterized GET**: `PyObject_Vectorcall` with Zig-assembled positional args — no `parse_qs`, no kwargs dict
+- **POST (dhi model)**: Zig validates JSON schema **before** acquiring the GIL — invalid bodies return `422` without touching Python
+- **With middleware**: routes fall back to the `enhanced` dispatch path; overhead is ~24% but throughput stays well above 100k req/s
 
 ---
 

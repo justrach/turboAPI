@@ -20,6 +20,7 @@ from .request_handler import (
     create_enhanced_handler,
     create_fast_handler,
     create_fast_model_handler,
+    create_pos_handler,
 )
 from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
 
@@ -480,8 +481,20 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 if handler_type == "model_sync":
                     # FAST MODEL PATH: Zig validates JSON natively via dhi, then calls Python
                     if self._middleware_instances:
+                        # Middleware present: register as "enhanced" so Zig uses callPythonHandler
+                        # (dict response path). Pre-GIL dhi validation is skipped — middleware
+                        # overhead already dominates, so the tradeoff is acceptable.
                         enhanced_handler = create_enhanced_handler(route.handler, route)
                         enhanced_handler = self._wrap_with_middleware(enhanced_handler)
+                        self.zig_server.add_route_fast(
+                            route.method.value,
+                            route.path,
+                            enhanced_handler,
+                            "enhanced",
+                            "{}",
+                            route.handler,
+                        )
+                        print(f"{CHECK_MARK} [model_sync+middleware→enhanced] {route.method.value} {route.path}")
                     else:
                         # Minimal handler: json.loads → Model(**data) → handler(model) → json.dumps
                         enhanced_handler = create_fast_model_handler(
@@ -490,47 +503,71 @@ class ZigIntegratedTurboAPI(TurboAPI):
                             model_info["param_name"],
                         )
 
-                    # Extract dhi model schema for Zig-native validation
-                    schema_json = _extract_model_schema(model_info["model_class"])
-                    if schema_json and hasattr(self.zig_server, "add_route_model_validated"):
-                        self.zig_server.add_route_model_validated(
-                            route.method.value,
-                            route.path,
-                            enhanced_handler,
-                            model_info["param_name"],
-                            model_info["model_class"],
-                            route.handler,
-                            schema_json,
-                        )
-                        print(f"{CHECK_MARK} [model_sync+dhi] {route.method.value} {route.path}")
-                    else:
-                        self.zig_server.add_route_model(
-                            route.method.value,
-                            route.path,
-                            enhanced_handler,
-                            model_info["param_name"],
-                            model_info["model_class"],
-                            route.handler,
-                        )
-                        print(f"{CHECK_MARK} [model_sync] {route.method.value} {route.path}")
+                        # Extract dhi model schema for Zig-native validation
+                        schema_json = _extract_model_schema(model_info["model_class"])
+                        if schema_json and hasattr(self.zig_server, "add_route_model_validated"):
+                            self.zig_server.add_route_model_validated(
+                                route.method.value,
+                                route.path,
+                                enhanced_handler,
+                                model_info["param_name"],
+                                model_info["model_class"],
+                                route.handler,
+                                schema_json,
+                            )
+                            print(f"{CHECK_MARK} [model_sync+dhi] {route.method.value} {route.path}")
+                        else:
+                            self.zig_server.add_route_model(
+                                route.method.value,
+                                route.path,
+                                enhanced_handler,
+                                model_info["param_name"],
+                                model_info["model_class"],
+                                route.handler,
+                            )
+                            print(f"{CHECK_MARK} [model_sync] {route.method.value} {route.path}")
                 elif handler_type in ("simple_sync", "simple_sync_noargs", "body_sync"):
                     # SYNC FAST PATH: Use minimal-overhead fast handler (returns 3-tuple)
                     if self._middleware_instances:
+                        # Middleware present: wrap with enhanced handler, register as "enhanced"
+                        # so Zig dispatches through callPythonHandler (dict response path)
+                        # instead of the fast tuple path which doesn't support middleware
                         enhanced_handler = create_enhanced_handler(route.handler, route)
                         enhanced_handler = self._wrap_with_middleware(enhanced_handler)
+                        registered_type = "enhanced"
+                    elif handler_type == "simple_sync":
+                        # Vectorcall path: Zig assembles args, calls positionally
+                        enhanced_handler = create_pos_handler(route.handler)
+                        registered_type = handler_type
                     else:
                         enhanced_handler = create_fast_handler(route.handler, route)
-                    param_types_json = json.dumps(param_types)
+                        registered_type = handler_type
+
+                    # simple_sync: ordered "name:type[?]|..." string for Zig vectorcall arg assembly
+                    # '?' suffix = has a Python default → Zig skips trailing missing optionals
+                    # Other types: legacy JSON dict (unused in Zig dispatch, kept for compat)
+                    if handler_type == "simple_sync" and not self._middleware_instances:
+                        sig = inspect.signature(route.handler)
+                        meta_parts = []
+                        for n, t in param_types.items():
+                            param = sig.parameters.get(n)
+                            is_opt = (
+                                param is not None and param.default is not inspect.Parameter.empty
+                            )
+                            meta_parts.append(f"{n}:{t}{'?' if is_opt else ''}")
+                        param_meta_str = "|".join(meta_parts)
+                    else:
+                        param_meta_str = json.dumps(param_types)
 
                     self.zig_server.add_route_fast(
                         route.method.value,
                         route.path,
                         enhanced_handler,
-                        handler_type,
-                        param_types_json,
+                        registered_type,
+                        param_meta_str,
                         route.handler,
                     )
-                    print(f"{CHECK_MARK} [{handler_type}] {route.method.value} {route.path}")
+                    print(f"{CHECK_MARK} [{registered_type}] {route.method.value} {route.path}")
                 elif handler_type in ("simple_async", "body_async"):
                     # ASYNC FAST PATH: Register with async runtime
                     enhanced_handler = create_enhanced_handler(route.handler, route)

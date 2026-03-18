@@ -578,6 +578,23 @@ class ResponseHandler:
         return ResponseHandler.format_response(content, status_code, content_type)
 
 
+
+_json_dumps = __import__("json").dumps
+
+
+def _format_zig_tuple(content, status_code, content_type=None):
+    """Return (status_code, content_type, body) 3-tuple for Zig's sendTupleResponse."""
+    ct = content_type or "application/json"
+    if isinstance(content, bytes):
+        return (status_code, ct, content)
+    if hasattr(content, "model_dump"):
+        content = content.model_dump()
+    try:
+        return (status_code, ct, _json_dumps(content))
+    except Exception:
+        return (status_code, "application/json", _json_dumps({"error": str(content)}))
+
+
 def create_enhanced_handler(original_handler, route_definition):
     """
     Create an enhanced handler with automatic body parsing and response normalization.
@@ -712,7 +729,6 @@ def create_enhanced_handler(original_handler, route_definition):
                 return ResponseHandler.format_json_response(content, status_code, content_type)
 
             except ValueError as e:
-                # Validation or parsing error (400 Bad Request)
                 return ResponseHandler.format_json_response(
                     {"error": "Bad Request", "detail": str(e)}, 400
                 )
@@ -721,7 +737,6 @@ def create_enhanced_handler(original_handler, route_definition):
 
                 if isinstance(e, HTTPException):
                     return ResponseHandler.format_json_response({"detail": e.detail}, e.status_code)
-                # Unexpected error (500 Internal Server Error)
                 import traceback
 
                 return ResponseHandler.format_json_response(
@@ -815,7 +830,6 @@ def create_enhanced_handler(original_handler, route_definition):
                 return ResponseHandler.format_json_response(content, status_code, content_type)
 
             except ValueError as e:
-                # Validation or parsing error (400 Bad Request)
                 return ResponseHandler.format_json_response(
                     {"error": "Bad Request", "detail": str(e)}, 400
                 )
@@ -824,7 +838,6 @@ def create_enhanced_handler(original_handler, route_definition):
 
                 if isinstance(e, HTTPException):
                     return ResponseHandler.format_json_response({"detail": e.detail}, e.status_code)
-                # Unexpected error (500 Internal Server Error)
                 import traceback
 
                 return ResponseHandler.format_json_response(
@@ -837,6 +850,43 @@ def create_enhanced_handler(original_handler, route_definition):
                 )
 
         return enhanced_handler
+
+def create_pos_handler(original_handler):
+    """Minimal positional wrapper for PyObject_Vectorcall dispatch.
+
+    Zig assembles args from path/query params and calls this positionally —
+    zero **kwargs dict, zero parse_qs, zero call_kwargs allocation.
+    Returns (status_code, content_type, body) 3-tuple for sendTupleResponse.
+    """
+    import json as _json
+
+    _dumps = _json.dumps
+    from turboapi.responses import Response as _Response
+
+    def pos_handler(*args):
+        try:
+            result = original_handler(*args)
+            if isinstance(result, _Response):
+                body = (
+                    result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
+                )
+                return (result.status_code, result.media_type or "application/json", body)
+            if hasattr(result, "model_dump"):
+                result = result.model_dump()
+            if isinstance(result, tuple) and len(result) == 2:
+                return (result[1], "application/json", _dumps(result[0]))
+            return (200, "application/json", _dumps(result))
+        except Exception as e:
+            try:
+                from turboapi.exceptions import HTTPException as _HTTPException
+
+                if isinstance(e, _HTTPException):
+                    return (e.status_code, "application/json", _dumps({"detail": e.detail}))
+            except ImportError:
+                pass
+            return (500, "application/json", _dumps({"error": str(e)}))
+
+    return pos_handler
 
 
 def create_fast_handler(original_handler, route_definition):
@@ -875,7 +925,11 @@ def create_fast_handler(original_handler, route_definition):
                 result = original_handler()
                 if isinstance(result, _Response):
                     ct = result.media_type or "application/json"
-                    body = result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
+                    body = (
+                        result.body
+                        if isinstance(result.body, bytes)
+                        else result.body.encode("utf-8")
+                    )
                     return (result.status_code, ct, body)
                 if isinstance(result, tuple) and len(result) == 2:
                     return (result[1], "application/json", _dumps(result[0]))
@@ -891,6 +945,7 @@ def create_fast_handler(original_handler, route_definition):
                 except ImportError:
                     pass
                 return (500, "application/json", _dumps({"error": str(e)}))
+
         return fast_handler_noargs
 
     def fast_handler(**kwargs):
@@ -923,7 +978,9 @@ def create_fast_handler(original_handler, route_definition):
 
             if isinstance(result, _Response):
                 ct = result.media_type or "application/json"
-                body = result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
+                body = (
+                    result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
+                )
                 return (result.status_code, ct, body)
 
             if hasattr(result, "model_dump"):

@@ -540,7 +540,7 @@ const html =
     \\      <div class="instrument-body">
     \\        <div class="chart-wrap"><canvas id="heroChart"></canvas></div>
     \\        <div class="chart-legend">
-          \\          <div class="legend-item"><div class="legend-dot" style="background:#e8821a"></div>TurboAPI<span class="legend-val" id="v0">&nbsp;139,350</span></div>
+          \\          <div class="legend-item"><div class="legend-dot" style="background:#e8821a"></div>TurboAPI<span class="legend-val" id="v0">&nbsp;144,139</span></div>
     \\          <div class="legend-item"><div class="legend-dot" style="background:#c8c2ba"></div>Starlette<span class="legend-val" id="v1">&nbsp;9,201</span></div>
     \\          <div class="legend-item"><div class="legend-dot" style="background:#b5afa7"></div>FastAPI<span class="legend-val" id="v2">&nbsp;6,847</span></div>
     \\          <div class="legend-item"><div class="legend-dot" style="background:#a29c94"></div>Flask<span class="legend-val" id="v3">&nbsp;4,312</span></div>
@@ -653,7 +653,7 @@ const html =
     \\const labels = ['TurboAPI', 'Starlette', 'FastAPI', 'Flask'];
     \\const barColors = ['#e8821a', '#c8c2ba', '#b5afa7', '#a29c94'];
     \\const chartData = {
-    \\  rps:     { vals:[139350,9201,6847,4312],  unit:'req/s',  label:'Requests per second \u2014 higher is better',  fmt: v => v.toLocaleString() },
+    \\  rps:     { vals:[144139,9201,6847,4312],  unit:'req/s',  label:'Requests per second \u2014 higher is better',  fmt: v => v.toLocaleString() },
     \\  latency: { vals:[0.16,10.9,14.6,23.2],   unit:'ms',     label:'Avg latency ms \u2014 lower is better',        fmt: v => v+'ms' },
     \\  cold:    { vals:[5,600,800,400],          unit:'ms',     label:'Cold start ms \u2014 lower is better',         fmt: v => v+'ms' },
     \\  mem:     { vals:[12,58,72,38],            unit:'MB',     label:'Memory under load MB \u2014 lower is better',  fmt: v => v+'MB' },
