@@ -199,12 +199,14 @@ const StaticRouteEntry = struct {
 var routes: ?std.StringHashMap(HandlerEntry) = null;
 var native_routes: ?std.StringHashMap(NativeHandlerEntry) = null;
 var static_routes: ?std.StringHashMap(StaticRouteEntry) = null;
-var response_cache: ?std.StringHashMap([]const u8) = null; // pre-rendered responses for noargs handlers
+var response_cache: ?std.StringHashMap([]const u8) = null;
+var response_cache_count: usize = 0;
+const MAX_CACHE_ENTRIES: usize = 10_000; // bounded to prevent OOM via unique paths
 var model_schemas: ?std.StringHashMap(dhi.ModelSchema) = null;
 var router: ?router_mod.Router = null;
 var server_host: []const u8 = "127.0.0.1";
 var server_port: u16 = 8000;
-var cache_noargs_responses: bool = false; // opt-in via server_enable_response_cache
+var cache_noargs_responses: bool = false;
 
 // Interpreter reference captured before releasing the GIL at server start.
 // Workers use this to create their own PyThreadState rather than calling
@@ -237,6 +239,18 @@ fn getResponseCache() *std.StringHashMap([]const u8) {
         response_cache = std.StringHashMap([]const u8).init(allocator);
     }
     return &response_cache.?;
+}
+
+/// Cache a pre-rendered response, respecting MAX_CACHE_ENTRIES to prevent OOM.
+fn cacheResponse(key: []const u8, rendered: []const u8) void {
+    if (response_cache_count >= MAX_CACHE_ENTRIES) return; // bounded — reject when full
+    const key_dupe = allocator.dupe(u8, key) catch return;
+    getResponseCache().put(key_dupe, rendered) catch {
+        allocator.free(rendered);
+        allocator.free(key_dupe);
+        return;
+    };
+    response_cache_count += 1;
 }
 
 fn getModelSchemas() *std.StringHashMap(dhi.ModelSchema) {
@@ -290,6 +304,14 @@ pub fn server_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
     server_host = allocator.dupe(u8, std.mem.span(host)) catch "127.0.0.1";
     server_port = @intCast(port);
 
+    // Eagerly initialize all globals — workers must never hit the lazy-init
+    // path, which has a check-then-act race condition.
+    _ = getRoutes();
+    _ = getNativeRoutes();
+    _ = getStaticRoutes();
+    _ = getResponseCache();
+    _ = getModelSchemas();
+    _ = getRouter();
     // Return a state dict
     const d = c.PyDict_New() orelse return null;
     const h_obj = c.PyUnicode_FromString(host) orelse return null;
@@ -589,6 +611,14 @@ pub fn server_configure_cors(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?
     const methods_s = std.mem.span(methods);
     const hdrs_s = std.mem.span(hdrs);
 
+    // Reject CRLF in CORS values — prevents header injection
+    for ([_][]const u8{ origins_s, methods_s, hdrs_s }) |val| {
+        if (std.mem.indexOfAny(u8, val, "\r\n") != null) {
+            py.setError("CORS values must not contain CR or LF", .{});
+            return null;
+        }
+    }
+
     // Pre-render the CORS header block (injected into every response)
     const cred_hdr: []const u8 = if (credentials != 0) "\r\nAccess-Control-Allow-Credentials: true" else "";
     var age_buf: [16]u8 = undefined;
@@ -880,9 +910,12 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         .simple_sync => {
             // Param-aware cache: key is "METHOD /full/path" (includes param values)
             if (cache_noargs_responses) {
-                // Build cache key from method + raw path (e.g. "GET /users/123")
-                var cache_key_buf: [256]u8 = undefined;
-                const cache_key = std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch path;
+                // Build cache key from method + path + query (e.g. "GET /users/123?sort=name")
+                var cache_key_buf: [512]u8 = undefined;
+                const cache_key = if (query_string.len > 0)
+                    std.fmt.bufPrint(&cache_key_buf, "{s} {s}?{s}", .{ method, path, query_string }) catch path
+                else
+                    std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch path;
                 if (getResponseCache().get(cache_key)) |cached| {
                     stream.writeAll(cached) catch return;
                     return;
@@ -1159,13 +1192,9 @@ fn callPythonNoArgsCaching(tstate: ?*anyopaque, entry: HandlerEntry, stream: std
     // Send response now
     sendResponse(stream, status_code, content_type, body_slice);
 
-    // Cache the pre-rendered response for future calls (key is already owned by routes)
+    // Cache the pre-rendered response (bounded by MAX_CACHE_ENTRIES)
     if (renderResponse(status_code, content_type, body_slice)) |rendered| {
-        const key_dupe = allocator.dupe(u8, handler_key) catch return;
-        getResponseCache().put(key_dupe, rendered) catch {
-            allocator.free(rendered);
-            allocator.free(key_dupe);
-        };
+        cacheResponse(handler_key, rendered);
     }
 }
 
@@ -1343,13 +1372,9 @@ fn callPythonVectorcallCaching(
 
     sendResponse(stream, status_code, content_type, body_slice);
 
-    // Cache by full path
+    // Cache by full path (bounded by MAX_CACHE_ENTRIES)
     if (renderResponse(status_code, content_type, body_slice)) |rendered| {
-        const key_dupe = allocator.dupe(u8, cache_key) catch return;
-        getResponseCache().put(key_dupe, rendered) catch {
-            allocator.free(rendered);
-            allocator.free(key_dupe);
-        };
+        cacheResponse(cache_key, rendered);
     }
 }
 

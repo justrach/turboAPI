@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
-pub const MAX_ROUTE_PARAMS = 8;
+pub const MAX_ROUTE_PARAMS = 16;
 
 pub const RouteParam = struct {
     key: []const u8,
@@ -31,6 +31,8 @@ pub const RouteParams = struct {
         if (self.len < MAX_ROUTE_PARAMS) {
             self.items_buf[self.len] = .{ .key = key, .value = value };
             self.len += 1;
+        } else {
+            std.debug.print("[WARN] Route has >{d} params — excess dropped: {s}\n", .{ MAX_ROUTE_PARAMS, key });
         }
     }
 
