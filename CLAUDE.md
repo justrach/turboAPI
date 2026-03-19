@@ -13,11 +13,14 @@ A high-performance Python web framework with a Zig HTTP backend. Drop-in FastAPI
 ## Building
 
 ```bash
-# Build the Zig native backend (auto-detects Python include paths)
-python zig/build_turbonet.py
+# Build the Zig native backend (auto-detects Python, dhi fetched via build.zig.zon)
+python zig/build_turbonet.py --install
 
 # Install the Python package in dev mode
 uv pip install -e ".[dev]"
+
+# Or just use Docker
+docker compose up --build
 ```
 
 ## Running Tests
@@ -71,6 +74,7 @@ benchmarks/          — Performance benchmarks
 ## Key Conventions
 
 - Zig backend builds via `python zig/build_turbonet.py` (NOT `zig build` directly — it needs `-Dpy-include`)
+- dhi dependency is fetched automatically via `build.zig.zon` — no manual cloning needed
 - Pre-commit hooks run ruff lint + Zig build + smoke test
 - The `feature/community-feedback` branch has the latest security fixes and fuzz tests
 - FFI native handlers use borrowed pointers (no heap alloc) — see ABI contract in `server.zig`
