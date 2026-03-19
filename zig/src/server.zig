@@ -766,6 +766,12 @@ fn parseHeaders(request_data: []const u8, first_line_end: usize, header_end_pos:
 
 fn handleConnection(stream: std.net.Stream, tstate: ?*anyopaque) void {
     defer stream.close();
+
+    // Slowloris protection: if client sends nothing for 30s, read() times out
+    // and the worker is freed. No kqueue needed — just a socket option.
+    const timeout = std.posix.timeval{ .sec = 30, .usec = 0 };
+    std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+
     while (true) {
         handleOneRequest(stream, tstate) catch return;
     }
@@ -872,7 +878,19 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
             return;
         },
         .simple_sync => {
-            callPythonVectorcall(tstate, entry, query_string, &match.params, stream);
+            // Param-aware cache: key is "METHOD /full/path" (includes param values)
+            if (cache_noargs_responses) {
+                // Build cache key from method + raw path (e.g. "GET /users/123")
+                var cache_key_buf: [256]u8 = undefined;
+                const cache_key = std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch path;
+                if (getResponseCache().get(cache_key)) |cached| {
+                    stream.writeAll(cached) catch return;
+                    return;
+                }
+                callPythonVectorcallCaching(tstate, entry, query_string, &match.params, stream, cache_key);
+            } else {
+                callPythonVectorcall(tstate, entry, query_string, &match.params, stream);
+            }
             return;
         },
         else => {},
@@ -1241,6 +1259,98 @@ fn callPythonVectorcall(
     };
     defer c.Py_DecRef(result);
     sendTupleResponse(stream, result);
+}
+
+/// Like callPythonVectorcall but caches the pre-rendered response keyed by full path.
+fn callPythonVectorcallCaching(
+    tstate: ?*anyopaque,
+    entry: HandlerEntry,
+    query_string: []const u8,
+    params: *const router_mod.RouteParams,
+    stream: std.net.Stream,
+    cache_key: []const u8,
+) void {
+    py.PyEval_AcquireThread(tstate);
+    defer py.PyEval_ReleaseThread(tstate);
+
+    const argc = entry.param_count;
+    var args: [MAX_PARAMS + 1]*c.PyObject = undefined;
+    args[0] = entry.handler;
+    var last_filled: usize = 0;
+
+    for (entry.param_meta[0..argc], 0..) |pm, i| {
+        const val_str: ?[]const u8 = params.get(pm.name) orelse queryStringGet(query_string, pm.name);
+        if (val_str) |vs| {
+            const py_obj: ?*c.PyObject = switch (pm.type_tag) {
+                .int => blk: {
+                    const n = std.fmt.parseInt(i64, vs, 10) catch 0;
+                    break :blk c.PyLong_FromLongLong(n);
+                },
+                .float => blk: {
+                    const f = std.fmt.parseFloat(f64, vs) catch 0;
+                    break :blk c.PyFloat_FromDouble(f);
+                },
+                .bool_val => blk: {
+                    const is_true = std.mem.eql(u8, vs, "true") or std.mem.eql(u8, vs, "1");
+                    break :blk if (is_true) py.pyTrue() else py.pyFalse();
+                },
+                .str => py.newString(vs),
+            };
+            if (py_obj) |obj| {
+                args[i + 1] = obj;
+                last_filled = i + 1;
+            } else {
+                sendResponse(stream, 500, "application/json", "{\"error\":\"arg conversion failed\"}");
+                for (1..i + 1) |j| c.Py_DecRef(args[j]);
+                return;
+            }
+        } else {
+            if (pm.has_default) break;
+            sendResponse(stream, 422, "application/json", "{\"error\":\"missing required param\"}");
+            for (1..i + 1) |j| c.Py_DecRef(args[j]);
+            return;
+        }
+    }
+    defer for (1..last_filled + 1) |j| c.Py_DecRef(args[j]);
+
+    const nargs = last_filled;
+    const result = py.PyObject_Vectorcall(entry.handler, @ptrCast(&args[1]), nargs, null) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(result);
+
+    // Extract tuple and send + cache
+    const sc_obj = py.PyTuple_GetItem(result, 0) orelse return;
+    const ct_obj = py.PyTuple_GetItem(result, 1) orelse return;
+    const body_obj = py.PyTuple_GetItem(result, 2) orelse return;
+
+    const status_code: u16 = @intCast(c.PyLong_AsLong(sc_obj));
+    const ct_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(ct_obj) orelse "application/json";
+    const content_type = std.mem.span(ct_cstr);
+
+    var body_slice: []const u8 = "";
+    if (c.PyUnicode_Check(body_obj) != 0) {
+        if (c.PyUnicode_AsUTF8(body_obj)) |cs| body_slice = std.mem.span(cs);
+    } else if (c.PyBytes_Check(body_obj) != 0) {
+        var size: c.Py_ssize_t = 0;
+        var buf: [*c]u8 = undefined;
+        if (c.PyBytes_AsStringAndSize(body_obj, @ptrCast(&buf), &size) == 0) {
+            body_slice = buf[0..@intCast(size)];
+        }
+    }
+
+    sendResponse(stream, status_code, content_type, body_slice);
+
+    // Cache by full path
+    if (renderResponse(status_code, content_type, body_slice)) |rendered| {
+        const key_dupe = allocator.dupe(u8, cache_key) catch return;
+        getResponseCache().put(key_dupe, rendered) catch {
+            allocator.free(rendered);
+            allocator.free(key_dupe);
+        };
+    }
 }
 
 // ── Fast Python handler dispatch (simple_sync/body_sync) ─────────────────────
