@@ -1,0 +1,116 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: turbo
+      POSTGRES_PASSWORD: turbo
+      POSTGRES_DB: turbotest
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U turbo"]
+      interval: 1s
+      timeout: 5s
+      retries: 10
+
+  bench:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://turbo:turbo@postgres:5432/turbotest
+    command: >
+      bash -c "
+        apt-get update && apt-get install -y wrk > /dev/null 2>&1
+
+        # Create table + seed data
+        pip3 install psycopg2-binary > /dev/null 2>&1
+        python3 -c \"
+        import psycopg2
+        conn = psycopg2.connect('postgres://turbo:turbo@postgres:5432/turbotest')
+        cur = conn.cursor()
+        cur.execute('CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name TEXT, email TEXT, age INTEGER)')
+        cur.execute(\\\"INSERT INTO users (name,email,age) VALUES ('Alice','alice@example.com',30),('Bob','bob@example.com',25),('Charlie','charlie@example.com',35) ON CONFLICT DO NOTHING\\\")
+        conn.commit()
+        conn.close()
+        print('DB seeded')
+        \"
+
+        # Start TurboAPI server in background
+        python3 -c \"
+        from dhi import BaseModel, Field
+        from turboapi import TurboAPI
+        import os
+
+        app = TurboAPI()
+        app.configure_db(os.environ['DATABASE_URL'], pool_size=16)
+
+        class User(BaseModel):
+            name: str = Field(min_length=1, max_length=100)
+            email: str
+            age: int = Field(gt=0, le=150)
+
+        @app.db_get('/users/{user_id}', table='users', pk='id')
+        def get_user(): pass
+
+        @app.db_list('/users', table='users')
+        def list_users(): pass
+
+        @app.db_post('/users', table='users', model=User)
+        def create_user(): pass
+
+        @app.get('/health')
+        def health():
+            return {'status': 'ok'}
+
+        app.run(host='0.0.0.0', port=8000)
+        \" &
+
+        sleep 5
+
+        # Warm up cache
+        curl -s http://127.0.0.1:8000/users/1 > /dev/null
+        curl -s 'http://127.0.0.1:8000/users?limit=3' > /dev/null
+
+        echo ''
+        echo '================================================================'
+        echo '  TurboAPI + pg.zig — Native Linux Benchmark (no Colima)'
+        echo '================================================================'
+        echo ''
+
+        echo '--- UNCACHED (cold, first request hits Postgres) ---'
+        # Clear cache by doing a POST then re-test
+        curl -s -X POST http://127.0.0.1:8000/users -H 'Content-Type: application/json' -d '{\"name\":\"Warmup\",\"email\":\"w@w.com\",\"age\":1}' > /dev/null
+        echo 'GET /users/1 (uncached, single PK):'
+        wrk -t2 -c16 -d5s http://127.0.0.1:8000/users/1 2>&1 | grep -E 'Requests|Latency'
+        echo ''
+
+        echo '--- CACHED (warm, no Postgres hit) ---'
+        # Warm cache again
+        curl -s http://127.0.0.1:8000/users/1 > /dev/null
+        curl -s 'http://127.0.0.1:8000/users?limit=3' > /dev/null
+        sleep 1
+
+        echo 'GET /users/1 (cached):'
+        wrk -t2 -c16 -d5s http://127.0.0.1:8000/users/1 2>&1 | grep -E 'Requests|Latency'
+        echo ''
+
+        echo 'GET /users?limit=3 (cached):'
+        wrk -t2 -c16 -d5s 'http://127.0.0.1:8000/users?limit=3' 2>&1 | grep -E 'Requests|Latency'
+        echo ''
+
+        echo 'GET /health (pure Zig baseline, no DB):'
+        wrk -t2 -c16 -d5s http://127.0.0.1:8000/health 2>&1 | grep -E 'Requests|Latency'
+        echo ''
+
+        echo '--- UNCACHED LIST (cold, hits Postgres) ---'
+        curl -s -X POST http://127.0.0.1:8000/users -H 'Content-Type: application/json' -d '{\"name\":\"Flush\",\"email\":\"f@f.com\",\"age\":2}' > /dev/null
+        echo 'GET /users?limit=3 (uncached, hits Postgres):'
+        wrk -t2 -c16 -d5s 'http://127.0.0.1:8000/users?limit=3' 2>&1 | grep -E 'Requests|Latency'
+        echo ''
+
+        echo '================================================================'
+        echo '  Done'
+        echo '================================================================'
+      "
