@@ -128,24 +128,22 @@ def run_wrk(port, path, label):
             ["wrk", f"-t{WRK_THREADS}", f"-c{WRK_CONNECTIONS}", f"-d{WRK_DURATION}", url],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=60,
         )
         rps = 0.0
         lat = ""
         for line in result.stdout.splitlines():
-            if "Requests/sec" in line:
-                m = re.search(r"([\d.]+)", line.split("Requests/sec")[0].strip().split()[-1])
-                if not m:
-                    m = re.search(r"Requests/sec:\s*([\d.]+)", line)
+            if "Requests/sec:" in line:
+                m = re.search(r"Requests/sec:\s*([\d.]+)", line)
                 if m:
                     rps = float(m.group(1))
             if "Latency" in line and "Distribution" not in line:
                 lat = line.strip()
+        if rps == 0 and result.stderr:
+            return 0.0, f"wrk error: {result.stderr[:100]}"
         return rps, lat
     except Exception as e:
         return 0.0, f"error: {e}"
-
-
 def main():
     print()
     print("=" * 70)
