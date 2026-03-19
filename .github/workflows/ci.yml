@@ -128,9 +128,6 @@ jobs:
           python-version: '3.14'
           allow-prereleases: true
 
-      - name: Clone dhi
-        run: git clone --depth 1 https://github.com/justrach/dhi.git /tmp/dhi
-
       - name: Run Zig unit tests
         run: |
           PY_INCLUDE=$(python -c "import sysconfig; print(sysconfig.get_path('include'))")
@@ -139,5 +136,4 @@ jobs:
           zig build test \
             -Dpython=3.14 \
             -Dpy-include="$PY_INCLUDE" \
-            -Dpy-libdir="$PY_LIBDIR" \
-            -Ddhi-path=/tmp/dhi
+            -Dpy-libdir="$PY_LIBDIR"
