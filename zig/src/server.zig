@@ -913,7 +913,8 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         .simple_sync_noargs => {
             if (cache_noargs_responses) {
                 if (getResponseCache().get(match.handler_key)) |cached| {
-                    stream.writeAll(cached) catch return;
+                    // Cache hit: body-only cache, sendResponse adds fresh Date header
+                    sendResponse(stream, 200, "application/json", cached);
                     return;
                 }
                 callPythonNoArgsCaching(tstate, entry, stream, match.handler_key);
@@ -932,7 +933,7 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
                 else
                     std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch path;
                 if (getResponseCache().get(cache_key)) |cached| {
-                    stream.writeAll(cached) catch return;
+                    sendResponse(stream, 200, "application/json", cached);
                     return;
                 }
                 callPythonVectorcallCaching(tstate, entry, query_string, &match.params, stream, cache_key);
@@ -1207,10 +1208,9 @@ fn callPythonNoArgsCaching(tstate: ?*anyopaque, entry: HandlerEntry, stream: std
     // Send response now
     sendResponse(stream, status_code, content_type, body_slice);
 
-    // Cache the pre-rendered response (bounded by MAX_CACHE_ENTRIES)
-    if (renderResponse(status_code, content_type, body_slice)) |rendered| {
-        cacheResponse(handler_key, rendered);
-    }
+    // Cache body only (sendResponse adds fresh Date headers on each hit)
+    const body_dupe = allocator.dupe(u8, body_slice) catch return;
+    cacheResponse(handler_key, body_dupe);
 }
 
 /// Fast path for simple_sync handlers with 1+ params.
@@ -1391,10 +1391,9 @@ fn callPythonVectorcallCaching(
 
     sendResponse(stream, status_code, content_type, body_slice);
 
-    // Cache by full path (bounded by MAX_CACHE_ENTRIES)
-    if (renderResponse(status_code, content_type, body_slice)) |rendered| {
-        cacheResponse(cache_key, rendered);
-    }
+    // Cache body only (sendResponse adds fresh Date headers on each hit)
+    const body_dupe = allocator.dupe(u8, body_slice) catch return;
+    cacheResponse(cache_key, body_dupe);
 }
 
 // ── Fast Python handler dispatch (simple_sync/body_sync) ─────────────────────
