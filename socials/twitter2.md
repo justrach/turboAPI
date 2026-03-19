@@ -7,29 +7,28 @@
 
 ## Tweet 1 (Hook)
 
-TurboAPI update: 47k → 139k req/s.
+TurboAPI hit 150k req/s.
 
-Same decorator API. Same Pydantic models. Now 20× faster than FastAPI.
+Same decorator API. Same Pydantic models. 22x faster than FastAPI.
 
-Three changes inside the Zig core. Here's what happened 👇
-
----
-
-## Tweet 2 (What changed)
-
-**1. Per-worker PyThreadState**
-
-Old: every request called PyGILState_Ensure → OS thread lookup → acquire GIL
-
-New: each of 24 worker threads creates ONE tstate at startup, reuses it every request via PyEval_AcquireThread
-
-Result: zero per-request thread-state allocation
+Here's what changed since v0.4 👇
 
 ---
 
-## Tweet 3 (PyObject_CallNoArgs)
+## Tweet 2 (Zero-alloc hot path)
 
-**2. PyObject_CallNoArgs for zero-arg handlers**
+**1. Zero allocations on the hot path**
+
+Old: 2 heap allocs + 2 frees per response (header + concat buffer)
+New: stack buffers only. Header formatted via bufPrint, body appended, single write syscall.
+
+Route params: replaced StringHashMap with a fixed stack array. Zero allocator calls per request.
+
+---
+
+## Tweet 3 (Response caching)
+
+**2. Response caching for noargs handlers**
 
 ```python
 @app.get("/ping")
@@ -37,89 +36,91 @@ def ping():
     return {"ok": True}
 ```
 
-Old: PyTuple_New(0) + PyDict_New() + PyObject_Call
-New: PyObject_CallNoArgs — single CPython call, no allocations
+First request: Python runs, response bytes cached in Zig.
+Every request after: single writeAll from cache. Zero Python, zero GIL.
 
-TurboAPI detects at startup if your handler takes zero params and routes to the fast path automatically.
+150k req/s — matching static routes.
 
 ---
 
-## Tweet 4 (Tuple ABI)
+## Tweet 4 (Zig-native CORS)
 
-**3. Tuple response ABI**
+**3. CORS moved from Python to Zig**
 
-Old: Python handler returned a dict → 3× PyDict_GetItemString (hash + lookup per field)
+Old: CORSMiddleware forced ALL routes to the slow "enhanced" path.
+144k -> 110k. 24% overhead.
 
-New: Python returns `(status_code, content_type, body_str)` → 3× PyTuple_GetItem (direct index, no hashing)
+New: CORS headers pre-rendered once at startup, injected via memcpy.
+144k -> 139k. ~0% overhead.
 
-Your code doesn't change. The fast wrapper is generated automatically.
+OPTIONS preflight handled in Zig before touching Python.
 
 ---
 
 ## Tweet 5 (Numbers)
 
 ```
-Metric          TurboAPI v0.5   FastAPI     Delta
-------------    -------------   --------    ------
-Req/sec         139,350         6,847       +20x
-Avg latency     0.16ms          14.6ms      -99%
-p50 latency     0.14ms          14.3ms      -99%
-Memory          12MB            89MB        -87%
+Endpoint              TurboAPI     FastAPI     Delta
+-----------------     ---------    --------    ------
+GET / (cached)        150,000/s    6,847/s     +22x
+GET /users/{id}       143,000/s    8,666/s     +16x
+POST /items (dhi)     124,000/s    8,200/s     +15x
+Static /health        149,000/s    —           pure Zig
+
+Avg latency           0.15ms       14.6ms      -99%
+CORS overhead         ~0%          N/A
 ```
 
-Benchmarked: M3 Pro, Python 3.14t, wrk 4t/100c/8s.
+M3 Pro, Python 3.14t, wrk 4t/100c/10s. 275 tests passing.
 
 ---
 
-## Tweet 6 (How it works now)
+## Tweet 6 (Security)
+
+Also fixed 10 security bugs from a community audit:
+- Null terminator stack over-read in FFI
+- Dangling pointers from Python string internals
+- Integer truncation on port
+- Rate limiter data race
+- CORS wildcard + credentials violation
+- Plaintext password hash placeholder
+
+Full report: SECURITY.md
+
+---
+
+## Tweet 7 (Architecture)
 
 At startup, TurboAPI classifies every route:
 
 ```
-simple_sync_noargs → PyObject_CallNoArgs + tuple ABI
-simple_sync        → path params resolved in Zig + tuple ABI
-model_sync         → JSON parsed in Zig + tuple ABI
-enhanced           → full Depends/middleware
+static_route       -> pre-rendered bytes, writeAll
+simple_sync_noargs -> cached after 1st call
+simple_sync        -> Zig vectorcall, no kwargs dict
+model_sync         -> single JSON parse + dhi validation
+enhanced           -> full Depends/middleware
 ```
 
 Python only runs your business logic. Everything else stays in Zig.
 
 ---
 
-## Tweet 7 (Drop-in reminder)
-
-Still just:
-
-```python
-from turboapi import TurboAPI
-app = TurboAPI()
-
-@app.get("/ping")
-def ping():
-    return {"ok": True}
-```
-
-No annotations. No config. No rewrite.
-
----
-
 ## Tweet 8 (CTA)
 
-⭐ github.com/justrach/turboAPI
-📖 turboapi.trilok.ai
+github.com/justrach/turboAPI
 
-Still alpha. But 139k req/s is real.
+150k req/s. 275 tests. Drop-in FastAPI replacement.
+
+Still alpha — but the numbers are real.
 
 ---
 
 ## Alt: Single tweet
 
-TurboAPI hit 139k req/s.
+TurboAPI hit 150k req/s — 22x faster than FastAPI.
 
-20× faster than FastAPI. 0.16ms avg latency.
+Zero heap allocs per request. Response caching. Zig-native CORS at 0% overhead.
 
-Three changes: per-worker tstate, PyObject_CallNoArgs, tuple response ABI.
-
-Same `from turboapi import TurboAPI` migration.
+Same `from turboapi import TurboAPI` migration. 275 tests passing.
 
 github.com/justrach/turboAPI

@@ -32,12 +32,11 @@
 
 ---
 
-## 🏷 Status
+## Status
 
-> ⚠️ **Alpha software — read before using in production**
+> **Alpha software — read before using in production**
 >
-> TurboAPI works and has 269+ passing tests, but:
-> - **No fuzz testing yet** on the Zig HTTP parser (planned in [#37](https://github.com/justrach/turboAPI/issues/37))
+> TurboAPI works and has 275+ passing tests, but:
 > - **No TLS** — put nginx or Caddy in front for HTTPS
 > - **No slow-loris protection** — requires a reverse proxy with read timeouts
 > - **No configurable max body size** — hardcoded 16MB cap
@@ -49,17 +48,19 @@
 
 | What works today                                       | What's in progress                       |
 |--------------------------------------------------------|------------------------------------------|
-| ✅ FastAPI-compatible route decorators                 | 🔧 WebSocket support                    |
-| ✅ Zig HTTP server with 24-thread pool + keep-alive     | 🔧 HTTP/2 and TLS                       |
-| ✅ Zig-native JSON schema validation (dhi)             | 🔧 Buffer pool reuse across requests    |
-| ✅ Zero-copy response pipeline                         | 🔧 Cloudflare Workers WASM target       |
-| ✅ Zig-side JSON→Python dict (no `json.loads`)         |                                          |
-| ✅ Async handler support                               |                                          |
-| ✅ Full security stack (OAuth2, Bearer, API Key)       |                                          |
-| ✅ Python 3.14t free-threaded support                  |                                          |
-| ✅ Native FFI handlers (C/Zig, no Python at all)       |                                          |
-| ✅ CORS, GZip middleware                               |                                          |
-
+| 150k req/s (22x FastAPI) on Apple Silicon              | WebSocket support                        |
+| FastAPI-compatible route decorators                    | HTTP/2 and TLS                           |
+| Zig HTTP server with 24-thread pool + keep-alive       | Cloudflare Workers WASM target           |
+| Zig-native JSON schema validation (dhi)                | Fiber-based concurrency (via [zag](https://github.com/justrach/zag))  |
+| Zero-alloc response pipeline (stack buffers)           |                                          |
+| Zig-native CORS (0% overhead, pre-rendered headers)    |                                          |
+| Response caching for noargs handlers                   |                                          |
+| Static routes (pre-rendered at startup)                |                                          |
+| Async handler support                                  |                                          |
+| Full security stack (OAuth2, Bearer, API Key)          |                                          |
+| Python 3.14t free-threaded support                     |                                          |
+| Native FFI handlers (C/Zig, no Python at all)          |                                          |
+| Fuzz-tested HTTP parser, router, validator             |                                          |
 
 ---
 
@@ -101,7 +102,7 @@ That's it. Your API is running on a Zig HTTP server at `http://localhost:8000`.
 
 ---
 
-## 📊 Benchmarks
+## Benchmarks
 
 All numbers verified with correct, identical JSON responses. `wrk -t4 -c100 -d10s`, Python 3.14t free-threaded, Apple Silicon M3 Pro.
 
@@ -109,34 +110,38 @@ All numbers verified with correct, identical JSON responses. `wrk -t4 -c100 -d10
   Throughput (req/s) — no middleware
   ─────────────────────────────────────────────────────────────
 
-  GET /ping             ████████████████████████████████████████████████  144,139  ← TurboAPI (noargs)
-  (simple_sync_noargs)  ███  6,847                                                 ← FastAPI
+  GET /health (static)  ██████████████████████████████████████████████████  149,340  <- pre-rendered, zero Python
+  GET /ping             ████████████████████████████████████████████████    150,000  <- cached after 1st call
+  (simple_sync_noargs)  ██  6,847                                                   <- FastAPI
 
-  GET /items/{id}       ███████████████████████████████████████████████  ~142,000  ← vectorcall (Zig arg assembly)
-                        ████  8,666
+  GET /items/{id}       ████████████████████████████████████████████████   ~143,000  <- vectorcall (Zig arg assembly)
+                        ███  8,666
 
-  POST /users (dhi)     ████████████████████████████████████████  ~124,000         ← model_sync + pre-GIL validation
-                        ████  8,200
+  POST /users (dhi)     ████████████████████████████████████████  ~124,000           <- model_sync + pre-GIL validation
+                        ███  8,200
 
   ─────────────────────────────────────────────────────────────
   With CORSMiddleware stacked (all routes, all methods):
   ─────────────────────────────────────────────────────────────
 
-  GET /ping + CORS      ████████████████████████████████████  ~110,000             ← ~24% overhead, still 16x FastAPI
-  GET /items/{id} + CORS ███████████████████████████████████  ~103,000
-  POST /items + CORS    ████████████████████████████████████  ~107,000
+  GET /ping + CORS      ████████████████████████████████████████████████  ~139,000   <- Zig-native CORS, ~0% overhead
+  GET /json + CORS      ███████████████████████████████████████████████   ~138,000
+  POST /items + CORS    ████████████████████████████████████████  ~124,000
 
   ─────────────────────────────────────────────────────────────
-  Avg latency (no middleware): 0.16ms    FastAPI: 14.6ms (~20x)
-  Avg latency (with CORS):     0.22ms    FastAPI: 14.6ms (~16x)
+  Avg latency (no middleware): 0.15ms    FastAPI: 14.6ms (~22x)
+  Avg latency (with CORS):     0.16ms    FastAPI: 14.6ms (~21x)
 ```
 
-- **Zero-arg GET**: `PyObject_CallNoArgs` — no tuple/kwargs allocation
-- **Parameterized GET**: `PyObject_Vectorcall` with Zig-assembled positional args — no `parse_qs`, no kwargs dict
-- **POST (dhi model)**: Zig validates JSON schema **before** acquiring the GIL — invalid bodies return `422` without touching Python
-- **With middleware**: routes fall back to the `enhanced` dispatch path; overhead is ~24% but throughput stays well above 100k req/s
+- **Static routes**: `app.static_route("GET", "/health", '{"status":"ok"}')` -- response pre-rendered at startup, single `writeAll`
+- **Response caching**: noargs handlers cached after first Python call -- subsequent requests skip Python entirely
+- **Zero-arg GET**: `PyObject_CallNoArgs` -- no tuple/kwargs allocation
+- **Parameterized GET**: `PyObject_Vectorcall` with Zig-assembled positional args -- no `parse_qs`, no kwargs dict
+- **POST (dhi model)**: Zig validates JSON schema **before** acquiring the GIL -- invalid bodies return `422` without touching Python
+- **CORS**: Zig-native -- headers pre-rendered once at startup, injected via `memcpy`. **0% overhead** (was 24% with Python middleware). OPTIONS preflight handled in Zig.
 
 ---
+
 
 ## ⚙️ Architecture
 
