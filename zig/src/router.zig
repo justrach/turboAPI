@@ -212,6 +212,10 @@ pub const Router = struct {
         if (node.wildcard_child) |wc| {
             if (wc.param_name) |pname| {
                 if (wc.handlers.get(method)) |handler_key| {
+                    // Reject path traversal: no segment may be ".." or "."
+                    for (segments[index..]) |s| {
+                        if (std.mem.eql(u8, s, "..") or std.mem.eql(u8, s, ".")) return null;
+                    }
                     // Join remaining segments with '/'
                     var total_len: usize = 0;
                     for (segments[index..]) |s| {

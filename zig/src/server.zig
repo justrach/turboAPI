@@ -892,7 +892,14 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         // Native handlers need headers — parse them
         var headers = parseHeaders(request_head, first_line_end, he);
         defer headers.deinit(allocator);
-        std.debug.print("[FFI] native handler for {s}\n", .{match.handler_key});
+
+        // Reject Transfer-Encoding in FFI path (same smuggling guard)
+        for (headers.items) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "transfer-encoding")) {
+                sendResponse(stream, 501, "application/json", "{\"error\": \"Transfer-Encoding not supported\"}");
+                return;
+            }
+        }
         const ffi_resp = callNativeHandler(native_entry, method, path, query_string, "", headers.items, &match.params);
         const resp_ct = ffi_resp.content_type[0..ffi_resp.content_type_len];
         const resp_body = ffi_resp.body[0..ffi_resp.body_len];
@@ -953,12 +960,26 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     const body_start = he + 4;
     const already_read_body = request_head[body_start..total_read];
 
+    // Reject Transfer-Encoding (chunked not implemented — accepting silently causes request smuggling)
+    var has_te = false;
+    var has_cl = false;
     var content_length: usize = 0;
     for (headers.items) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "transfer-encoding")) has_te = true;
         if (std.ascii.eqlIgnoreCase(h.name, "content-length")) {
+            has_cl = true;
             content_length = std.fmt.parseInt(usize, h.value, 10) catch 0;
-            break;
         }
+    }
+    if (has_te) {
+        if (has_cl) {
+            // TE + CL = smuggling attack (RFC 7230 §3.3.3)
+            sendResponse(stream, 400, "application/json", "{\"error\": \"Conflicting Transfer-Encoding and Content-Length\"}");
+        } else {
+            // TE alone = unsupported encoding
+            sendResponse(stream, 501, "application/json", "{\"error\": \"Transfer-Encoding not supported\"}");
+        }
+        return;
     }
 
     const max_body: usize = 16 * 1024 * 1024;

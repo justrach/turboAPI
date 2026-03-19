@@ -53,25 +53,28 @@ def test_rate_limiter_thread_safe():
 # ── Bug #9: RateLimitMiddleware prefers X-Real-IP ───────────────────────────
 
 def test_rate_limiter_prefers_x_real_ip():
-    """Bug #9: Should prefer X-Real-IP over X-Forwarded-For."""
+    """Bug #9: Should prefer X-Real-IP over X-Forwarded-For when peer is trusted."""
     from turboapi.middleware import RateLimitMiddleware
     from turboapi.models import Request
 
-    rl = RateLimitMiddleware(requests_per_minute=1)
+    # Configure with trusted proxy so headers are respected
+    rl = RateLimitMiddleware(requests_per_minute=1, trusted_proxies={"127.0.0.1"})
 
-    # First request with X-Real-IP
+    # First request with X-Real-IP from trusted proxy
     req1 = Request(method="GET", path="/", headers={"x-real-ip": "1.2.3.4"})
+    req1.client_addr = "127.0.0.1"
     rl.before_request(req1)
 
     # Second request same X-Real-IP should be rate limited
     req2 = Request(method="GET", path="/", headers={"x-real-ip": "1.2.3.4"})
+    req2.client_addr = "127.0.0.1"
     with pytest.raises(Exception, match="Rate limit"):
         rl.before_request(req2)
 
     # Different X-Real-IP should NOT be rate limited
     req3 = Request(method="GET", path="/", headers={"x-real-ip": "5.6.7.8"})
+    req3.client_addr = "127.0.0.1"
     rl.before_request(req3)  # should not raise
-
 
 # ── Bug #12: CORS wildcard + credentials ────────────────────────────────────
 
