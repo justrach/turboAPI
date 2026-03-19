@@ -13,18 +13,20 @@ const allocator = std.heap.c_allocator;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-pub const DbOp = enum(u8) { select_one, select_list, insert, delete };
+pub const DbOp = enum(u8) { select_one, select_list, insert, delete, custom_query, custom_query_single };
 
 pub const DbRouteEntry = struct {
     op: DbOp,
     table: []const u8,
-    columns: []const []const u8, // column names from schema
-    pk_column: ?[]const u8, // "id" for select_one/delete
-    pk_param: ?[]const u8, // path param name, e.g. "user_id"
-    select_sql: []const u8, // pre-built SELECT
-    insert_sql: []const u8, // pre-built INSERT
-    delete_sql: []const u8, // pre-built DELETE
-    schema: ?dhi.ModelSchema, // for INSERT body validation (dhi validates before query)
+    columns: []const []const u8,
+    pk_column: ?[]const u8,
+    pk_param: ?[]const u8,
+    select_sql: []const u8,
+    insert_sql: []const u8,
+    delete_sql: []const u8,
+    custom_sql: []const u8, // raw SQL for custom_query ops
+    param_names: []const []const u8, // ordered param names for custom queries
+    schema: ?dhi.ModelSchema,
 };
 
 // ── Global state ─────────────────────────────────────────────────────────────
@@ -467,6 +469,123 @@ pub fn handleDbRoute(
                 sendResponseFn(stream, 404, "application/json", "{\"error\": \"Not found\"}");
             }
         },
+
+        .custom_query, .custom_query_single => {
+            // Collect params: path params first, then query string params
+            var param_values: [16][]const u8 = undefined;
+            var param_count: usize = 0;
+
+            for (entry.param_names) |pname| {
+                if (param_count >= 16) break;
+                if (params.get(pname)) |v| {
+                    param_values[param_count] = v;
+                    param_count += 1;
+                } else {
+                    // Try query string
+                    var found = false;
+                    if (query_string.len > 0) {
+                        var qs_iter = std.mem.splitScalar(u8, query_string, '&');
+                        while (qs_iter.next()) |pair| {
+                            const eq = std.mem.indexOf(u8, pair, "=") orelse continue;
+                            if (std.mem.eql(u8, pair[0..eq], pname)) {
+                                param_values[param_count] = pair[eq + 1 ..];
+                                param_count += 1;
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!found) {
+                        param_values[param_count] = "";
+                        param_count += 1;
+                    }
+                }
+            }
+
+            // Cache check
+            var cache_key_buf: [512]u8 = undefined;
+            var ck_pos: usize = 0;
+            const prefix = "Q:";
+            @memcpy(cache_key_buf[ck_pos..][0..prefix.len], prefix);
+            ck_pos += prefix.len;
+            @memcpy(cache_key_buf[ck_pos..][0..entry.custom_sql.len], entry.custom_sql[0..@min(entry.custom_sql.len, 64)]);
+            ck_pos += @min(entry.custom_sql.len, 64);
+            for (param_values[0..param_count]) |v| {
+                cache_key_buf[ck_pos] = ':';
+                ck_pos += 1;
+                const vlen = @min(v.len, 32);
+                @memcpy(cache_key_buf[ck_pos..][0..vlen], v[0..vlen]);
+                ck_pos += vlen;
+            }
+            const cache_key = cache_key_buf[0..ck_pos];
+
+            if (db_cache_enabled) {
+                if (getDbCache().get(cache_key)) |cached_body| {
+                    sendResponseFn(stream, 200, "application/json", cached_body);
+                    return;
+                }
+            }
+
+            const conn = acquireConn() orelse {
+                sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database connection unavailable\"}");
+                return;
+            };
+            defer releaseConn(conn);
+
+            const result_opt = execWithParams(conn, entry.custom_sql, param_values[0..param_count]);
+            if (result_opt) |result| {
+                defer result.deinit();
+
+                if (entry.op == .custom_query_single) {
+                    // Single row
+                    if (result.next() catch null) |row| {
+                        var json_buf: [8192]u8 = undefined;
+                        const json = serializeRow(row, result.column_names, &json_buf) catch {
+                            sendResponseFn(stream, 500, "application/json", "{\"error\": \"Serialization failed\"}");
+                            return;
+                        };
+                        if (db_cache_enabled) cacheDbResponse(cache_key, json);
+                        sendResponseFn(stream, 200, "application/json", json);
+                    } else {
+                        sendResponseFn(stream, 404, "application/json", "{\"error\": \"Not found\"}");
+                    }
+                } else {
+                    // Multi-row — JSON array
+                    var out_buf = allocator.alloc(u8, 65536) catch {
+                        sendResponseFn(stream, 500, "application/json", "{\"error\": \"Out of memory\"}");
+                        return;
+                    };
+                    defer allocator.free(out_buf);
+
+                    var out_pos: usize = 0;
+                    out_buf[out_pos] = '[';
+                    out_pos += 1;
+
+                    var row_count: usize = 0;
+                    while (result.next() catch null) |row| {
+                        if (row_count > 0) {
+                            out_buf[out_pos] = ',';
+                            out_pos += 1;
+                        }
+                        var row_buf: [8192]u8 = undefined;
+                        const row_json = serializeRow(row, result.column_names, &row_buf) catch break;
+                        if (out_pos + row_json.len + 2 > out_buf.len) break;
+                        @memcpy(out_buf[out_pos..][0..row_json.len], row_json);
+                        out_pos += row_json.len;
+                        row_count += 1;
+                    }
+
+                    out_buf[out_pos] = ']';
+                    out_pos += 1;
+
+                    const resp = out_buf[0..out_pos];
+                    if (db_cache_enabled) cacheDbResponse(cache_key, resp);
+                    sendResponseFn(stream, 200, "application/json", resp);
+                }
+            } else {
+                sendResponseFn(stream, 500, "application/json", "{\"error\": \"Query failed\"}");
+            }
+        },
     }
 }
 fn execWithParams(conn: *pg.Conn, sql: []const u8, values: []const []const u8) ?*pg.Result {
@@ -561,12 +680,16 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         .insert
     else if (std.mem.eql(u8, op_s, "delete"))
         .delete
+    else if (std.mem.eql(u8, op_s, "custom_query"))
+        .custom_query
+    else if (std.mem.eql(u8, op_s, "custom_query_single"))
+        .custom_query_single
     else {
         py.setError("Invalid db op: {s}", .{op_s});
         return null;
     };
 
-    // Parse column names
+    // Parse column names (also used as param names for custom queries)
     var cols: [16][]const u8 = undefined;
     var ncols: usize = 0;
     if (columns_s.len > 0) {
@@ -574,10 +697,6 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         while (col_iter.next()) |col| {
             if (ncols >= 16) break;
             const trimmed = std.mem.trim(u8, col, " ");
-            if (!isValidIdentifier(trimmed)) {
-                py.setError("Invalid column name: {s}", .{trimmed});
-                return null;
-            }
             cols[ncols] = allocator.dupe(u8, trimmed) catch return null;
             ncols += 1;
         }
@@ -588,6 +707,27 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     const pk_param = if (pk_param_s.len > 0) allocator.dupe(u8, pk_param_s) catch return null else null;
     const table = allocator.dupe(u8, table_s) catch return null;
 
+    // For custom queries, columns_s contains the raw SQL (passed via the columns arg)
+    // and pk_col_s contains comma-separated param names
+    const custom_sql = if (op == .custom_query or op == .custom_query_single)
+        allocator.dupe(u8, table_s) catch return null // table_s carries the SQL for custom queries
+    else
+        "";
+
+    // For custom queries, parse param names from pk_col_s
+    var pnames: [16][]const u8 = undefined;
+    var npnames: usize = 0;
+    if ((op == .custom_query or op == .custom_query_single) and pk_col_s.len > 0) {
+        var pn_iter = std.mem.splitScalar(u8, pk_col_s, ',');
+        while (pn_iter.next()) |pn| {
+            if (npnames >= 16) break;
+            const trimmed = std.mem.trim(u8, pn, " ");
+            pnames[npnames] = allocator.dupe(u8, trimmed) catch return null;
+            npnames += 1;
+        }
+    }
+    const param_names_owned = allocator.dupe([]const u8, pnames[0..npnames]) catch return null;
+
     const entry = DbRouteEntry{
         .op = op,
         .table = table,
@@ -595,9 +735,11 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         .pk_column = pk_col,
         .pk_param = pk_param,
         .select_sql = if (pk_col) |pk| buildSelectOneSql(table, pk) else buildSelectListSql(table),
-        .insert_sql = if (ncols > 0) buildInsertSql(table, columns_owned) else "",
+        .insert_sql = if (ncols > 0 and op == .insert) buildInsertSql(table, columns_owned) else "",
         .delete_sql = if (pk_col) |pk| buildDeleteSql(table, pk) else "",
-        .schema = null, // TODO: wire dhi schema
+        .custom_sql = custom_sql,
+        .param_names = param_names_owned,
+        .schema = null,
     };
 
     const key = std.fmt.allocPrint(allocator, "{s} {s}", .{ method_s, path_s }) catch return null;

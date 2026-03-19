@@ -444,6 +444,43 @@ class ZigIntegratedTurboAPI(TurboAPI):
 
         return decorator
 
+    def db_query(self, method: str, path: str, *, sql: str, params: list[str] | None = None, single: bool = False):
+        """Zig-native custom SQL query. Supports pgvector, JSONB, full-text search, CTEs.
+
+        Args:
+            method: HTTP method ("GET", "POST", etc.)
+            path: URL path with {param} placeholders
+            sql: Raw SQL with $1, $2, ... parameter placeholders
+            params: Ordered list of parameter names (from path params + query string)
+            single: If True, return single JSON object; if False, return JSON array
+
+        Usage:
+            @app.db_query("GET", "/similar/{item_id}", sql='''
+                SELECT id, name, 1 - (embedding <=> (SELECT embedding FROM items WHERE id = $1)) AS sim
+                FROM items ORDER BY embedding <=> (SELECT embedding FROM items WHERE id = $1) LIMIT $2
+            ''', params=["item_id", "limit"])
+            def similar(): pass
+        """
+        import re
+
+        op = "custom_query_single" if single else "custom_query"
+
+        # Auto-detect params from path if not specified
+        if params is None:
+            params = re.findall(r"\{([^}]+)\}", path)
+
+        param_str = ",".join(params) if params else ""
+
+        # For custom queries: table carries the SQL, pk_col carries param names
+        self._db_routes = getattr(self, "_db_routes", [])
+        self._db_routes.append((method, path, op, sql.strip(), param_str, "", ""))
+        print(f"{CHECK_MARK} [db:{op}] {method} {path} ({len(params)} params)")
+
+        def decorator(func):
+            return func
+
+        return decorator
+
     def _initialize_zig_server(self, host: str = "127.0.0.1", port: int = 8000):
         """Initialize the Zig HTTP server with direct integration."""
         if not NATIVE_CORE_AVAILABLE:
