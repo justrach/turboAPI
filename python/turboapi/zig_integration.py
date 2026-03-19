@@ -332,6 +332,35 @@ class ZigIntegratedTurboAPI(TurboAPI):
             f"{CHECK_MARK} [native] {method.upper()} {path} -> {os.path.basename(lib_path)}:{symbol_name}"
         )
 
+    def static_route(
+        self,
+        method: str,
+        path: str,
+        body: str,
+        *,
+        status: int = 200,
+        content_type: str = "application/json",
+    ):
+        """Register a static route — response is pre-rendered at startup.
+
+        At request time this is a single writeAll of pre-computed bytes:
+        no parsing, no allocation, no Python call.
+
+        Args:
+            method: HTTP method ("GET", "POST", etc.)
+            path: URL path
+            body: Response body string
+            status: HTTP status code (default: 200)
+            content_type: Content-Type header (default: "application/json")
+
+        Usage:
+            app.static_route("GET", "/health", '{"status":"ok"}')
+            app.static_route("GET", "/version", '{"v":"1.0"}', status=200)
+        """
+        self._static_routes = getattr(self, "_static_routes", [])
+        self._static_routes.append((method.upper(), path, status, content_type, body))
+        print(f"{CHECK_MARK} [static] {method.upper()} {path} -> {status} ({len(body)} bytes)")
+
     def configure_rate_limiting(self, enabled: bool = False, requests_per_minute: int = 1000000):
         """Configure rate limiting for the server.
 
@@ -394,10 +423,16 @@ class ZigIntegratedTurboAPI(TurboAPI):
             for method, path, lib_path, symbol in getattr(self, "_native_routes", []):
                 self.zig_server.add_native_route(method, path, lib_path, symbol)
 
+            # Register static routes (pre-rendered response bytes)
+            for method, path, status, ct, body in getattr(self, "_static_routes", []):
+                self.zig_server.add_static_route(method, path, status, ct, body)
+
             native_count = len(getattr(self, "_native_routes", []))
+            static_count = len(getattr(self, "_static_routes", []))
             py_count = len(self.registry.get_routes())
             print(
-                f"{CHECK_MARK} Zig server initialized with {py_count} Python + {native_count} native routes"
+                f"{CHECK_MARK} Zig server initialized with {py_count} Python"
+                f" + {native_count} native + {static_count} static routes"
             )
             return True
 

@@ -51,6 +51,12 @@ pub const ValidationResult = union(enum) {
     err: ValidationError,
 };
 
+/// Result that retains the parsed JSON tree on success (caller must deinit).
+pub const ValidateParseResult = union(enum) {
+    ok: std.json.Parsed(std.json.Value),
+    err: ValidationError,
+};
+
 pub const ValidationError = struct {
     status_code: u16,
     body: []const u8,
@@ -70,6 +76,23 @@ pub fn validateJson(json_bytes: []const u8, schema: *const ModelSchema) Validati
     defer parsed.deinit();
 
     return validateObject(parsed.value, schema, "body");
+}
+
+/// Validate and return the parsed JSON tree — avoids a second parse in model_sync.
+/// On success the caller owns the Parsed value and must call .deinit().
+pub fn validateJsonRetainParsed(json_bytes: []const u8, schema: *const ModelSchema) ValidateParseResult {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch {
+        return .{ .err = makeError(422, "Invalid JSON") };
+    };
+
+    const vr = validateObject(parsed.value, schema, "body");
+    switch (vr) {
+        .ok => return .{ .ok = parsed },
+        .err => |e| {
+            parsed.deinit();
+            return .{ .err = e };
+        },
+    }
 }
 
 fn validateObject(value: std.json.Value, schema: *const ModelSchema, path: []const u8) ValidationResult {

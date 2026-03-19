@@ -173,9 +173,15 @@ const NativeHandlerEntry = struct {
     handler_fn: NativeHandlerFn,
     lib_handle: *anyopaque,
 };
+// ── Static route entry — pre-rendered response bytes, zero runtime overhead ──
+
+const StaticRouteEntry = struct {
+    response_bytes: []const u8, // complete HTTP response, ready to writeAll
+};
 
 var routes: ?std.StringHashMap(HandlerEntry) = null;
 var native_routes: ?std.StringHashMap(NativeHandlerEntry) = null;
+var static_routes: ?std.StringHashMap(StaticRouteEntry) = null;
 var model_schemas: ?std.StringHashMap(dhi.ModelSchema) = null;
 var router: ?router_mod.Router = null;
 var server_host: []const u8 = "127.0.0.1";
@@ -198,6 +204,13 @@ fn getNativeRoutes() *std.StringHashMap(NativeHandlerEntry) {
         native_routes = std.StringHashMap(NativeHandlerEntry).init(allocator);
     }
     return &native_routes.?;
+}
+
+fn getStaticRoutes() *std.StringHashMap(StaticRouteEntry) {
+    if (static_routes == null) {
+        static_routes = std.StringHashMap(StaticRouteEntry).init(allocator);
+    }
+    return &static_routes.?;
 }
 
 fn getModelSchemas() *std.StringHashMap(dhi.ModelSchema) {
@@ -487,6 +500,45 @@ pub fn server_add_native_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c)
     return py.pyNone();
 }
 
+// ── add_static_route(method, path, status, content_type, body) ──────────────
+// Pre-renders the complete HTTP response at registration time.
+// At dispatch time: single writeAll, zero parsing, zero allocation.
+
+pub fn server_add_static_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var method: [*c]const u8 = null;
+    var path: [*c]const u8 = null;
+    var status: c_int = 200;
+    var content_type: [*c]const u8 = null;
+    var body: [*c]const u8 = null;
+    if (c.PyArg_ParseTuple(args, "ssiss", &method, &path, &status, &content_type, &body) == 0) return null;
+
+    const method_s = std.mem.span(method);
+    const path_s = std.mem.span(path);
+    const ct_s = std.mem.span(content_type);
+    const body_s = std.mem.span(body);
+    const st: u16 = if (status >= 100 and status <= 599) @intCast(status) else 200;
+
+    const status_text = statusText(st);
+    const response_bytes = std.fmt.allocPrint(allocator,
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n{s}",
+        .{ st, status_text, ct_s, body_s.len, body_s },
+    ) catch return null;
+
+    const key = std.fmt.allocPrint(allocator, "{s} {s}", .{ method_s, path_s }) catch {
+        allocator.free(response_bytes);
+        return null;
+    };
+
+    getStaticRoutes().put(key, .{ .response_bytes = response_bytes }) catch {
+        allocator.free(response_bytes);
+        return null;
+    };
+    getRouter().addRoute(method_s, path_s, key) catch return null;
+
+    std.debug.print("[STATIC] Registered: {s} {s} -> {d} ({d} bytes pre-rendered)\n", .{ method_s, path_s, st, response_bytes.len });
+    return py.pyNone();
+}
+
 // ── add_middleware(middleware_obj) – currently a no-op ──
 
 pub fn server_add_middleware(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
@@ -744,10 +796,18 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     };
     defer match.deinit();
 
-    // Check native (FFI) routes first — no GIL, no Python, zero overhead.
+    // ── Dispatch priority: static > native FFI > Python ──
+
+    // 1. Static routes — pre-rendered response, single writeAll, zero overhead
+    const sr = getStaticRoutes();
+    if (sr.get(match.handler_key)) |static_entry| {
+        stream.writeAll(static_entry.response_bytes) catch return;
+        return;
+    }
+
+    // 2. Native (FFI) routes — no GIL, no Python
     // ABI contract: FfiResponse.body and .content_type are borrowed pointers —
     // they must point to static data or data valid for the request lifetime.
-    // Native handlers must NOT heap-allocate these fields; the server does not free them.
     const nr = getNativeRoutes();
     if (nr.get(match.handler_key)) |native_entry| {
         std.debug.print("[FFI] native handler for {s}\n", .{match.handler_key});
@@ -758,7 +818,7 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         return;
     }
 
-    // Fall through to Python handler
+    // 3. Python handler
     const r = getRoutes();
     const entry = r.get(match.handler_key) orelse {
         std.debug.print("[ZIG] handler entry missing for key: {s}\n", .{match.handler_key});
@@ -767,13 +827,17 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     };
 
     // Zig-native dhi validation for model_sync routes — reject invalid bodies
-    // before touching the GIL, saving a full Python round-trip on bad input.
+    // before touching the GIL.  validateJsonRetainParsed returns the parsed
+    // JSON tree on success so callPythonModelHandlerParsed can skip re-parsing.
+    var cached_parse: ?std.json.Parsed(std.json.Value) = null;
+    defer if (cached_parse) |*cp| cp.deinit();
+
     if (body.len > 0) {
         const ms = getModelSchemas();
         if (ms.get(match.handler_key)) |schema| {
-            const vr = dhi.validateJson(body, &schema);
+            const vr = dhi.validateJsonRetainParsed(body, &schema);
             switch (vr) {
-                .ok => {}, // validation passed, continue to Python handler
+                .ok => |parsed| { cached_parse = parsed; },
                 .err => |ve| {
                     defer ve.deinit();
                     std.debug.print("[DHI] validation failed for {s}\n", .{match.handler_key});
@@ -796,7 +860,12 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         return;
     }
     if (std.mem.eql(u8, ht, "model_sync") and body.len > 0) {
-        callPythonModelHandlerDirect(tstate, entry, body, &match.params, stream);
+        if (cached_parse) |cp| {
+            // Single-parse path: JSON was already parsed during validation
+            callPythonModelHandlerParsed(tstate, entry, cp.value, &match.params, stream);
+        } else {
+            callPythonModelHandlerDirect(tstate, entry, body, &match.params, stream);
+        }
         return;
     }
     if (std.mem.eql(u8, ht, "body_sync") or std.mem.eql(u8, ht, "model_sync")) {
@@ -1211,6 +1280,62 @@ fn callPythonModelHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, body: 
     sendTupleResponse(stream, result);
 }
 
+/// Single-parse variant: takes a pre-parsed std.json.Value from validateJsonRetainParsed.
+/// Eliminates the second JSON parse that callPythonModelHandlerDirect does.
+fn callPythonModelHandlerParsed(tstate: ?*anyopaque, entry: HandlerEntry, json_value: std.json.Value, params: *const std.StringHashMap([]const u8), stream: std.net.Stream) void {
+    py.PyEval_AcquireThread(tstate);
+    defer py.PyEval_ReleaseThread(tstate);
+
+    const py_body_dict = jsonValueToPyObject(json_value) orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"JSON conversion failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(py_body_dict);
+
+    const kwargs = c.PyDict_New() orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+        return;
+    };
+    defer c.Py_DecRef(kwargs);
+
+    _ = c.PyDict_SetItemString(kwargs, "body_dict", py_body_dict);
+
+    const py_path_params = c.PyDict_New() orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+        return;
+    };
+    defer c.Py_DecRef(py_path_params);
+    {
+        var pit = params.iterator();
+        while (pit.next()) |pe| {
+            const pk = py.newString(pe.key_ptr.*) orelse continue;
+            const pv = py.newString(pe.value_ptr.*) orelse {
+                c.Py_DecRef(pk);
+                continue;
+            };
+            _ = c.PyDict_SetItem(py_path_params, pk, pv);
+            c.Py_DecRef(pk);
+            c.Py_DecRef(pv);
+        }
+    }
+    _ = c.PyDict_SetItemString(kwargs, "path_params", py_path_params);
+
+    const empty_tuple = c.PyTuple_New(0) orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+        return;
+    };
+    defer c.Py_DecRef(empty_tuple);
+
+    const result = c.PyObject_Call(entry.handler, empty_tuple, kwargs) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(result);
+
+    sendTupleResponse(stream, result);
+}
+
 // ── Python handler dispatch (full kwargs — enhanced/model handlers) ──────────
 
 fn callPythonHandler(tstate: ?*anyopaque, entry: HandlerEntry, method: []const u8, path: []const u8, query_string: []const u8, body: []const u8, headers: []const HeaderPair, params: *const std.StringHashMap([]const u8)) PythonResponse {
@@ -1395,43 +1520,53 @@ fn errorResponse(ct: []const u8, body_str: []const u8) PythonResponse {
     };
 }
 
-fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
-    const status_text = switch (status) {
+/// Map HTTP status code to reason phrase.
+fn statusText(status: u16) []const u8 {
+    return switch (status) {
         200 => "OK",
         201 => "Created",
         204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        413 => "Payload Too Large",
         422 => "Unprocessable Entity",
         429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         else => "Unknown",
     };
+}
 
-    // Single heap buffer: header + body in one write — halves syscall count
-    const header = std.fmt.allocPrint(
-        allocator,
+/// Zero-alloc response writer.  Header is formatted into a 512-byte stack
+/// buffer; body is written as a second syscall (TCP corking coalesces them).
+/// Previous version did 2 heap allocs + 2 memcpys + 2 frees per response.
+fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
+    var header_buf: [512]u8 = undefined;
+    const header = std.fmt.bufPrint(&header_buf,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n",
-        .{ status, status_text, content_type, body.len },
-    ) catch return;
-    defer allocator.free(header);
-
-    const response = allocator.alloc(u8, header.len + body.len) catch {
-        // Fallback: two writes
-        stream.writeAll(header) catch return;
-        stream.writeAll(body) catch return;
+        .{ status, statusText(status), content_type, body.len },
+    ) catch {
+        // Content-type exceeded ~380 chars — fall back to heap
+        const h = std.fmt.allocPrint(allocator,
+            "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n",
+            .{ status, statusText(status), content_type, body.len },
+        ) catch return;
+        defer allocator.free(h);
+        stream.writeAll(h) catch return;
+        if (body.len > 0) stream.writeAll(body) catch return;
         return;
     };
-    defer allocator.free(response);
 
-    @memcpy(response[0..header.len], header);
-    @memcpy(response[header.len..], body);
-    stream.writeAll(response) catch return;
+    stream.writeAll(header) catch return;
+    if (body.len > 0) stream.writeAll(body) catch return;
 }
 
 // ── configure_rate_limiting(enabled, requests_per_minute) ──
