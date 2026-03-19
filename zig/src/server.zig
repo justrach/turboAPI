@@ -944,7 +944,7 @@ fn callNativeHandler(
     query_string: []const u8,
     body: []const u8,
     headers: []const HeaderPair,
-    params: *const std.StringHashMap([]const u8),
+    params: *const router_mod.RouteParams,
 ) FfiResponse {
     // Build parallel arrays for headers
     const hcount = headers.len;
@@ -974,12 +974,11 @@ fn callNativeHandler(
     var p_value_lens_list: std.ArrayListUnmanaged(usize) = .empty;
     defer p_value_lens_list.deinit(allocator);
 
-    var pit = params.iterator();
-    while (pit.next()) |pe| {
-        p_names_list.append(allocator, pe.key_ptr.*.ptr) catch continue;
-        p_name_lens_list.append(allocator, pe.key_ptr.*.len) catch continue;
-        p_values_list.append(allocator, pe.value_ptr.*.ptr) catch continue;
-        p_value_lens_list.append(allocator, pe.value_ptr.*.len) catch continue;
+    for (params.entries()) |pe| {
+        p_names_list.append(allocator, pe.key.ptr) catch continue;
+        p_name_lens_list.append(allocator, pe.key.len) catch continue;
+        p_values_list.append(allocator, pe.value.ptr) catch continue;
+        p_value_lens_list.append(allocator, pe.value.len) catch continue;
     }
 
     const ffi_req = FfiRequest{
@@ -1087,7 +1086,7 @@ fn callPythonVectorcall(
     tstate: ?*anyopaque,
     entry: HandlerEntry,
     query_string: []const u8,
-    params: *const std.StringHashMap([]const u8),
+    params: *const router_mod.RouteParams,
     stream: std.net.Stream,
 ) void {
     py.PyEval_AcquireThread(tstate);
@@ -1165,7 +1164,7 @@ fn callPythonVectorcall(
 // ── Fast Python handler dispatch (simple_sync/body_sync) ─────────────────────
 // Calls Python with kwargs dict, unpacks 3-tuple response — zero extra allocs.
 
-fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_string: []const u8, body: []const u8, params: *const std.StringHashMap([]const u8), stream: std.net.Stream) void {
+fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_string: []const u8, body: []const u8, params: *const router_mod.RouteParams, stream: std.net.Stream) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
 
@@ -1181,10 +1180,9 @@ fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_strin
     };
     defer c.Py_DecRef(py_path_params);
     {
-        var pit = params.iterator();
-        while (pit.next()) |pe| {
-            const pk = py.newString(pe.key_ptr.*) orelse continue;
-            const pv = py.newString(pe.value_ptr.*) orelse {
+        for (params.entries()) |pe| {
+            const pk = py.newString(pe.key) orelse continue;
+            const pv = py.newString(pe.value) orelse {
                 c.Py_DecRef(pk);
                 continue;
             };
@@ -1277,7 +1275,7 @@ fn jsonValueToPyObject(val: std.json.Value) ?*c.PyObject {
 
 // ── model_sync fast dispatch: Zig-parsed JSON → Python dict (no json.loads) ──
 
-fn callPythonModelHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, body: []const u8, params: *const std.StringHashMap([]const u8), stream: std.net.Stream) void {
+fn callPythonModelHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, body: []const u8, params: *const router_mod.RouteParams, stream: std.net.Stream) void {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch {
         sendResponse(stream, 400, "application/json", "{\"error\":\"Invalid JSON\"}");
         return;
@@ -1307,10 +1305,9 @@ fn callPythonModelHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, body: 
     };
     defer c.Py_DecRef(py_path_params);
     {
-        var pit = params.iterator();
-        while (pit.next()) |pe| {
-            const pk = py.newString(pe.key_ptr.*) orelse continue;
-            const pv = py.newString(pe.value_ptr.*) orelse {
+        for (params.entries()) |pe| {
+            const pk = py.newString(pe.key) orelse continue;
+            const pv = py.newString(pe.value) orelse {
                 c.Py_DecRef(pk);
                 continue;
             };
@@ -1339,7 +1336,7 @@ fn callPythonModelHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, body: 
 
 /// Single-parse variant: takes a pre-parsed std.json.Value from validateJsonRetainParsed.
 /// Eliminates the second JSON parse that callPythonModelHandlerDirect does.
-fn callPythonModelHandlerParsed(tstate: ?*anyopaque, entry: HandlerEntry, json_value: std.json.Value, params: *const std.StringHashMap([]const u8), stream: std.net.Stream) void {
+fn callPythonModelHandlerParsed(tstate: ?*anyopaque, entry: HandlerEntry, json_value: std.json.Value, params: *const router_mod.RouteParams, stream: std.net.Stream) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
 
@@ -1363,10 +1360,9 @@ fn callPythonModelHandlerParsed(tstate: ?*anyopaque, entry: HandlerEntry, json_v
     };
     defer c.Py_DecRef(py_path_params);
     {
-        var pit = params.iterator();
-        while (pit.next()) |pe| {
-            const pk = py.newString(pe.key_ptr.*) orelse continue;
-            const pv = py.newString(pe.value_ptr.*) orelse {
+        for (params.entries()) |pe| {
+            const pk = py.newString(pe.key) orelse continue;
+            const pv = py.newString(pe.value) orelse {
                 c.Py_DecRef(pk);
                 continue;
             };
@@ -1395,7 +1391,7 @@ fn callPythonModelHandlerParsed(tstate: ?*anyopaque, entry: HandlerEntry, json_v
 
 // ── Python handler dispatch (full kwargs — enhanced/model handlers) ──────────
 
-fn callPythonHandler(tstate: ?*anyopaque, entry: HandlerEntry, method: []const u8, path: []const u8, query_string: []const u8, body: []const u8, headers: []const HeaderPair, params: *const std.StringHashMap([]const u8)) PythonResponse {
+fn callPythonHandler(tstate: ?*anyopaque, entry: HandlerEntry, method: []const u8, path: []const u8, query_string: []const u8, body: []const u8, headers: []const HeaderPair, params: *const router_mod.RouteParams) PythonResponse {
     const err_body = "{\"error\": \"Internal Server Error\"}";
     const err_ct = "application/json";
 
@@ -1445,10 +1441,9 @@ fn callPythonHandler(tstate: ?*anyopaque, entry: HandlerEntry, method: []const u
     const py_path_params = c.PyDict_New() orelse return errorResponse(err_ct, err_body);
     defer c.Py_DecRef(py_path_params);
     {
-        var pit = params.iterator();
-        while (pit.next()) |pe| {
-            const pk = py.newString(pe.key_ptr.*) orelse continue;
-            const pv = py.newString(pe.value_ptr.*) orelse {
+        for (params.entries()) |pe| {
+            const pk = py.newString(pe.key) orelse continue;
+            const pv = py.newString(pe.value) orelse {
                 c.Py_DecRef(pk);
                 continue;
             };

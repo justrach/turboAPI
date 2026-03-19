@@ -7,11 +7,47 @@ const Allocator = std.mem.Allocator;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
+pub const MAX_ROUTE_PARAMS = 8;
+
+pub const RouteParam = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+/// Zero-alloc route params — fixed-size stack array instead of HashMap.
+/// Supports up to MAX_ROUTE_PARAMS path parameters per route.
+pub const RouteParams = struct {
+    items_buf: [MAX_ROUTE_PARAMS]RouteParam = undefined,
+    len: usize = 0,
+
+    pub fn get(self: *const RouteParams, key: []const u8) ?[]const u8 {
+        for (self.items_buf[0..self.len]) |p| {
+            if (std.mem.eql(u8, p.key, key)) return p.value;
+        }
+        return null;
+    }
+
+    pub fn put(self: *RouteParams, key: []const u8, value: []const u8) void {
+        if (self.len < MAX_ROUTE_PARAMS) {
+            self.items_buf[self.len] = .{ .key = key, .value = value };
+            self.len += 1;
+        }
+    }
+
+    pub fn removeLast(self: *RouteParams) void {
+        if (self.len > 0) self.len -= 1;
+    }
+
+    pub fn entries(self: *const RouteParams) []const RouteParam {
+        return self.items_buf[0..self.len];
+    }
+};
+
 pub const RouteMatch = struct {
     handler_key: []const u8,
-    params: std.StringHashMap([]const u8),
+    params: RouteParams = .{},
     /// Heap-allocated values that this match owns (e.g. joined wildcard paths)
-    owned_values: std.ArrayListUnmanaged([]const u8),
+    owned_values: std.ArrayListUnmanaged([]const u8) = .empty,
     alloc: Allocator,
 
     pub fn deinit(self: *RouteMatch) void {
@@ -19,7 +55,7 @@ pub const RouteMatch = struct {
             self.alloc.free(v);
         }
         self.owned_values.deinit(self.alloc);
-        self.params.deinit();
+        // No HashMap to deinit — params are stack-allocated
     }
 };
 
@@ -68,7 +104,7 @@ pub const Router = struct {
         }
         const segments = segments_buf[0..seg_count];
 
-        var params = std.StringHashMap([]const u8).init(self.alloc);
+        var params: RouteParams = .{};
         var owned: std.ArrayListUnmanaged([]const u8) = .empty;
         if (self.findHandler(self.root, segments, 0, method, &params, &owned)) |handler_key| {
             return RouteMatch{
@@ -79,7 +115,6 @@ pub const Router = struct {
             };
         }
         owned.deinit(self.alloc);
-        params.deinit();
         return null;
     }
 
@@ -143,7 +178,7 @@ pub const Router = struct {
         segments: []const []const u8,
         index: usize,
         method: []const u8,
-        params: *std.StringHashMap([]const u8),
+        params: *RouteParams,
         owned: *std.ArrayListUnmanaged([]const u8),
     ) ?[]const u8 {
         if (index >= segments.len) {
@@ -162,12 +197,12 @@ pub const Router = struct {
         // 2. Try parameter match
         if (node.param_child) |param_child| {
             if (param_child.param_name) |pname| {
-                params.put(pname, segment) catch return null;
+                params.put(pname, segment);
                 if (self.findHandler(param_child, segments, index + 1, method, params, owned)) |h| {
                     return h;
                 }
                 // Backtrack
-                _ = params.remove(pname);
+                params.removeLast();
             }
         }
 
@@ -191,7 +226,7 @@ pub const Router = struct {
                         @memcpy(joined[pos..][0..s.len], s);
                         pos += s.len;
                     }
-                    params.put(pname, joined) catch return null;
+                    params.put(pname, joined);
                     owned.append(self.alloc, joined) catch return null;
                     return handler_key;
                 }
