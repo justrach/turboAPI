@@ -29,15 +29,15 @@ class DependencyResolver:
         Returns:
             Dictionary of resolved dependency values
         """
-        from turboapi.security import Depends
+        from turboapi.security import get_depends
 
         cache = {}
         cleanups = []  # generators to close after request
         resolved = {}
 
         for param_name, param in handler_signature.parameters.items():
-            if isinstance(param.default, Depends):
-                depends = param.default
+            depends = get_depends(param)
+            if depends is not None:
                 dep_fn = depends.dependency
                 if dep_fn is None:
                     continue
@@ -54,7 +54,7 @@ class DependencyResolver:
     @staticmethod
     def _resolve_single(dep_fn, use_cache, context, cache, cleanups):
         """Resolve a single dependency, handling sub-deps, caching, generators."""
-        from turboapi.security import Depends, SecurityBase
+        from turboapi.security import SecurityBase, get_depends
 
         cache_key = id(dep_fn)
         if use_cache and cache_key in cache:
@@ -66,12 +66,11 @@ class DependencyResolver:
             try:
                 sig = inspect.signature(dep_fn)
                 for p_name, p in sig.parameters.items():
-                    if isinstance(p.default, Depends):
-                        sub_dep = p.default
-                        if sub_dep.dependency is not None:
-                            sub_kwargs[p_name] = DependencyResolver._resolve_single(
-                                sub_dep.dependency, sub_dep.use_cache, context, cache, cleanups
-                            )
+                    sub_dep = get_depends(p)
+                    if sub_dep is not None and sub_dep.dependency is not None:
+                        sub_kwargs[p_name] = DependencyResolver._resolve_single(
+                            sub_dep.dependency, sub_dep.use_cache, context, cache, cleanups
+                        )
             except (ValueError, TypeError):
                 pass
 
@@ -305,12 +304,12 @@ class RequestBodyParser:
         params_list = list(handler_signature.parameters.items())
 
         # Filter out Depends/Security parameters — they are resolved separately
-        from turboapi.security import Depends, SecurityBase
+        from turboapi.security import Depends, SecurityBase, get_depends
 
         body_params_list = [
             (name, p)
             for name, p in params_list
-            if not isinstance(p.default, Depends) and not isinstance(p.default, SecurityBase)
+            if not isinstance(p.default, (Depends, SecurityBase)) and get_depends(p) is None
         ]
 
         # PATTERN 1: Single parameter that should receive entire body
@@ -640,7 +639,7 @@ def create_enhanced_handler(original_handler, route_definition):
     from turboapi.datastructures import Header
 
     try:
-        from turboapi.security import Depends, SecurityBase
+        from turboapi.security import Depends, SecurityBase, get_depends
 
         _has_security = True
     except ImportError:
@@ -649,7 +648,7 @@ def create_enhanced_handler(original_handler, route_definition):
         if isinstance(param.default, Header):
             _has_header_params = True
         if _has_security and (
-            isinstance(param.default, Depends) or isinstance(param.default, SecurityBase)
+            isinstance(param.default, (Depends, SecurityBase)) or get_depends(param) is not None
         ):
             _has_dependencies = True
 
