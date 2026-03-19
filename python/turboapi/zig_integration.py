@@ -392,7 +392,28 @@ class ZigIntegratedTurboAPI(TurboAPI):
             for middleware_class, kwargs in self.middleware_stack:
                 middleware_name = middleware_class.__name__
 
-                if middleware_name == "CorsMiddleware":
+                if middleware_name == "CORSMiddleware":
+                    # Use Zig-native CORS — pre-rendered headers, zero per-request overhead.
+                    # Routes stay on the fast path (no downgrade to enhanced).
+                    origins = kwargs.get("allow_origins", ["*"])
+                    methods_list = kwargs.get("allow_methods", ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"])
+                    hdrs_list = kwargs.get("allow_headers", ["*"])
+                    max_age = kwargs.get("max_age", 600)
+                    creds = kwargs.get("allow_credentials", False)
+                    self.zig_server.configure_cors(
+                        ", ".join(origins),
+                        ", ".join(methods_list),
+                        ", ".join(hdrs_list),
+                        max_age,
+                        int(creds),
+                    )
+                    # Mark this middleware as handled natively — don't add to Python pipeline
+                    self._zig_cors_enabled = True
+                    print(f"{CHECK_MARK} CORS handled by Zig (zero overhead)")
+                    continue  # skip adding to Python middleware instances
+
+                elif middleware_name == "CorsMiddleware":
+                    # Legacy Zig bootstrap CorsMiddleware
                     cors_middleware = turbonet.CorsMiddleware(
                         kwargs.get("origins", ["*"]),
                         kwargs.get("methods", ["GET", "POST", "PUT", "DELETE"]),
@@ -412,8 +433,11 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 # Add more middleware types as needed
 
             # Instantiate Python middleware objects for request pipeline
+            # Skip CORSMiddleware if handled natively by Zig
             self._middleware_instances = []
             for middleware_class, kwargs in self.middleware_stack:
+                if getattr(self, "_zig_cors_enabled", False) and middleware_class.__name__ == "CORSMiddleware":
+                    continue  # handled in Zig
                 self._middleware_instances.append(middleware_class(**kwargs))
 
             # Register all routes with Zig server

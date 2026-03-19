@@ -39,7 +39,7 @@ var methods = [_]py.PyMethodDef{
     .{ .ml_name = "_server_add_middleware", .ml_meth = @ptrCast(&server.server_add_middleware), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_server_run", .ml_meth = @ptrCast(&server.server_run), .ml_flags = c.METH_NOARGS, .ml_doc = null },
     .{ .ml_name = "configure_rate_limiting", .ml_meth = @ptrCast(&server.configure_rate_limiting), .ml_flags = c.METH_VARARGS, .ml_doc = null },
-
+    .{ .ml_name = "_server_configure_cors", .ml_meth = @ptrCast(&server.server_configure_cors), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     // sentinel
     .{ .ml_name = null, .ml_meth = null, .ml_flags = 0, .ml_doc = null },
 };
@@ -106,6 +106,8 @@ const bootstrap_code: [*:0]const u8 =
     \\        _m._server_add_middleware(middleware)
     \\    def run(self):
     \\        _m._server_run()
+    \\    def configure_cors(self, origins="*", methods="GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD", headers="*", max_age=600, credentials=0):
+    \\        _m._server_configure_cors(origins, methods, headers, max_age, int(credentials))
     \\
     \\class RequestContext:
     \\    def __init__(self):

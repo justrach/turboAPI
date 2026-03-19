@@ -106,9 +106,26 @@ fn percentDecode(src: []const u8, buf: []u8) []u8 {
     return buf[0..out];
 }
 
+const HandlerType = enum(u8) {
+    simple_sync_noargs,
+    simple_sync,
+    model_sync,
+    body_sync,
+    enhanced,
+};
+
+fn parseHandlerType(s: []const u8) HandlerType {
+    if (std.mem.eql(u8, s, "simple_sync_noargs")) return .simple_sync_noargs;
+    if (std.mem.eql(u8, s, "simple_sync")) return .simple_sync;
+    if (std.mem.eql(u8, s, "model_sync")) return .model_sync;
+    if (std.mem.eql(u8, s, "body_sync")) return .body_sync;
+    return .enhanced;
+}
+
 const HandlerEntry = struct {
     handler: *c.PyObject,
     handler_type: []const u8,
+    handler_tag: HandlerType = .enhanced,
     param_types_json: []const u8,
     original_handler: ?*c.PyObject,
     model_param_name: ?[]const u8,
@@ -334,6 +351,7 @@ pub fn server_add_route_fast(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?
     var entry = HandlerEntry{
         .handler = handler.?,
         .handler_type = ht_s,
+        .handler_tag = parseHandlerType(ht_s),
         .param_types_json = ptj_s,
         .original_handler = orig,
         .model_param_name = null,
@@ -536,6 +554,45 @@ pub fn server_add_static_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c)
     getRouter().addRoute(method_s, path_s, key) catch return null;
 
     std.debug.print("[STATIC] Registered: {s} {s} -> {d} ({d} bytes pre-rendered)\n", .{ method_s, path_s, st, response_bytes.len });
+    return py.pyNone();
+}
+
+// ── Zig-native CORS — zero per-request overhead ─────────────────────────────
+// CORS headers are pre-rendered once at configure_cors() time.  sendResponse
+// injects them via a single memcpy into the stack buffer.  OPTIONS preflight
+// is handled in handleOneRequest before touching Python.
+
+var cors_headers: []const u8 = ""; // "" = disabled; otherwise pre-rendered CORS header block
+var cors_enabled: bool = false;
+
+pub fn server_configure_cors(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var origins: [*c]const u8 = "*";
+    var methods: [*c]const u8 = "GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD";
+    var hdrs: [*c]const u8 = "*";
+    var max_age: c_int = 600;
+    var credentials: c_int = 0;
+    if (c.PyArg_ParseTuple(args, "|sssii", &origins, &methods, &hdrs, &max_age, &credentials) == 0) return null;
+
+    const origins_s = std.mem.span(origins);
+    const methods_s = std.mem.span(methods);
+    const hdrs_s = std.mem.span(hdrs);
+
+    // Pre-render the CORS header block (injected into every response)
+    const cred_hdr: []const u8 = if (credentials != 0) "\r\nAccess-Control-Allow-Credentials: true" else "";
+    var age_buf: [16]u8 = undefined;
+    const age_str = std.fmt.bufPrint(&age_buf, "{d}", .{max_age}) catch "600";
+
+    cors_headers = std.fmt.allocPrint(allocator,
+        "\r\nAccess-Control-Allow-Origin: {s}" ++
+        "\r\nAccess-Control-Allow-Methods: {s}" ++
+        "\r\nAccess-Control-Allow-Headers: {s}" ++
+        "{s}" ++
+        "\r\nAccess-Control-Max-Age: {s}",
+        .{ origins_s, methods_s, hdrs_s, cred_hdr, age_str },
+    ) catch return null;
+    cors_enabled = true;
+
+    std.debug.print("[CORS] Zig-native CORS enabled: origin={s} methods={s}\n", .{ origins_s, methods_s });
     return py.pyNone();
 }
 
@@ -796,7 +853,13 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     };
     defer match.deinit();
 
-    // ── Dispatch priority: static > native FFI > Python ──
+    // ── Dispatch priority: OPTIONS preflight > static > native FFI > Python ──
+
+    // 0. CORS preflight — respond immediately in Zig, no Python
+    if (cors_enabled and std.mem.eql(u8, method, "OPTIONS")) {
+        sendResponse(stream, 204, "", "");
+        return;
+    }
 
     // 1. Static routes — pre-rendered response, single writeAll, zero overhead
     const sr = getStaticRoutes();
@@ -848,34 +911,39 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         }
     }
 
-    // Fast dispatch: write response directly while holding GIL
-    const ht = entry.handler_type;
-    if (std.mem.eql(u8, ht, "simple_sync_noargs")) {
-        callPythonNoArgs(tstate, entry, stream);
-        return;
+    // Fast dispatch via enum tag — single branch instead of 4x string compare
+    switch (entry.handler_tag) {
+        .simple_sync_noargs => {
+            callPythonNoArgs(tstate, entry, stream);
+            return;
+        },
+        .simple_sync => {
+            callPythonVectorcall(tstate, entry, query_string, &match.params, stream);
+            return;
+        },
+        .model_sync => {
+            if (body.len > 0) {
+                if (cached_parse) |cp| {
+                    callPythonModelHandlerParsed(tstate, entry, cp.value, &match.params, stream);
+                } else {
+                    callPythonModelHandlerDirect(tstate, entry, body, &match.params, stream);
+                }
+                return;
+            }
+            // model_sync with no body falls through to enhanced
+            callPythonHandlerDirect(tstate, entry, query_string, body, &match.params, stream);
+            return;
+        },
+        .body_sync => {
+            callPythonHandlerDirect(tstate, entry, query_string, body, &match.params, stream);
+            return;
+        },
+        .enhanced => {
+            const resp = callPythonHandler(tstate, entry, method, path, query_string, body, headers.items, &match.params);
+            defer resp.deinit();
+            sendResponse(stream, resp.status_code, resp.content_type, resp.body);
+        },
     }
-    if (std.mem.eql(u8, ht, "simple_sync")) {
-        // Vectorcall: Zig assembles positional args, zero Python dict overhead
-        callPythonVectorcall(tstate, entry, query_string, &match.params, stream);
-        return;
-    }
-    if (std.mem.eql(u8, ht, "model_sync") and body.len > 0) {
-        if (cached_parse) |cp| {
-            // Single-parse path: JSON was already parsed during validation
-            callPythonModelHandlerParsed(tstate, entry, cp.value, &match.params, stream);
-        } else {
-            callPythonModelHandlerDirect(tstate, entry, body, &match.params, stream);
-        }
-        return;
-    }
-    if (std.mem.eql(u8, ht, "body_sync") or std.mem.eql(u8, ht, "model_sync")) {
-        callPythonHandlerDirect(tstate, entry, query_string, body, &match.params, stream);
-        return;
-    }
-
-    const resp = callPythonHandler(tstate, entry, method, path, query_string, body, headers.items, &match.params);
-    defer resp.deinit();
-    sendResponse(stream, resp.status_code, resp.content_type, resp.body);
 }
 
 // ── FFI native handler dispatch (no GIL, no Python) ─────────────────────────
@@ -1550,20 +1618,32 @@ fn statusText(status: u16) []const u8 {
 fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
     var header_buf: [512]u8 = undefined;
     const header = std.fmt.bufPrint(&header_buf,
-        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n",
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive",
         .{ status, statusText(status), content_type, body.len },
     ) catch return;
 
-    const total = header.len + body.len;
+    // Assemble: header + cors_headers (pre-rendered, "" if disabled) + \r\n\r\n + body
+    const cors = cors_headers; // "" when disabled — zero overhead
+    const trailer = "\r\n\r\n";
+    const total = header.len + cors.len + trailer.len + body.len;
     if (total <= 4096) {
-        // Small response: single write from stack — zero allocs, one syscall
         var resp_buf: [4096]u8 = undefined;
-        @memcpy(resp_buf[0..header.len], header);
-        @memcpy(resp_buf[header.len..total], body);
-        stream.writeAll(resp_buf[0..total]) catch return;
+        var pos: usize = 0;
+        @memcpy(resp_buf[pos..pos + header.len], header);
+        pos += header.len;
+        if (cors.len > 0) {
+            @memcpy(resp_buf[pos..pos + cors.len], cors);
+            pos += cors.len;
+        }
+        @memcpy(resp_buf[pos..pos + trailer.len], trailer);
+        pos += trailer.len;
+        @memcpy(resp_buf[pos..pos + body.len], body);
+        pos += body.len;
+        stream.writeAll(resp_buf[0..pos]) catch return;
     } else {
-        // Large response: two writes to avoid huge stack usage
         stream.writeAll(header) catch return;
+        if (cors.len > 0) stream.writeAll(cors) catch return;
+        stream.writeAll(trailer) catch return;
         if (body.len > 0) stream.writeAll(body) catch return;
     }
 }
