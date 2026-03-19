@@ -51,9 +51,11 @@ pub fn isNone(obj: *PyObject) bool {
 
 pub fn setError(comptime fmt: []const u8, args: anytype) void {
     var buf: [1024]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch "internal error";
-    const z: [*c]const u8 = @ptrCast(msg.ptr);
-    c.PyErr_SetString(c.PyExc_RuntimeError, z);
+    const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch {
+        c.PyErr_SetString(c.PyExc_RuntimeError, "internal error");
+        return;
+    };
+    c.PyErr_SetString(c.PyExc_RuntimeError, msg.ptr);
 }
 
 pub fn newString(s: []const u8) ?*PyObject {

@@ -218,7 +218,7 @@ fn getRouter() *router_mod.Router {
 
 pub fn server_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var host: [*c]const u8 = "127.0.0.1";
-    var port: c_int = 8000;
+    var port: c_long = 8000;
 
     if (args) |a| {
         const n = c.PyTuple_Size(a);
@@ -234,13 +234,21 @@ pub fn server_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
             const p = c.PyTuple_GetItem(a, 1);
             if (p) |item| {
                 if (c.PyLong_Check(item) != 0) {
-                    port = @intCast(c.PyLong_AsLong(item));
+                    port = c.PyLong_AsLong(item);
                 }
             }
         }
     }
 
-    server_host = std.mem.span(host);
+    // Validate port range before truncating to u16
+    if (port < 1 or port > 65535) {
+        py.setError("port must be in range 1-65535, got {d}", .{port});
+        return null;
+    }
+
+    // Dupe the host string — the Python string's internal buffer may be freed
+    // by the GC once the Python object is collected.
+    server_host = allocator.dupe(u8, std.mem.span(host)) catch "127.0.0.1";
     server_port = @intCast(port);
 
     // Return a state dict
@@ -248,7 +256,7 @@ pub fn server_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
     const h_obj = c.PyUnicode_FromString(host) orelse return null;
     _ = c.PyDict_SetItemString(d, "host", h_obj);
     c.Py_DecRef(h_obj);
-    const p_obj = c.PyLong_FromLong(port) orelse return null;
+    const p_obj = c.PyLong_FromLong(@intCast(port)) orelse return null;
     _ = c.PyDict_SetItemString(d, "port", p_obj);
     c.Py_DecRef(p_obj);
     return d;
@@ -294,24 +302,33 @@ pub fn server_add_route_fast(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?
     c.Py_IncRef(orig.?);
     const method_s = std.mem.span(method);
     const path_s = std.mem.span(path);
-    const ht_s = std.mem.span(ht);
-    const key = std.fmt.allocPrint(allocator, "{s} {s}", .{ method_s, path_s }) catch return null;
+
+    // Dupe handler_type and param_types_json — the Python string's internal buffer
+    // becomes a dangling pointer once the Python object is collected.
+    const ht_s = allocator.dupe(u8, std.mem.span(ht)) catch return null;
+    const ptj_s = allocator.dupe(u8, std.mem.span(ptj)) catch {
+        allocator.free(ht_s);
+        return null;
+    };
+    const key = std.fmt.allocPrint(allocator, "{s} {s}", .{ method_s, path_s }) catch {
+        allocator.free(ht_s);
+        allocator.free(ptj_s);
+        return null;
+    };
 
     // For simple_sync: parse "name:type|..." metadata into ordered ParamMeta array.
-    // Dupe the string so name slices remain valid after the Python string is freed.
+    // Slices in param_meta point into ptj_s which we own.
     var entry = HandlerEntry{
         .handler = handler.?,
         .handler_type = ht_s,
-        .param_types_json = std.mem.span(ptj),
+        .param_types_json = ptj_s,
         .original_handler = orig,
         .model_param_name = null,
         .model_class = null,
     };
 
     if (std.mem.eql(u8, ht_s, "simple_sync")) {
-        const meta_str = allocator.dupe(u8, std.mem.span(ptj)) catch return null;
-        entry.param_count = parseParamMeta(meta_str, &entry.param_meta);
-        entry.param_types_json = meta_str;
+        entry.param_count = parseParamMeta(ptj_s, &entry.param_meta);
     }
 
     getRoutes().put(key, entry) catch return null;
@@ -727,7 +744,10 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     };
     defer match.deinit();
 
-    // Check native (FFI) routes first — no GIL, no Python, zero overhead
+    // Check native (FFI) routes first — no GIL, no Python, zero overhead.
+    // ABI contract: FfiResponse.body and .content_type are borrowed pointers —
+    // they must point to static data or data valid for the request lifetime.
+    // Native handlers must NOT heap-allocate these fields; the server does not free them.
     const nr = getNativeRoutes();
     if (nr.get(match.handler_key)) |native_entry| {
         std.debug.print("[FFI] native handler for {s}\n", .{match.handler_key});

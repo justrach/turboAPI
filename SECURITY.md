@@ -21,7 +21,8 @@ What it rejects at the TCP/parse level:
 - Headers that overflow the 8KB header buffer (returns 431)
 
 **Known gaps:**
-- No slow-loris protection (no per-connection read timeout yet)
+- No slow-loris protection (no per-connection read timeout) — mitigate with `proxy_read_timeout 10s;` (nginx) or `timeouts.read_header 5s` (Caddy)
+- `Transfer-Encoding` is not parsed; only `Content-Length` is used for body framing — requests using chunked encoding are not deserialized correctly. Put a proxy in front that normalises this before forwarding.
 - No max header count limit (high header count won't crash, but isn't capped)
 - CRLF injection in header values is not explicitly sanitized — rely on your reverse proxy (nginx/Caddy) for this in production
 
@@ -47,13 +48,15 @@ Standard Python security practices apply. TurboAPI does not add injection risks 
 
 | Component | Fuzz tested | Notes |
 |-----------|-------------|-------|
-| HTTP parser (header parsing) | ❌ Not yet | Planned — see [#37](https://github.com/justrach/turboAPI/issues/37) |
-| HTTP parser (URL/path decoding) | ❌ Not yet | Percent-encoding edge cases, null bytes |
-| JSON body parser | ❌ Not yet | Depth bombs, huge strings, invalid UTF-8 |
-| dhi schema validator | ❌ Not yet | Adversarial schema inputs |
-| Router (radix trie) | ❌ Not yet | Path traversal, very long paths |
+| HTTP parser (header parsing, request line) | ✅ Seed corpus | `zig build test` runs seeds; `zig build test --fuzz` for continuous |
+| HTTP parser (URL / percent-decode) | ✅ Seed corpus | `fuzz_percentDecode`, `fuzz_queryStringGet` in `server.zig` |
+| dhi schema validator | ✅ Seed corpus | `fuzz_validateJson` in `dhi_validator.zig` |
+| Router (radix trie) | ✅ Seed corpus | `fuzz_findRoute` in `router.zig` |
+| JSON body parser (depth bombs) | ❌ Not yet | Planned — see [#37](https://github.com/justrach/turboAPI/issues/37) |
 
-**Fuzz testing is a known gap.** TurboAPI is alpha software. Do not expose it directly to the internet without a hardened reverse proxy (nginx, Caddy, Cloudflare) in front of it.
+**Continuous fuzzing** (AFL++/honggfuzz in CI on every PR) is not yet configured — it's the remaining open item in [#37](https://github.com/justrach/turboAPI/issues/37).
+
+---
 
 ---
 
@@ -98,6 +101,13 @@ We aim to acknowledge reports within **48 hours** and provide a fix or mitigatio
 | Large body DoS | 16MB hardcoded cap; returns 413 |
 | Oversized headers | 8KB header buffer; returns 431 |
 | Path traversal in router | Radix trie matches literal path segments; no filesystem access |
+| `PyErr_SetString` stack over-read (`setError`) | Fixed: `bufPrintZ` writes null terminator — `[*c]const u8` is always terminated |
+| Dangling pointers to Python string internals | Fixed: `server_host`, `handler_type`, `param_types_json` are `allocator.dupe`'d at registration |
+| Port integer truncation in `server_new` | Fixed: `c_long` read, range-checked (1–65535) before `@intCast` to `u16` |
+| `RateLimitMiddleware` data race | Fixed: `threading.Lock()` guards the shared `requests` dict |
+| `RateLimitMiddleware` IP spoofing via `X-Forwarded-For` | Mitigated: prefers `X-Real-IP`; documented proxy-trust requirement |
+| CORS wildcard + `allow_credentials=True` | Fixed: `ValueError` raised at construction — browsers reject this combination |
+| Plaintext password "hash" in `security.py` | Fixed: `get_password_hash` / `verify_password` raise `NotImplementedError` |
 
 ---
 

@@ -10,7 +10,6 @@ Includes:
 """
 
 import base64
-import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -508,22 +507,28 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
     Verify a password against a hash.
 
-    Note: This is a placeholder. Use a proper password hashing library like:
-    - passlib with bcrypt
-    - argon2-cffi
+    This is a placeholder — install a proper hashing library and replace:
+      - passlib with bcrypt: ``passlib.hash.bcrypt.verify(plain, hashed)``
+      - argon2-cffi: ``argon2.PasswordHasher().verify(hashed, plain)``
     """
-    # TODO: Implement with proper password hashing
-    return secrets.compare_digest(plain_password, hashed_password)
+    raise NotImplementedError(
+        "verify_password is not implemented. "
+        "Install passlib[bcrypt] or argon2-cffi and replace this function."
+    )
 
 
 def get_password_hash(password: str) -> str:
     """
     Hash a password.
 
-    Note: This is a placeholder. Use a proper password hashing library.
+    This is a placeholder — install a proper hashing library and replace:
+      - passlib with bcrypt: ``passlib.hash.bcrypt.hash(password)``
+      - argon2-cffi: ``argon2.PasswordHasher().hash(password)``
     """
-    # TODO: Implement with proper password hashing
-    return password  # INSECURE - just for demo!
+    raise NotImplementedError(
+        "get_password_hash is not implemented. "
+        "Install passlib[bcrypt] or argon2-cffi and replace this function."
+    )
 
 
 # ============================================================================
