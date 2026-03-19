@@ -1822,16 +1822,23 @@ fn statusText(status: u16) []const u8 {
 /// Falls back to two writes only for large responses.
 fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
     // TFB requires Server + Date headers
-    var date_buf: [32]u8 = undefined;
+    var date_buf: [40]u8 = undefined;
     const timestamp = std.time.timestamp();
     const epoch_secs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(timestamp) };
     const day_secs = epoch_secs.getDaySeconds();
-    const year_day = epoch_secs.getEpochDay().calculateYearDay();
+    const epoch_day = epoch_secs.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
-    const date_str = std.fmt.bufPrint(&date_buf, "{d:0>2}/{d:0>2}/{d} {d:0>2}:{d:0>2}:{d:0>2}", .{
-        month_day.day_index + 1, @intFromEnum(month_day.month), year_day.year,
+    const dow_idx: usize = @intCast(@mod(@as(i32, @intCast(epoch_day.day)) + 3, 7)); // 0=Mon
+    const dow_names = [7][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+    const mon_names = [12][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    const dow_str = dow_names[dow_idx];
+    const mon_str = mon_names[@intFromEnum(month_day.month) - 1];
+    // RFC 2822: "Wed, 19 Mar 2026 11:30:27 GMT"
+    const date_str = std.fmt.bufPrint(&date_buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+        dow_str, month_day.day_index + 1, mon_str, year_day.year,
         day_secs.getHoursIntoDay(), day_secs.getMinutesIntoHour(), day_secs.getSecondsIntoMinute(),
-    }) catch "01/01/2026 00:00:00";
+    }) catch "Thu, 01 Jan 2026 00:00:00 GMT";
 
     var header_buf: [512]u8 = undefined;
     const header = std.fmt.bufPrint(&header_buf,
