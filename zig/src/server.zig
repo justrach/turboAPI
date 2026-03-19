@@ -7,6 +7,7 @@ const py = @import("py.zig");
 const c = py.c;
 const router_mod = @import("router.zig");
 const dhi = @import("dhi_validator.zig");
+const db = @import("db.zig");
 
 const allocator = std.heap.c_allocator;
 
@@ -260,7 +261,7 @@ fn getModelSchemas() *std.StringHashMap(dhi.ModelSchema) {
     return &model_schemas.?;
 }
 
-fn getRouter() *router_mod.Router {
+pub fn getRouter() *router_mod.Router {
     if (router == null) {
         router = router_mod.Router.init(allocator);
     }
@@ -904,6 +905,51 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         const resp_ct = ffi_resp.content_type[0..ffi_resp.content_type_len];
         const resp_body = ffi_resp.body[0..ffi_resp.body_len];
         sendResponse(stream, ffi_resp.status_code, resp_ct, resp_body);
+        return;
+    }
+
+    // DB routes — full Zig request cycle, no Python, no GIL
+    const dbr = db.getDbRoutes();
+    if (dbr.get(match.handler_key)) |*db_entry| {
+        if (db_entry.op == .insert) {
+            // INSERT needs body — parse headers + read body
+            var db_headers = parseHeaders(request_head, first_line_end, he);
+            defer db_headers.deinit(allocator);
+            var db_cl: usize = 0;
+            for (db_headers.items) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, "content-length")) {
+                    db_cl = std.fmt.parseInt(usize, h.value, 10) catch 0;
+                }
+            }
+            const db_body_start = he + 4;
+            const db_already = request_head[db_body_start..total_read];
+            var db_body: []const u8 = "";
+            var db_body_owned: ?[]u8 = null;
+            defer if (db_body_owned) |b| allocator.free(b);
+            if (db_cl == 0) {
+                db_body = db_already;
+            } else if (db_already.len >= db_cl) {
+                db_body = db_already[0..db_cl];
+            } else {
+                const full = allocator.alloc(u8, db_cl) catch {
+                    sendResponse(stream, 500, "application/json", "{\"error\": \"Out of memory\"}");
+                    return;
+                };
+                db_body_owned = full;
+                @memcpy(full[0..db_already.len], db_already);
+                var br: usize = db_already.len;
+                while (br < db_cl) {
+                    const n = stream.read(full[br..db_cl]) catch return;
+                    if (n == 0) break;
+                    br += n;
+                }
+                db_body = full[0..br];
+            }
+            db.handleDbRoute(stream, db_entry, db_body, &match.params, query_string, &sendResponse);
+        } else {
+            // GET/DELETE — no body needed
+            db.handleDbRoute(stream, db_entry, "", &match.params, query_string, &sendResponse);
+        }
         return;
     }
 
@@ -1855,7 +1901,7 @@ fn statusText(status: u16) []const u8 {
 /// Zero-alloc response writer.  Header + body are concatenated into a stack
 /// buffer for a single write syscall (most API responses are <4KB).
 /// Falls back to two writes only for large responses.
-fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
+pub fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
     // TFB requires Server + Date headers
     var date_buf: [40]u8 = undefined;
     const timestamp = std.time.timestamp();

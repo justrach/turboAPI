@@ -38,6 +38,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // ── pg.zig (Postgres client, fetched via build.zig.zon) ──
+    const pg_dep = b.dependency("pg", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const pg_mod = pg_dep.module("pg");
+
     // ── shared library (turbonet) ──
     const lib = b.addLibrary(.{
         .name = "turbonet",
@@ -54,6 +61,7 @@ pub fn build(b: *std.Build) void {
     lib.root_module.addImport("json_validator", json_validator_mod);
     lib.root_module.addImport("validators_comprehensive", validators_comprehensive_mod);
     lib.root_module.addImport("model", model_mod);
+    lib.root_module.addImport("pg", pg_mod);
 
     lib.addIncludePath(.{ .cwd_relative = include_path });
     lib.root_module.addRPathSpecial("@loader_path");
@@ -86,7 +94,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("json_validator", json_validator_mod);
     tests.root_module.addImport("validators_comprehensive", validators_comprehensive_mod);
     tests.root_module.addImport("model", model_mod);
-
+    tests.root_module.addImport("pg", pg_mod);
     tests.addIncludePath(.{ .cwd_relative = include_path });
     tests.addLibraryPath(.{ .cwd_relative = lib_path });
     tests.linkSystemLibrary(py_lib_name);

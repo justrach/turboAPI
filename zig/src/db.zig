@@ -1,0 +1,532 @@
+// db.zig — Zig-native Postgres via pg.zig
+// Zero-Python CRUD: HTTP request → dhi validate → pg.zig query → JSON response
+// No GIL acquired at any point.
+
+const std = @import("std");
+const pg = @import("pg");
+const py = @import("py.zig");
+const c = py.c;
+const router_mod = @import("router.zig");
+const dhi = @import("dhi_validator.zig");
+
+const allocator = std.heap.c_allocator;
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+pub const DbOp = enum(u8) { select_one, select_list, insert, delete };
+
+pub const DbRouteEntry = struct {
+    op: DbOp,
+    table: []const u8,
+    columns: []const []const u8, // column names from schema
+    pk_column: ?[]const u8, // "id" for select_one/delete
+    pk_param: ?[]const u8, // path param name, e.g. "user_id"
+    select_sql: []const u8, // pre-built SELECT
+    insert_sql: []const u8, // pre-built INSERT
+    delete_sql: []const u8, // pre-built DELETE
+    schema: ?dhi.ModelSchema, // for INSERT body validation (dhi validates before query)
+};
+
+// ── Global state (same pattern as server.zig routes) ─────────────────────────
+// ── Global state (same pattern as server.zig routes) ─────────────────────────
+
+var db_pool: ?*pg.Pool = null;
+var db_routes_map: ?std.StringHashMap(DbRouteEntry) = null;
+
+pub fn getDbRoutes() *std.StringHashMap(DbRouteEntry) {
+    if (db_routes_map) |*m| return m;
+    db_routes_map = std.StringHashMap(DbRouteEntry).init(allocator);
+    return &db_routes_map.?;
+}
+
+pub fn getPool() ?*pg.Pool {
+    return db_pool;
+}
+
+// ── SQL builders (all pre-built at registration time, not per-request) ───────
+
+fn isValidIdentifier(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64) return false;
+    for (name, 0..) |ch, i| {
+        if (i == 0) {
+            if (!std.ascii.isAlphabetic(ch) and ch != '_') return false;
+        } else {
+            if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
+        }
+    }
+    return true;
+}
+
+fn buildSelectOneSql(table: []const u8, pk_column: []const u8) []const u8 {
+    return std.fmt.allocPrint(allocator, "SELECT * FROM {s} WHERE {s} = $1", .{ table, pk_column }) catch "";
+}
+
+fn buildSelectListSql(table: []const u8) []const u8 {
+    return std.fmt.allocPrint(allocator, "SELECT * FROM {s} LIMIT $1 OFFSET $2", .{table}) catch "";
+}
+
+fn buildInsertSql(table: []const u8, columns: []const []const u8) []const u8 {
+    // INSERT INTO users (name, email, age) VALUES ($1, $2, $3) RETURNING *
+    var col_buf: [2048]u8 = undefined;
+    var val_buf: [512]u8 = undefined;
+    var col_pos: usize = 0;
+    var val_pos: usize = 0;
+
+    for (columns, 0..) |col, i| {
+        if (i > 0) {
+            col_buf[col_pos] = ',';
+            col_pos += 1;
+            col_buf[col_pos] = ' ';
+            col_pos += 1;
+            val_buf[val_pos] = ',';
+            val_pos += 1;
+            val_buf[val_pos] = ' ';
+            val_pos += 1;
+        }
+        @memcpy(col_buf[col_pos..][0..col.len], col);
+        col_pos += col.len;
+
+        // $N placeholder
+        const placeholder = std.fmt.bufPrint(val_buf[val_pos..], "${d}", .{i + 1}) catch break;
+        val_pos += placeholder.len;
+    }
+
+    return std.fmt.allocPrint(allocator, "INSERT INTO {s} ({s}) VALUES ({s}) RETURNING *", .{
+        table,
+        col_buf[0..col_pos],
+        val_buf[0..val_pos],
+    }) catch "";
+}
+
+fn buildDeleteSql(table: []const u8, pk_column: []const u8) []const u8 {
+    return std.fmt.allocPrint(allocator, "DELETE FROM {s} WHERE {s} = $1", .{ table, pk_column }) catch "";
+}
+// ── JSON serialization from pg.zig result rows ───────────────────────────────
+
+fn serializeRow(row: anytype, col_names: []const []const u8, buf: []u8) ![]const u8 {
+    var pos: usize = 0;
+    buf[pos] = '{';
+    pos += 1;
+
+    for (col_names, 0..) |col_name, i| {
+        if (i > 0) {
+            buf[pos] = ',';
+            pos += 1;
+        }
+        // Column name
+        buf[pos] = '"';
+        pos += 1;
+        @memcpy(buf[pos..][0..col_name.len], col_name);
+        pos += col_name.len;
+        buf[pos] = '"';
+        pos += 1;
+        buf[pos] = ':';
+        pos += 1;
+
+        // Value — get as text (row.get returns error union, use catch for null)
+        const val = row.get([]const u8, @intCast(i)) catch {
+            @memcpy(buf[pos..][0..4], "null");
+            pos += 4;
+            continue;
+        };
+        // Check if it looks like a number
+        const is_num = blk: {
+            if (val.len == 0) break :blk false;
+            for (val) |ch| {
+                if (ch != '.' and ch != '-' and !std.ascii.isDigit(ch)) break :blk false;
+            }
+            break :blk true;
+        };
+        if (is_num) {
+            @memcpy(buf[pos..][0..val.len], val);
+            pos += val.len;
+        } else {
+            buf[pos] = '"';
+            pos += 1;
+            for (val) |ch| {
+                if (pos + 2 >= buf.len) break;
+                if (ch == '"' or ch == '\\') {
+                    buf[pos] = '\\';
+                    pos += 1;
+                }
+                buf[pos] = ch;
+                pos += 1;
+            }
+            buf[pos] = '"';
+            pos += 1;
+        }
+    }
+
+    buf[pos] = '}';
+    pos += 1;
+    return buf[0..pos];
+}
+
+// ── Request dispatch (called from server.zig fast-exit path) ─────────────────
+
+pub fn handleDbRoute(
+    stream: std.net.Stream,
+    entry: *const DbRouteEntry,
+    body: []const u8,
+    params: *const router_mod.RouteParams,
+    query_string: []const u8,
+    sendResponseFn: *const fn (std.net.Stream, u16, []const u8, []const u8) void,
+) void {
+    const pool = getPool() orelse {
+        sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database not configured\"}");
+        return;
+    };
+
+    switch (entry.op) {
+        .select_one => {
+            const pk_param = entry.pk_param orelse "id";
+            const pk_val = params.get(pk_param) orelse {
+                sendResponseFn(stream, 400, "application/json", "{\"error\": \"Missing primary key\"}");
+                return;
+            };
+
+            var conn = pool.acquire() catch {
+                sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database connection unavailable\"}");
+                return;
+            };
+            defer conn.release();
+
+            var result = conn.queryOpts(entry.select_sql, .{pk_val}, .{ .column_names = true }) catch {
+                sendResponseFn(stream, 500, "application/json", "{\"error\": \"Query failed\"}");
+                return;
+            };
+            defer result.deinit();
+
+            if (result.next() catch null) |row| {
+                var json_buf: [8192]u8 = undefined;
+                const json = serializeRow(row, result.column_names, &json_buf) catch {
+                    sendResponseFn(stream, 500, "application/json", "{\"error\": \"Serialization failed\"}");
+                    return;
+                };
+                sendResponseFn(stream, 200, "application/json", json);
+            } else {
+                sendResponseFn(stream, 404, "application/json", "{\"error\": \"Not found\"}");
+            }
+        },
+
+        .select_list => {
+            // Parse ?limit=N&offset=M from query string
+            var limit: []const u8 = "50";
+            var offset: []const u8 = "0";
+
+            if (query_string.len > 0) {
+                var qs_iter = std.mem.splitScalar(u8, query_string, '&');
+                while (qs_iter.next()) |pair| {
+                    if (std.mem.indexOf(u8, pair, "limit=")) |idx| {
+                        limit = pair[idx + 6 ..];
+                    } else if (std.mem.indexOf(u8, pair, "offset=")) |idx| {
+                        offset = pair[idx + 7 ..];
+                    }
+                }
+            }
+
+            var conn = pool.acquire() catch {
+                sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database connection unavailable\"}");
+                return;
+            };
+            defer conn.release();
+
+            var result = conn.queryOpts(entry.select_sql, .{ limit, offset }, .{ .column_names = true }) catch {
+                sendResponseFn(stream, 500, "application/json", "{\"error\": \"Query failed\"}");
+                return;
+            };
+            defer result.deinit();
+
+            // Build JSON array
+            var out_buf = allocator.alloc(u8, 65536) catch {
+                sendResponseFn(stream, 500, "application/json", "{\"error\": \"Out of memory\"}");
+                return;
+            };
+            defer allocator.free(out_buf);
+
+            var out_pos: usize = 0;
+            out_buf[out_pos] = '[';
+            out_pos += 1;
+
+            var row_count: usize = 0;
+            while (result.next() catch null) |row| {
+                if (row_count > 0) {
+                    out_buf[out_pos] = ',';
+                    out_pos += 1;
+                }
+                var row_buf: [8192]u8 = undefined;
+                const row_json = serializeRow(row, result.column_names, &row_buf) catch break;
+                if (out_pos + row_json.len + 2 > out_buf.len) break; // safety
+                @memcpy(out_buf[out_pos..][0..row_json.len], row_json);
+                out_pos += row_json.len;
+                row_count += 1;
+            }
+
+            out_buf[out_pos] = ']';
+            out_pos += 1;
+
+            sendResponseFn(stream, 200, "application/json", out_buf[0..out_pos]);
+        },
+
+        .insert => {
+            if (body.len == 0) {
+                sendResponseFn(stream, 400, "application/json", "{\"error\": \"Request body required\"}");
+                return;
+            }
+
+            // DHI validation (if schema registered)
+            if (entry.schema) |schema| {
+                const vr = dhi.validateJson(body, &schema);
+                switch (vr) {
+                    .ok => {},
+                    .err => |ve| {
+                        defer ve.deinit();
+                        sendResponseFn(stream, ve.status_code, "application/json", ve.body);
+                        return;
+                    },
+                }
+            }
+
+            // Parse JSON body to extract column values
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch {
+                sendResponseFn(stream, 400, "application/json", "{\"error\": \"Invalid JSON\"}");
+                return;
+            };
+            defer parsed.deinit();
+
+            const obj = switch (parsed.value) {
+                .object => |o| o,
+                else => {
+                    sendResponseFn(stream, 400, "application/json", "{\"error\": \"Expected JSON object\"}");
+                    return;
+                },
+            };
+
+            // Extract column values in order
+            var values: [16][]const u8 = undefined;
+            const ncols = @min(entry.columns.len, 16);
+
+            for (entry.columns[0..ncols], 0..) |col, i| {
+                if (obj.get(col)) |val| {
+                    values[i] = switch (val) {
+                        .string => |s| s,
+                        .integer => |n| std.fmt.allocPrint(allocator, "{d}", .{n}) catch "",
+                        .float => |f| std.fmt.allocPrint(allocator, "{d}", .{f}) catch "",
+                        .bool => |b| if (b) "true" else "false",
+                        .null => "null",
+                        else => "",
+                    };
+                } else {
+                    values[i] = "null";
+                }
+            }
+
+            var conn = pool.acquire() catch {
+                sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database connection unavailable\"}");
+                return;
+            };
+            defer conn.release();
+
+            // Execute INSERT using switch dispatch for comptime tuple
+            const insert_result = execWithParams(conn, entry.insert_sql, values[0..ncols]);
+            if (insert_result) |result| {
+                defer result.deinit();
+                if (result.next() catch null) |row| {
+                    var json_buf: [8192]u8 = undefined;
+                    const json = serializeRow(row, result.column_names, &json_buf) catch {
+                        sendResponseFn(stream, 201, "application/json", "{\"created\": true}");
+                        return;
+                    };
+                    sendResponseFn(stream, 201, "application/json", json);
+                } else {
+                    sendResponseFn(stream, 201, "application/json", "{\"created\": true}");
+                }
+            } else {
+                sendResponseFn(stream, 500, "application/json", "{\"error\": \"Insert failed\"}");
+            }
+        },
+
+        .delete => {
+            const pk_param = entry.pk_param orelse "id";
+            const pk_val = params.get(pk_param) orelse {
+                sendResponseFn(stream, 400, "application/json", "{\"error\": \"Missing primary key\"}");
+                return;
+            };
+
+            var conn = pool.acquire() catch {
+                sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database connection unavailable\"}");
+                return;
+            };
+            defer conn.release();
+
+            const affected = conn.exec(entry.delete_sql, .{pk_val}) catch {
+                sendResponseFn(stream, 500, "application/json", "{\"error\": \"Delete failed\"}");
+                return;
+            };
+
+            if (affected) |n| {
+                if (n > 0) {
+                    sendResponseFn(stream, 204, "application/json", "");
+                } else {
+                    sendResponseFn(stream, 404, "application/json", "{\"error\": \"Not found\"}");
+                }
+            } else {
+                sendResponseFn(stream, 404, "application/json", "{\"error\": \"Not found\"}");
+            }
+        },
+    }
+}
+
+// Comptime dispatch for dynamic parameter counts (pg.zig needs comptime tuples)
+fn execWithParams(conn: *pg.Conn, sql: []const u8, values: []const []const u8) ?*pg.Result {
+    return switch (values.len) {
+        0 => conn.queryOpts(sql, .{}, .{ .column_names = true }) catch return null,
+        1 => conn.queryOpts(sql, .{values[0]}, .{ .column_names = true }) catch return null,
+        2 => conn.queryOpts(sql, .{ values[0], values[1] }, .{ .column_names = true }) catch return null,
+        3 => conn.queryOpts(sql, .{ values[0], values[1], values[2] }, .{ .column_names = true }) catch return null,
+        4 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3] }, .{ .column_names = true }) catch return null,
+        5 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3], values[4] }, .{ .column_names = true }) catch return null,
+        6 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3], values[4], values[5] }, .{ .column_names = true }) catch return null,
+        7 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3], values[4], values[5], values[6] }, .{ .column_names = true }) catch return null,
+        8 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7] }, .{ .column_names = true }) catch return null,
+        else => null,
+    };
+}
+
+// ── Python C API functions ───────────────────────────────────────────────────
+
+pub fn db_configure(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var conn_str: [*c]const u8 = null;
+    var pool_size: c_int = 16;
+    if (c.PyArg_ParseTuple(args, "si", &conn_str, &pool_size) == 0) return null;
+
+    const uri_str = std.mem.span(conn_str);
+    const size: u16 = if (pool_size > 0 and pool_size <= 128) @intCast(pool_size) else 16;
+
+    // Parse postgres://user:pass@host:port/database
+    const uri = std.Uri.parse(uri_str) catch {
+        py.setError("Invalid connection string: {s}", .{uri_str});
+        return null;
+    };
+
+    // Extract host string from URI component
+    const host_str: []const u8 = if (uri.host) |h| switch (h) {
+        .raw => |r| r,
+        .percent_encoded => |r| r,
+    } else "127.0.0.1";
+
+    const user_str: []const u8 = if (uri.user) |u| switch (u) {
+        .raw => |r| r,
+        .percent_encoded => |r| r,
+    } else "postgres";
+
+    const db_name: []const u8 = if (uri.path.raw.len > 1) uri.path.raw[1..] else "postgres";
+
+    const pw_str: ?[]const u8 = if (uri.password) |p| switch (p) {
+        .raw => |r| r,
+        .percent_encoded => |r| r,
+    } else null;
+
+    db_pool = pg.Pool.init(allocator, .{
+        .size = size,
+        .connect = .{
+            .port = uri.port,
+            .host = host_str,
+        },
+        .auth = .{
+            .username = user_str,
+            .database = db_name,
+            .password = pw_str,
+        },
+    }) catch {
+        py.setError("Failed to connect to database: {s}", .{uri_str});
+        return null;
+    };
+
+    std.debug.print("[DB] Pool initialized: {d} connections to {s}\n", .{ size, uri_str });
+    return py.pyNone();
+}
+
+pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var method_c: [*c]const u8 = null;
+    var path_c: [*c]const u8 = null;
+    var op_c: [*c]const u8 = null;
+    var table_c: [*c]const u8 = null;
+    var pk_col_c: [*c]const u8 = null;
+    var pk_param_c: [*c]const u8 = null;
+    var columns_c: [*c]const u8 = null; // comma-separated column names
+
+    if (c.PyArg_ParseTuple(args, "sssssss", &method_c, &path_c, &op_c, &table_c, &pk_col_c, &pk_param_c, &columns_c) == 0) return null;
+
+    const method_s = std.mem.span(method_c);
+    const path_s = std.mem.span(path_c);
+    const op_s = std.mem.span(op_c);
+    const table_s = std.mem.span(table_c);
+    const pk_col_s = std.mem.span(pk_col_c);
+    const pk_param_s = std.mem.span(pk_param_c);
+    const columns_s = std.mem.span(columns_c);
+
+    // Validate table name (SQL injection prevention)
+    if (!isValidIdentifier(table_s)) {
+        py.setError("Invalid table name: {s}", .{table_s});
+        return null;
+    }
+
+    // Parse operation
+    const op: DbOp = if (std.mem.eql(u8, op_s, "select_one"))
+        .select_one
+    else if (std.mem.eql(u8, op_s, "select_list"))
+        .select_list
+    else if (std.mem.eql(u8, op_s, "insert"))
+        .insert
+    else if (std.mem.eql(u8, op_s, "delete"))
+        .delete
+    else {
+        py.setError("Invalid db op: {s}", .{op_s});
+        return null;
+    };
+
+    // Parse column names
+    var cols: [16][]const u8 = undefined;
+    var ncols: usize = 0;
+    if (columns_s.len > 0) {
+        var col_iter = std.mem.splitScalar(u8, columns_s, ',');
+        while (col_iter.next()) |col| {
+            if (ncols >= 16) break;
+            const trimmed = std.mem.trim(u8, col, " ");
+            if (!isValidIdentifier(trimmed)) {
+                py.setError("Invalid column name: {s}", .{trimmed});
+                return null;
+            }
+            cols[ncols] = allocator.dupe(u8, trimmed) catch return null;
+            ncols += 1;
+        }
+    }
+
+    const columns_owned = allocator.dupe([]const u8, cols[0..ncols]) catch return null;
+    const pk_col = if (pk_col_s.len > 0) allocator.dupe(u8, pk_col_s) catch return null else null;
+    const pk_param = if (pk_param_s.len > 0) allocator.dupe(u8, pk_param_s) catch return null else null;
+    const table = allocator.dupe(u8, table_s) catch return null;
+
+    const entry = DbRouteEntry{
+        .op = op,
+        .table = table,
+        .columns = columns_owned,
+        .pk_column = pk_col,
+        .pk_param = pk_param,
+        .select_sql = if (pk_col) |pk| buildSelectOneSql(table, pk) else buildSelectListSql(table),
+        .insert_sql = if (ncols > 0) buildInsertSql(table, columns_owned) else "",
+        .delete_sql = if (pk_col) |pk| buildDeleteSql(table, pk) else "",
+        .schema = null, // TODO: wire dhi schema
+    };
+
+    const key = std.fmt.allocPrint(allocator, "{s} {s}", .{ method_s, path_s }) catch return null;
+    getDbRoutes().put(key, entry) catch return null;
+
+    // Register in router
+    const rt = @import("server.zig").getRouter();
+    rt.addRoute(method_s, path_s, key) catch return null;
+
+    std.debug.print("[DB] Registered: {s} {s} -> {s}.{s} ({s})\n", .{ method_s, path_s, table_s, if (pk_col) |pk| pk else "*", op_s });
+    return py.pyNone();
+}
