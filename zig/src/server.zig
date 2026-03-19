@@ -316,6 +316,7 @@ pub fn server_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.Py
     getRoutes().put(key, .{
         .handler = handler.?,
         .handler_type = "enhanced",
+        .handler_tag = .enhanced,
         .param_types_json = "{}",
         .original_handler = null,
         .model_param_name = null,
@@ -397,6 +398,7 @@ pub fn server_add_route_model(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) 
     getRoutes().put(key, .{
         .handler = handler.?,
         .handler_type = "model_sync",
+        .handler_tag = .model_sync,
         .param_types_json = "{}",
         .original_handler = orig,
         .model_param_name = std.mem.span(param_name),
@@ -429,6 +431,7 @@ pub fn server_add_route_model_validated(_: ?*c.PyObject, args: ?*c.PyObject) cal
     getRoutes().put(key, .{
         .handler = handler.?,
         .handler_type = "model_sync",
+        .handler_tag = .model_sync,
         .param_types_json = "{}",
         .original_handler = orig,
         .model_param_name = std.mem.span(param_name),
