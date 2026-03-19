@@ -199,10 +199,12 @@ const StaticRouteEntry = struct {
 var routes: ?std.StringHashMap(HandlerEntry) = null;
 var native_routes: ?std.StringHashMap(NativeHandlerEntry) = null;
 var static_routes: ?std.StringHashMap(StaticRouteEntry) = null;
+var response_cache: ?std.StringHashMap([]const u8) = null; // pre-rendered responses for noargs handlers
 var model_schemas: ?std.StringHashMap(dhi.ModelSchema) = null;
 var router: ?router_mod.Router = null;
 var server_host: []const u8 = "127.0.0.1";
 var server_port: u16 = 8000;
+var cache_noargs_responses: bool = false; // opt-in via server_enable_response_cache
 
 // Interpreter reference captured before releasing the GIL at server start.
 // Workers use this to create their own PyThreadState rather than calling
@@ -228,6 +230,13 @@ fn getStaticRoutes() *std.StringHashMap(StaticRouteEntry) {
         static_routes = std.StringHashMap(StaticRouteEntry).init(allocator);
     }
     return &static_routes.?;
+}
+
+fn getResponseCache() *std.StringHashMap([]const u8) {
+    if (response_cache == null) {
+        response_cache = std.StringHashMap([]const u8).init(allocator);
+    }
+    return &response_cache.?;
 }
 
 fn getModelSchemas() *std.StringHashMap(dhi.ModelSchema) {
@@ -602,6 +611,25 @@ pub fn server_add_middleware(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.
     return py.pyNone();
 }
 
+// ── Response cache for noargs handlers ──────────────────────────────────────
+// After the first Python call, the pre-rendered response bytes are cached.
+// Subsequent calls serve from cache — zero Python, zero GIL, single writeAll.
+
+pub fn server_enable_response_cache(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    cache_noargs_responses = true;
+    std.debug.print("[CACHE] Response caching enabled for noargs handlers\n", .{});
+    return py.pyNone();
+}
+
+/// Pre-render a full HTTP response into a heap-allocated buffer.
+fn renderResponse(status: u16, content_type: []const u8, body: []const u8) ?[]const u8 {
+    const cors = cors_headers;
+    return std.fmt.allocPrint(allocator,
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive{s}\r\n\r\n{s}",
+        .{ status, statusText(status), content_type, body.len, cors, body },
+    ) catch null;
+}
+
 // ── run() – start the HTTP server ──
 
 // ── Thread pool for connection handling ─────────────────────────────────────
@@ -827,11 +855,17 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     };
 
     // ── Ultra-fast path: simple handlers that don't need headers or body ──
-    // simple_sync_noargs and simple_sync only need method/path/query_string/params,
-    // all of which come from the first line + route match. Skip parseHeaders entirely.
     switch (entry.handler_tag) {
         .simple_sync_noargs => {
-            callPythonNoArgs(tstate, entry, stream);
+            if (cache_noargs_responses) {
+                if (getResponseCache().get(match.handler_key)) |cached| {
+                    stream.writeAll(cached) catch return;
+                    return;
+                }
+                callPythonNoArgsCaching(tstate, entry, stream, match.handler_key);
+            } else {
+                callPythonNoArgs(tstate, entry, stream);
+            }
             return;
         },
         .simple_sync => {
@@ -1067,6 +1101,51 @@ fn callPythonNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.net.St
     };
     defer c.Py_DecRef(result);
     sendTupleResponse(stream, result);
+}
+
+/// Like callPythonNoArgs but caches the pre-rendered response for subsequent calls.
+fn callPythonNoArgsCaching(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.net.Stream, handler_key: []const u8) void {
+    py.PyEval_AcquireThread(tstate);
+    defer py.PyEval_ReleaseThread(tstate);
+
+    const result = py.PyObject_CallNoArgs(entry.handler) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(result);
+
+    // Extract tuple (status, content_type, body) and cache pre-rendered response
+    const sc_obj = py.PyTuple_GetItem(result, 0) orelse return;
+    const ct_obj = py.PyTuple_GetItem(result, 1) orelse return;
+    const body_obj = py.PyTuple_GetItem(result, 2) orelse return;
+
+    const status_code: u16 = @intCast(c.PyLong_AsLong(sc_obj));
+    const ct_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(ct_obj) orelse "application/json";
+    const content_type = std.mem.span(ct_cstr);
+
+    var body_slice: []const u8 = "";
+    if (c.PyUnicode_Check(body_obj) != 0) {
+        if (c.PyUnicode_AsUTF8(body_obj)) |cs| body_slice = std.mem.span(cs);
+    } else if (c.PyBytes_Check(body_obj) != 0) {
+        var size: c.Py_ssize_t = 0;
+        var buf: [*c]u8 = undefined;
+        if (c.PyBytes_AsStringAndSize(body_obj, @ptrCast(&buf), &size) == 0) {
+            body_slice = buf[0..@intCast(size)];
+        }
+    }
+
+    // Send response now
+    sendResponse(stream, status_code, content_type, body_slice);
+
+    // Cache the pre-rendered response for future calls (key is already owned by routes)
+    if (renderResponse(status_code, content_type, body_slice)) |rendered| {
+        const key_dupe = allocator.dupe(u8, handler_key) catch return;
+        getResponseCache().put(key_dupe, rendered) catch {
+            allocator.free(rendered);
+            allocator.free(key_dupe);
+        };
+    }
 }
 
 /// Fast path for simple_sync handlers with 1+ params.

@@ -451,6 +451,10 @@ class ZigIntegratedTurboAPI(TurboAPI):
             for method, path, status, ct, body in getattr(self, "_static_routes", []):
                 self.zig_server.add_static_route(method, path, status, ct, body)
 
+            # Enable response caching for noargs handlers (auto-cache after first call)
+            if hasattr(self.zig_server, "enable_response_cache"):
+                self.zig_server.enable_response_cache()
+
             native_count = len(getattr(self, "_native_routes", []))
             static_count = len(getattr(self, "_static_routes", []))
             py_count = len(self.registry.get_routes())
