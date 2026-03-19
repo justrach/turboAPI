@@ -67,7 +67,16 @@ jobs:
           python -m build --wheel --outdir dist-tmp/
           # Re-tag as platform-specific (contains compiled .so)
           PYTAG=$(python -c "import sys; ft='t' if hasattr(sys,'_is_gil_enabled') and not sys._is_gil_enabled() else ''; print(f'cp{sys.version_info.major}{sys.version_info.minor}{ft}')")
-          PLAT=$(python -c "import sysconfig; print(sysconfig.get_platform().replace('-','_').replace('.','_'))")
+          PLAT=$(python -c "
+          import sysconfig, platform
+          p = sysconfig.get_platform().replace('-','_').replace('.','_')
+          # PyPI requires manylinux tag for Linux wheels
+          if platform.system() == 'Linux':
+              import struct
+              arch = platform.machine()
+              p = f'manylinux_2_17_{arch}.manylinux2014_{arch}'
+          print(p)
+          ")
           python -m wheel tags --python-tag=$PYTAG --abi-tag=$PYTAG --platform-tag=$PLAT --remove dist-tmp/*.whl
           mkdir -p dist && mv dist-tmp/*.whl dist/
 
