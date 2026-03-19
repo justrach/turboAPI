@@ -49,13 +49,13 @@ jobs:
       - name: Install Python deps
         run: |
           pip install -e .
-          pip install fastapi uvicorn sqlalchemy "psycopg[binary]" requests
+          pip install fastapi uvicorn sqlalchemy psycopg2-binary requests
 
       - name: Seed database
         run: |
           python -c "
-          import psycopg
-          conn = psycopg.connect('postgres://turbo:turbo@127.0.0.1:5432/turbotest')
+          import psycopg2
+          conn = psycopg2.connect('postgres://turbo:turbo@127.0.0.1:5432/turbotest')
           cur = conn.cursor()
           cur.execute('CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, age INTEGER NOT NULL)')
           cur.execute(\"INSERT INTO users (name,email,age) SELECT 'user_' || i, 'user' || i || '@test.com', 20 + (i % 50) FROM generate_series(1, 100) AS s(i)\")
