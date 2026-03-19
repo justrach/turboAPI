@@ -1305,6 +1305,7 @@ fn callPythonVectorcallCaching(
     const argc = entry.param_count;
     var args: [MAX_PARAMS + 1]*c.PyObject = undefined;
     args[0] = entry.handler;
+    var decode_buf: [2048]u8 = undefined;
     var last_filled: usize = 0;
 
     for (entry.param_meta[0..argc], 0..) |pm, i| {
@@ -1323,7 +1324,10 @@ fn callPythonVectorcallCaching(
                     const is_true = std.mem.eql(u8, vs, "true") or std.mem.eql(u8, vs, "1");
                     break :blk if (is_true) py.pyTrue() else py.pyFalse();
                 },
-                .str => py.newString(vs),
+                .str => blk: {
+                    const decoded = percentDecode(vs, &decode_buf);
+                    break :blk c.PyUnicode_FromStringAndSize(decoded.ptr, @intCast(decoded.len));
+                },
             };
             if (py_obj) |obj| {
                 args[i + 1] = obj;
