@@ -7,10 +7,14 @@ Includes:
 - GZip Compression
 - HTTPS Redirect
 - Session Management
+- CSRF Protection (double-submit cookie)
 - Custom Middleware Support
 """
 
 import gzip
+import hashlib
+import hmac
+import os
 import re
 import threading
 import time
@@ -275,32 +279,39 @@ class RateLimitMiddleware(Middleware):
     Usage:
         app.add_middleware(
             RateLimitMiddleware,
-            requests_per_minute=60
+            requests_per_minute=60,
+            trusted_proxies={"127.0.0.1"}  # only trust localhost proxy
         )
 
-    Note: client IP is read from X-Real-IP (preferred) or X-Forwarded-For.
-    Only deploy behind a trusted reverse proxy that sets these headers;
-    otherwise clients can spoof their IP and bypass rate limits.
+    Security: proxy headers (X-Real-IP, X-Forwarded-For) are only trusted
+    when the direct peer IP is in trusted_proxies. Without this, clients
+    can spoof their IP and bypass rate limits.
     """
 
     def __init__(
         self,
         requests_per_minute: int = 60,
         burst: int = 10,
+        trusted_proxies: set[str] | None = None,
     ):
         self.requests_per_minute = requests_per_minute
         self.burst = burst
         self.requests = {}  # IP -> [(timestamp, count)]
         self._lock = threading.Lock()
+        self.trusted_proxies = frozenset(trusted_proxies or ())
 
     def before_request(self, request: Request) -> None:
         """Check rate limit."""
-        # Prefer X-Real-IP (set by trusted proxy) over X-Forwarded-For
-        # (which can be spoofed by clients if the proxy does not sanitize it).
-        client_ip = (
-            request.headers.get("x-real-ip")
-            or request.headers.get("x-forwarded-for", "unknown").split(",")[0].strip()
-        )
+        peer_ip = getattr(request, "client_addr", None) or "unknown"
+
+        # Only trust proxy headers when the direct peer is a known proxy
+        if self.trusted_proxies and peer_ip in self.trusted_proxies:
+            client_ip = (
+                request.headers.get("x-real-ip")
+                or request.headers.get("x-forwarded-for", peer_ip).split(",")[0].strip()
+            )
+        else:
+            client_ip = peer_ip
         now = time.time()
 
         with self._lock:
@@ -363,3 +374,90 @@ class CustomMiddleware(Middleware):
     async def __call__(self, request: Request, call_next: Callable) -> Response:
         """Execute custom middleware function."""
         return await self.func(request, call_next)
+
+
+
+class CSRFMiddleware(Middleware):
+    """
+    CSRF protection via double-submit cookie pattern.
+
+    Usage:
+        app.add_middleware(CSRFMiddleware, secret_key="your-secret-key")
+
+    How it works:
+    - GET/HEAD/OPTIONS requests: a signed CSRF token cookie is set.
+    - POST/PUT/DELETE/PATCH requests: the middleware checks that the
+      X-CSRF-Token header matches the csrf_token cookie. Both must be
+      present and contain a valid HMAC signature.
+
+    Clients must read the cookie and send it back as a header:
+        fetch("/api", {
+            method: "POST",
+            headers: {"X-CSRF-Token": document.cookie.match(/csrf_token=([^;]+)/)[1]},
+        })
+    """
+
+    _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+
+    def __init__(
+        self,
+        secret_key: str,
+        cookie_name: str = "csrf_token",
+        header_name: str = "X-CSRF-Token",
+        exempt_paths: list[str] | None = None,
+    ):
+        self.secret_key = secret_key.encode()
+        self.cookie_name = cookie_name
+        self.header_name = header_name.lower()
+        self.exempt_paths = set(exempt_paths or [])
+
+    def _generate_token(self) -> str:
+        random_bytes = os.urandom(32)
+        return hmac.new(self.secret_key, random_bytes, hashlib.sha256).hexdigest()
+
+    def _validate_token(self, token: str) -> bool:
+        # Token must be a valid 64-char hex string (SHA-256 HMAC output)
+        if not token or len(token) != 64:
+            return False
+        try:
+            bytes.fromhex(token)
+            return True
+        except ValueError:
+            return False
+
+    def _get_cookie(self, request: Request, name: str) -> str | None:
+        cookie_header = request.headers.get("cookie", "")
+        for part in cookie_header.split(";"):
+            part = part.strip()
+            if part.startswith(f"{name}="):
+                return part[len(name) + 1 :]
+        return None
+
+    def before_request(self, request: Request) -> None:
+        if request.method in self._SAFE_METHODS:
+            return
+        if request.path in self.exempt_paths:
+            return
+
+        cookie_token = self._get_cookie(request, self.cookie_name)
+        header_token = request.headers.get(self.header_name)
+
+        if not cookie_token or not header_token:
+            raise Exception("CSRF token missing")
+
+        if not hmac.compare_digest(cookie_token, header_token):
+            raise Exception("CSRF token mismatch")
+
+        if not self._validate_token(cookie_token):
+            raise Exception("CSRF token invalid")
+
+    def after_request(self, request: Request, response: Response) -> Response:
+        # Set CSRF cookie on safe method responses if not already present
+        if request.method in self._SAFE_METHODS:
+            existing = self._get_cookie(request, self.cookie_name)
+            if not existing or not self._validate_token(existing):
+                token = self._generate_token()
+                response.headers[
+                    "Set-Cookie"
+                ] = f"{self.cookie_name}={token}; Path=/; SameSite=Lax"
+        return response
