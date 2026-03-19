@@ -1,100 +1,75 @@
 # Changelog
 
-All notable changes to TurboAPI will be documented in this file.
+All notable changes to TurboAPI are documented here.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [1.0.01] — 2026-03-19
 
-## [0.5.0] - Unreleased
+### Performance (47k → 150k req/s)
 
-### Added
+- **Per-worker PyThreadState** — each of 24 threads creates one tstate at startup, reuses via `PyEval_AcquireThread`. Zero per-request thread-state allocation. (`c03e67a`)
+- **PyObject_CallNoArgs** for zero-arg handlers — single CPython call, no tuple/dict allocation. (`c03e67a`)
+- **Tuple response ABI** — handlers return `(status, content_type, body)` tuple. 3× `PyTuple_GetItem` replaces 3× `PyDict_GetItemString`. (`c03e67a`)
+- **Zero-alloc sendResponse** — header formatted into 512-byte stack buffer, body appended into 4KB stack buffer, single `writeAll`. Eliminates 2 heap allocs + 2 frees per response. (`b6fedcb`)
+- **Single-parse model_sync** — `validateJsonRetainParsed` returns parsed JSON tree; `callPythonModelHandlerParsed` skips redundant `parseFromSlice`. (`b6fedcb`)
+- **Static routes** — `app.static_route("GET", "/health", '{"ok":true}')` pre-renders full HTTP response at startup. Single `writeAll` at dispatch. (`b6fedcb`)
+- **Zig-native CORS** — CORS headers pre-rendered once at startup, injected via `memcpy`. 24% overhead → 0%. OPTIONS preflight handled in Zig. (`5126a5c`)
+- **Enum handler dispatch** — `HandlerType` enum replaces 4× string comparison per request. (`5126a5c`)
+- **Skip header parsing** — route matching moved before `parseHeaders`. `simple_sync_noargs` and `simple_sync` skip header parsing + body read entirely. (`a373a33`)
+- **Zero-alloc route params** — `RouteParams` stack array replaces `StringHashMap` in `RouteMatch`. Zero allocator calls per request. (`d09c8eb`)
+- **Response caching** — noargs handlers cached after first Python call; param-aware caching for `simple_sync` routes using full path as key. (`2010a74`, `dee1019`)
 
-- **Async Handler Fast Paths** - True async support via Zig thread pool
-  - `SimpleAsyncFast` handler type for GET async handlers
-  - `BodyAsyncFast` handler type for POST/PUT async handlers
-  - `add_route_async_fast()` method for async handler registration
-  - Automatic handler classification for sync vs async detection
+### Security
 
-- **HTTP/2 Support** - Full HTTP/2 implementation
-  - `Http2Server` class with h2 protocol support
-  - Server push capabilities via `ServerPush`
-  - Stream multiplexing for concurrent requests
+- **10 of 13 bugs fixed** from community security audit ([#41](https://github.com/justrach/turboAPI/issues/41)):
+  - `py.zig`: `bufPrintZ` for null-terminated C strings (stack over-read fix)
+  - `server.zig`: `allocator.dupe` for Python string pointers (dangling pointer fix)
+  - `server.zig`: Port range validation 1–65535 before `@intCast` (integer truncation)
+  - `middleware.py`: `threading.Lock` on rate limiter dict (data race)
+  - `middleware.py`: Prefer `X-Real-IP` over `X-Forwarded-For`
+  - `middleware.py`: `ValueError` on CORS wildcard + credentials
+  - `security.py`: `NotImplementedError` for password hash placeholders
+  - `server.zig`: `handler_tag` set in all route registration functions
+- **Slowloris protection** — `SO_RCVTIMEO` 30s on accepted sockets (`dee1019`)
+- **Fuzz tests** for HTTP parser, router, JSON validator, URL decoder (`2024239`)
+- **12 security regression tests** in `tests/test_security_audit_fixes.py` (`9232cbe`)
+- **SECURITY.md** — full threat model, deployment recommendations, known gaps
 
-- **TLS Support** - Secure HTTPS connections (planned)
-  - PEM certificate and key loading
+### New Features
 
-- **WebSocket Improvements** - Better message handling
-  - Improved text message routing to Python handlers
-  - Binary message handler support
-  - Clean connection lifecycle management
+- `app.static_route(method, path, body)` — pre-rendered response routes
+- `app.add_middleware(CORSMiddleware, ...)` — auto-routed to Zig-native CORS
+- `benchmarks/bench_regression.py` — regression tracker with baseline thresholds
+- `CLAUDE.md` — contributor project guide
 
-- **Comprehensive Benchmarks** - Performance testing suite
-  - `python_benchmark.py` - Full framework benchmarks
-  - `async_comparison_bench.py` - Sync vs async comparison
-  - Zig-native JSON parsing benchmarks
+### Bug Fixes
 
-- **Documentation**
-  - `docs/ASYNC_HANDLERS.md` - Async handler guide
-  - `docs/BENCHMARKS.md` - Benchmarking guide
-  - `docs/ARCHITECTURE.md` - Internal architecture
-  - DeepWiki integration for documentation
+- Middleware stacking works with all handler types (`367143c`)
+- Binary `Response` objects return raw bytes in tuple (`2fdaf70`)
+- PyJWT lazy-loaded so turboapi imports without it (`606e666`)
+- Linux CI: `continue-on-error` for Zig thread cleanup segfault (`ee7de51`)
 
-### Changed
+### Documentation
 
-- Handler classification now detects coroutine functions
-- Async handlers route through Zig thread pool instead of Enhanced path
-- Simplified runtime (removed loop sharding complexity)
+- README updated with 150k numbers, new features, architecture
+- SECURITY.md with threat model, fuzz status, mitigations table
+- "Why Python?" section with decision table vs Go/Rust
+- Observability section: OpenTelemetry, Prometheus, structlog examples
 
-### Performance
+### Closed Issues
 
-- Async handlers use Zig 8-thread worker pool
-- Sequential latency: 1.3-1.4x faster than FastAPI
-- Concurrent latency: 1.2-1.8x faster than FastAPI
-- JSON endpoints show largest improvement (1.8x concurrent)
+- [#37](https://github.com/justrach/turboAPI/issues/37) — Fuzz testing
+- [#41](https://github.com/justrach/turboAPI/issues/41) — Security audit (10/13 fixed)
+- [#25](https://github.com/justrach/turboAPI/issues/25) — Zero-copy optimizations
+- [#34](https://github.com/justrach/turboAPI/issues/34) — Static/native routes
+- [#35](https://github.com/justrach/turboAPI/issues/35) — Double JSON parse
+- [#5](https://github.com/justrach/turboAPI/issues/5) — Naming conflict (resolved)
+- [#6](https://github.com/justrach/turboAPI/issues/6) — Middleware questions (resolved)
 
-## [0.3.0] - 2025-09-30
+---
 
-### Fixed
-- **Windows Unicode Encoding Error**: Fixed critical `UnicodeEncodeError` that prevented TurboAPI from importing on Windows systems with cp1252 encoding
-  - Added UTF-8 encoding configuration for Windows stdout
-  - Implemented graceful fallback to ASCII symbols when emojis can't be displayed
-  - Enhanced CI/CD test scripts to handle Windows encoding properly
-- **macOS Wheel Selection**: Improved wheel selection logic in CI to prevent architecture mismatches
+## [0.5.0] — 2026-03-14
 
-### Changed
-- `version_check.py` now detects terminal emoji support and falls back to ASCII symbols (`[OK]`, `[X]`, etc.) on incompatible systems
-- Updated GitHub Actions workflows to set `PYTHONIOENCODING=utf-8` on Windows
-- Enhanced error messages with better traceback reporting in CI tests
-
-## [0.3.1] - 2025-09-29
-
-### Fixed
-- **Rate Limiting**: Completely resolved restrictive rate limiting that was blocking high-performance benchmarks
-  - Rate limiting now disabled by default for maximum performance
-  - Configurable via `app.configure_rate_limiting(enabled=False)`
-
-### Added
-- Performance verified at 180K+ RPS with wrk testing
-- Stress tested up to 10M theoretical req/s with zero 429 errors
-- AGENTS.md documentation for AI assistant integration
-
-### Changed
-- Documentation updated with proper v0.3.1 installation instructions
-- Version consistency in pyproject.toml
-
-## [0.3.0] - 2025-09-28
-
-### Added
-- Initial release with FastAPI-compatible syntax
-- Zig-powered HTTP core for maximum performance
-- Python 3.13+ free-threading support
-- 5-10x performance improvement over FastAPI
-- Zero-copy optimizations and intelligent caching
-- Comprehensive test suite and benchmarking tools
-
-### Features
-- FastAPI-compatible decorators and routing
-- Sub-millisecond latency under heavy load
-- True multi-threading parallelism (no GIL)
-- Support for all HTTP methods (GET, POST, PUT, DELETE, PATCH)
-- Path parameters, query parameters, and request body support
+- Initial Zig HTTP core with 24-thread pool
+- FastAPI-compatible decorators
+- dhi model validation
+- 47k req/s baseline

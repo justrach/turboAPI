@@ -12,6 +12,7 @@ Includes:
 
 import gzip
 import re
+import threading
 import time
 from collections.abc import Callable
 
@@ -60,7 +61,15 @@ class CORSMiddleware(Middleware):
         expose_headers: list[str] = None,
         max_age: int = 600,
     ):
-        self.allow_origins = allow_origins or ["*"]
+        origins = allow_origins or ["*"]
+        # Wildcard origin + credentials is forbidden by the CORS spec: browsers
+        # will reject the response, and some will silently leak credentials.
+        if allow_credentials and "*" in origins:
+            raise ValueError(
+                "CORSMiddleware: allow_credentials=True is incompatible with "
+                "allow_origins=['*']. Specify explicit origins instead."
+            )
+        self.allow_origins = origins
         self.allow_methods = allow_methods or [
             "GET",
             "POST",
@@ -106,7 +115,6 @@ class CORSMiddleware(Middleware):
         response.set_header("Access-Control-Max-Age", str(self.max_age))
 
         return response
-
 
 class TrustedHostMiddleware(Middleware):
     """
@@ -269,6 +277,10 @@ class RateLimitMiddleware(Middleware):
             RateLimitMiddleware,
             requests_per_minute=60
         )
+
+    Note: client IP is read from X-Real-IP (preferred) or X-Forwarded-For.
+    Only deploy behind a trusted reverse proxy that sets these headers;
+    otherwise clients can spoof their IP and bypass rate limits.
     """
 
     def __init__(
@@ -279,30 +291,35 @@ class RateLimitMiddleware(Middleware):
         self.requests_per_minute = requests_per_minute
         self.burst = burst
         self.requests = {}  # IP -> [(timestamp, count)]
+        self._lock = threading.Lock()
 
     def before_request(self, request: Request) -> None:
         """Check rate limit."""
-        client_ip = request.headers.get("x-forwarded-for", "unknown").split(",")[0].strip()
+        # Prefer X-Real-IP (set by trusted proxy) over X-Forwarded-For
+        # (which can be spoofed by clients if the proxy does not sanitize it).
+        client_ip = (
+            request.headers.get("x-real-ip")
+            or request.headers.get("x-forwarded-for", "unknown").split(",")[0].strip()
+        )
         now = time.time()
 
-        # Clean old requests
-        if client_ip in self.requests:
-            self.requests[client_ip] = [
-                (ts, count) for ts, count in self.requests[client_ip] if now - ts < 60
-            ]
+        with self._lock:
+            # Clean old requests
+            if client_ip in self.requests:
+                self.requests[client_ip] = [
+                    (ts, count) for ts, count in self.requests[client_ip] if now - ts < 60
+                ]
 
-        # Count requests in last minute
-        if client_ip not in self.requests:
-            self.requests[client_ip] = []
+            if client_ip not in self.requests:
+                self.requests[client_ip] = []
 
-        request_count = sum(count for _, count in self.requests[client_ip])
+            request_count = sum(count for _, count in self.requests[client_ip])
 
-        if request_count >= self.requests_per_minute:
-            raise Exception("Rate limit exceeded")
+            if request_count >= self.requests_per_minute:
+                raise Exception("Rate limit exceeded")
 
-        # Add this request
-        self.requests[client_ip].append((now, 1))
-
+            # Add this request
+            self.requests[client_ip].append((now, 1))
 
 class LoggingMiddleware(Middleware):
     """

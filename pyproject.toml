@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "turboapi"
-version = "1.0.0a1"
-description = "FastAPI-compatible web framework with Zig HTTP core — 7x faster with Python 3.14 free-threading"
+version = "1.0.01"
+description = "FastAPI-compatible web framework with Zig HTTP core — 20x faster with Python 3.14 free-threading"
 readme = "README.md"
 requires-python = ">=3.14"
 license = {text = "MIT"}
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["web", "framework", "http", "server", "zig", "performance", "fastapi", "free-threading", "no-gil"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -42,6 +42,15 @@ dev = [
 benchmark = [
     "matplotlib>=3.5.0",
     "requests>=2.25.0",
+]
+jwt = [
+    "PyJWT>=2.8.0",
+    "cryptography>=41.0.0",
+]
+auth = [
+    "PyJWT>=2.8.0",
+    "cryptography>=41.0.0",
+    "passlib[bcrypt]>=1.7.4",
 ]
 
 [tool.setuptools.packages.find]

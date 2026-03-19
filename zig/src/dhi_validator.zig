@@ -51,6 +51,12 @@ pub const ValidationResult = union(enum) {
     err: ValidationError,
 };
 
+/// Result that retains the parsed JSON tree on success (caller must deinit).
+pub const ValidateParseResult = union(enum) {
+    ok: std.json.Parsed(std.json.Value),
+    err: ValidationError,
+};
+
 pub const ValidationError = struct {
     status_code: u16,
     body: []const u8,
@@ -70,6 +76,23 @@ pub fn validateJson(json_bytes: []const u8, schema: *const ModelSchema) Validati
     defer parsed.deinit();
 
     return validateObject(parsed.value, schema, "body");
+}
+
+/// Validate and return the parsed JSON tree — avoids a second parse in model_sync.
+/// On success the caller owns the Parsed value and must call .deinit().
+pub fn validateJsonRetainParsed(json_bytes: []const u8, schema: *const ModelSchema) ValidateParseResult {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch {
+        return .{ .err = makeError(422, "Invalid JSON") };
+    };
+
+    const vr = validateObject(parsed.value, schema, "body");
+    switch (vr) {
+        .ok => return .{ .ok = parsed },
+        .err => |e| {
+            parsed.deinit();
+            return .{ .err = e };
+        },
+    }
 }
 
 fn validateObject(value: std.json.Value, schema: *const ModelSchema, path: []const u8) ValidationResult {
@@ -356,4 +379,76 @@ fn parseFieldType(s: []const u8) FieldType {
     if (std.mem.eql(u8, s, "object") or std.mem.eql(u8, s, "dict")) return .object;
     if (std.mem.eql(u8, s, "union")) return .union_type;
     return .any;
+}
+
+// ── Fuzz tests ───────────────────────────────────────────────────────────────
+// Run: zig build fuzz-json  (then execute the binary with --fuzz)
+
+const fuzz_schema = ModelSchema{
+    .name = "FuzzModel",
+    .fields = &[_]FieldConstraint{
+        .{ .name = "name",  .field_type = .string,  .required = true,  .min_length = 1, .max_length = 100 },
+        .{ .name = "age",   .field_type = .integer,  .required = true,  .gt = 0, .lt = 200 },
+        .{ .name = "score", .field_type = .float,    .required = false },
+        .{ .name = "tags",  .field_type = .array,    .required = false, .items_type = .string },
+        .{ .name = "meta",  .field_type = .object,   .required = false },
+        .{ .name = "flag",  .field_type = .boolean,  .required = false },
+    },
+};
+
+fn fuzz_validateJson(_: void, input: []const u8) anyerror!void {
+    const result = validateJson(input, &fuzz_schema);
+    switch (result) {
+        .ok => {},
+        .err => |e| {
+            defer e.deinit();
+            // Must always be a client-error status, never 500
+            try std.testing.expect(e.status_code == 400 or e.status_code == 422);
+            // Error body must be non-empty
+            try std.testing.expect(e.body.len > 0);
+        },
+    }
+}
+
+test "fuzz: validateJson — never panics, always ok or 4xx" {
+    try std.testing.fuzz({}, fuzz_validateJson, .{ .corpus = &.{
+        // Happy path
+        "{\"name\":\"Alice\",\"age\":30}",
+        // Missing required field
+        "{\"name\":\"Bob\"}",
+        // Wrong types
+        "{\"name\":123,\"age\":\"old\"}",
+        // Null values
+        "{\"name\":null,\"age\":null}",
+        // Empty object
+        "{}",
+        // Empty input
+        "",
+        // Not JSON
+        "hello world",
+        // Deeply nested meta (depth probe)
+        "{\"name\":\"x\",\"age\":1,\"meta\":{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":{}}}}}}}",
+        // Constraint violations
+        "{\"name\":\"\",\"age\":1}",
+        "{\"name\":\"x\",\"age\":-5}",
+        "{\"name\":\"x\",\"age\":999}",
+        // Float in integer field
+        "{\"name\":\"x\",\"age\":1.5}",
+        // Array of mixed types
+        "{\"name\":\"x\",\"age\":1,\"tags\":[1,null,true,\"ok\"]}",
+        // Invalid UTF-8 byte sequence
+        "{\"name\":\"\xFF\xFE\",\"age\":1}",
+        // Unicode name
+        "{\"name\":\"\xE3\x81\x93\xE3\x82\x93\",\"age\":1}",
+        // Very large integer
+        "{\"name\":\"x\",\"age\":99999999999999999999}",
+        // Extra unknown fields (should be ignored / ok)
+        "{\"name\":\"x\",\"age\":1,\"unknown\":\"extra\",\"another\":42}",
+        // JSON array at top level instead of object
+        "[{\"name\":\"x\",\"age\":1}]",
+        // JSON string at top level
+        "\"just a string\"",
+        // Trailing garbage after valid JSON
+        "{\"name\":\"x\",\"age\":1}garbage",
+    }});
 }

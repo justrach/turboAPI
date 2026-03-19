@@ -196,6 +196,9 @@ class Item(BaseModel):
     price: float
     description: Optional[str] = None
 
+# Static route — response pre-rendered at startup, zero Python call at request time
+app.static_route("GET", "/health", '{"status":"ok","engine":"zig-static"}')
+
 @app.get("/")
 def root():
     return {"message": "Hello, World!"}
@@ -232,6 +235,10 @@ class Item(BaseModel):
     name: str
     price: float
     description: Optional[str] = None
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "engine": "fastapi"}
 
 @app.get("/")
 def root():
@@ -275,6 +282,7 @@ def run_benchmarks():
         f.write(FASTAPI_SERVER)
 
     benchmarks = [
+        ("GET /health (static)", "/health", "GET", None),
         ("GET /", "/", "GET", None),
         ("GET /json", "/json", "GET", None),
         ("GET /users/123", "/users/123", "GET", None),
@@ -286,7 +294,7 @@ def run_benchmarks():
     print("\n--- TurboAPI (Zig + Python 3.14 Free-Threading) ---")
     try:
         turbo_proc = start_server(
-            ["python", "/tmp/turboapi_bench.py"],
+            [sys.executable, "/tmp/turboapi_bench.py"],
             8001,
             {"PYTHON_GIL": "0", "TURBO_DISABLE_RATE_LIMITING": "1"},
         )
@@ -362,11 +370,11 @@ def run_benchmarks():
         print(f"  Error: {e}")
 
     # Print comparison table
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 78)
     print("BENCHMARK RESULTS COMPARISON")
-    print("=" * 70)
-    print(f"{'Endpoint':<20} {'TurboAPI':>12} {'FastAPI':>12} {'Speedup':>10}")
-    print("-" * 70)
+    print("=" * 78)
+    print(f"{'Endpoint':<25} {'TurboAPI':>12} {'FastAPI':>12} {'Speedup':>10}")
+    print("-" * 78)
 
     turbo_results = {r.endpoint: r for r in results if r.framework == "TurboAPI"}
     fastapi_results = {r.endpoint: r for r in results if r.framework == "FastAPI"}
@@ -379,21 +387,21 @@ def run_benchmarks():
             speedup = turbo.requests_per_second / fastapi.requests_per_second
             speedups.append(speedup)
             print(
-                f"{name:<20} {turbo.requests_per_second:>10,.0f}/s {fastapi.requests_per_second:>10,.0f}/s {speedup:>9.1f}x"
+                f"{name:<25} {turbo.requests_per_second:>10,.0f}/s {fastapi.requests_per_second:>10,.0f}/s {speedup:>9.1f}x"
             )
         elif turbo:
-            print(f"{name:<20} {turbo.requests_per_second:>10,.0f}/s {'N/A':>12} {'N/A':>10}")
+            print(f"{name:<25} {turbo.requests_per_second:>10,.0f}/s {'N/A':>12} {'N/A':>10}")
 
     if speedups:
         avg_speedup = sum(speedups) / len(speedups)
-        print("-" * 70)
-        print(f"{'AVERAGE SPEEDUP':<20} {'':<12} {'':<12} {avg_speedup:>9.1f}x")
+        print("-" * 78)
+        print(f"{'AVERAGE SPEEDUP':<25} {'':<12} {'':<12} {avg_speedup:>9.1f}x")
 
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 78)
     print("LATENCY COMPARISON (avg / p99)")
-    print("=" * 70)
-    print(f"{'Endpoint':<20} {'TurboAPI':>18} {'FastAPI':>18}")
-    print("-" * 70)
+    print("=" * 78)
+    print(f"{'Endpoint':<25} {'TurboAPI':>20} {'FastAPI':>20}")
+    print("-" * 78)
 
     for name, _, _, _ in benchmarks:
         turbo = turbo_results.get(name)
@@ -401,9 +409,9 @@ def run_benchmarks():
         if turbo and fastapi:
             turbo_lat = f"{turbo.latency_avg_ms:.2f}ms / {turbo.latency_p99_ms:.2f}ms"
             fastapi_lat = f"{fastapi.latency_avg_ms:.2f}ms / {fastapi.latency_p99_ms:.2f}ms"
-            print(f"{name:<20} {turbo_lat:>18} {fastapi_lat:>18}")
+            print(f"{name:<25} {turbo_lat:>20} {fastapi_lat:>20}")
 
-    print("=" * 70)
+    print("=" * 78)
 
     # Return results for README generation
     return results, avg_speedup if speedups else 0
