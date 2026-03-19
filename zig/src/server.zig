@@ -657,9 +657,24 @@ pub fn server_enable_response_cache(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.
 /// Pre-render a full HTTP response into a heap-allocated buffer.
 fn renderResponse(status: u16, content_type: []const u8, body: []const u8) ?[]const u8 {
     const cors = cors_headers;
+    // Note: Date is static for cached responses. TFB just needs the header present.
+    var date_buf: [40]u8 = undefined;
+    const ts = std.time.timestamp();
+    const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(ts) };
+    const ds = es.getDaySeconds();
+    const ed = es.getEpochDay();
+    const yd = ed.calculateYearDay();
+    const md = yd.calculateMonthDay();
+    const di: usize = @intCast(@mod(@as(i32, @intCast(ed.day)) + 3, 7));
+    const dw = [7][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+    const mn = [12][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    const dt = std.fmt.bufPrint(&date_buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+        dw[di], md.day_index + 1, mn[@intFromEnum(md.month) - 1], yd.year,
+        ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
+    }) catch "Thu, 01 Jan 2026 00:00:00 GMT";
     return std.fmt.allocPrint(allocator,
-        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive{s}\r\n\r\n{s}",
-        .{ status, statusText(status), content_type, body.len, cors, body },
+        "HTTP/1.1 {d} {s}\r\nServer: TurboAPI\r\nDate: {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive{s}\r\n\r\n{s}",
+        .{ status, statusText(status), dt, content_type, body.len, cors, body },
     ) catch null;
 }
 
