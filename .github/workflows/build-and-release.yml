@@ -63,16 +63,15 @@ jobs:
 
       - name: Build wheel
         run: |
-          pip install build wheel
-          python -m build --wheel --outdir dist-tmp/
+          pip install build wheel setuptools
+          # --no-isolation so the .so installed by build_turbonet.py is included
+          python -m build --wheel --no-isolation --outdir dist-tmp/
           # Re-tag as platform-specific (contains compiled .so)
           PYTAG=$(python -c "import sys; ft='t' if hasattr(sys,'_is_gil_enabled') and not sys._is_gil_enabled() else ''; print(f'cp{sys.version_info.major}{sys.version_info.minor}{ft}')")
           PLAT=$(python -c "
           import sysconfig, platform
           p = sysconfig.get_platform().replace('-','_').replace('.','_')
-          # PyPI requires manylinux tag for Linux wheels
           if platform.system() == 'Linux':
-              import struct
               arch = platform.machine()
               p = f'manylinux_2_17_{arch}.manylinux2014_{arch}'
           print(p)
