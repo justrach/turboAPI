@@ -58,13 +58,8 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Clone dhi
-        run: git clone --depth 1 https://github.com/justrach/dhi.git /tmp/dhi
-
       - name: Build turbonet extension
         run: python zig/build_turbonet.py --install --release
-        env:
-          DHI_PATH: /tmp/dhi
 
       - name: Build wheel
         run: |
