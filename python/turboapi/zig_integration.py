@@ -381,7 +381,9 @@ class ZigIntegratedTurboAPI(TurboAPI):
     def _initialize_zig_server(self, host: str = "127.0.0.1", port: int = 8000):
         """Initialize the Zig HTTP server with direct integration."""
         if not NATIVE_CORE_AVAILABLE:
-            print("[WARN] Native core not available - cannot initialize server")
+            print("[ERROR] Native Zig backend not available.")
+            print("        Build it first: python zig/build_turbonet.py")
+            print("        Requires: Python 3.14+ and Zig 0.15+")
             return False
 
         try:
@@ -727,6 +729,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
         # Initialize Zig server
         if not self._initialize_zig_server(host, port):
             print(f"{CROSS_MARK} Failed to initialize Zig server")
+            print(f"   Use an ASGI server as fallback: uvicorn main:app --host {host} --port {port}")
             return
 
         # Print integration info

@@ -68,25 +68,6 @@ def main():
            f"-Dpy-include={info['include']}",
            f"-Dpy-libdir={info['libdir']}"]
 
-    # Resolve dhi path: env var > sibling directory > error
-    dhi_path = os.environ.get("DHI_PATH")
-    if not dhi_path:
-        # Check common sibling locations
-        for candidate in [
-            os.path.join(os.path.dirname(project_dir), "dhi"),
-            os.path.join(project_dir, "dhi"),
-            os.path.expanduser("~/dhi"),
-        ]:
-            if os.path.isdir(candidate):
-                dhi_path = candidate
-                break
-    if not dhi_path:
-        print("❌ dhi repository not found. Set DHI_PATH or clone it as a sibling:")
-        print("   git clone https://github.com/justrach/dhi.git ../dhi")
-        sys.exit(1)
-    cmd.append(f"-Ddhi-path={dhi_path}")
-    print(f"📦 dhi: {dhi_path}")
-
     if args.release:
         cmd.append("-Doptimize=ReleaseFast")
 
@@ -109,7 +90,7 @@ def main():
 
     print(f"   Python: {sys.executable}")
     if info["free_threaded"]:
-        print(f"   🧵 Free-threaded build — GIL disabled!")
+        print("   🧵 Free-threaded build — GIL disabled!")
 
 
 if __name__ == "__main__":

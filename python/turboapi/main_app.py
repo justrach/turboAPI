@@ -356,4 +356,142 @@ class TurboAPI(Router):
             if self.shutdown_handlers:
                 asyncio.run(self._run_shutdown_handlers())
 
-            print("[BYE] Server stopped")
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        """ASGI fallback — pure Python, ~100x slower than the Zig native backend.
+
+        Use app.run() with the compiled Zig backend for production performance.
+        This exists so the app is usable via uvicorn/granian before turbonet is built.
+        """
+        import json as _json
+
+        if scope["type"] == "lifespan":
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    if self.startup_handlers:
+                        await self._run_startup_handlers()
+                    await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    if self.shutdown_handlers:
+                        await self._run_shutdown_handlers()
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+
+        if scope["type"] != "http":
+            return
+
+        method = scope["method"]
+        path = scope["path"]
+        query_string = scope.get("query_string", b"").decode("utf-8", errors="replace")
+
+        # Read request body
+        body = b""
+        while True:
+            message = await receive()
+            body += message.get("body", b"")
+            if not message.get("more_body", False):
+                break
+
+        # Build headers dict
+        headers = {}
+        for hdr_name, hdr_val in scope.get("headers", []):
+            headers[hdr_name.decode("latin-1")] = hdr_val.decode("latin-1")
+
+        # Route the request
+        match_result = self.registry.match_route(method, path)
+
+        if not match_result:
+            resp_body = _json.dumps({"detail": "Not Found"}).encode("utf-8")
+            await send({
+                "type": "http.response.start",
+                "status": 404,
+                "headers": [[b"content-type", b"application/json"]],
+            })
+            await send({"type": "http.response.body", "body": resp_body})
+            return
+
+        route, path_params = match_result
+
+        # Prepare call args
+        sig = inspect.signature(route.handler)
+        call_args = {}
+
+        for param_name, param_value in path_params.items():
+            if param_name in sig.parameters:
+                param_def = next((p for p in route.path_params if p.name == param_name), None)
+                if param_def and param_def.type is not str:
+                    try:
+                        param_value = param_def.type(param_value)
+                    except (ValueError, TypeError):
+                        resp_body = _json.dumps({"detail": f"Invalid {param_name}"}).encode("utf-8")
+                        await send({
+                            "type": "http.response.start",
+                            "status": 422,
+                            "headers": [[b"content-type", b"application/json"]],
+                        })
+                        await send({"type": "http.response.body", "body": resp_body})
+                        return
+                call_args[param_name] = param_value
+
+        # Parse query params
+        if query_string:
+            from urllib.parse import parse_qs
+            qs = parse_qs(query_string, keep_blank_values=True)
+            for param_name, param in sig.parameters.items():
+                if param_name not in call_args and param_name in qs:
+                    call_args[param_name] = qs[param_name][0]
+
+        # Parse body for model params
+        if body:
+            try:
+                json_body = _json.loads(body)
+                for param_name, param in sig.parameters.items():
+                    if param_name not in call_args:
+                        ann = param.annotation
+                        if ann != inspect.Parameter.empty and hasattr(ann, "model_validate"):
+                            call_args[param_name] = ann.model_validate(json_body)
+                        elif param_name in (json_body if isinstance(json_body, dict) else {}):
+                            call_args[param_name] = json_body[param_name]
+            except (_json.JSONDecodeError, Exception):
+                pass
+
+        # Call handler
+        try:
+            if asyncio.iscoroutinefunction(route.handler):
+                result = await route.handler(**call_args)
+            else:
+                result = route.handler(**call_args)
+        except Exception as e:
+            resp_body = _json.dumps({"detail": str(e)}).encode("utf-8")
+            await send({
+                "type": "http.response.start",
+                "status": 500,
+                "headers": [[b"content-type", b"application/json"]],
+            })
+            await send({"type": "http.response.body", "body": resp_body})
+            return
+
+        # Serialize response
+        if isinstance(result, dict):
+            resp_body = _json.dumps(result).encode("utf-8")
+            content_type = b"application/json"
+        elif isinstance(result, str):
+            resp_body = result.encode("utf-8")
+            content_type = b"text/plain"
+        elif isinstance(result, bytes):
+            resp_body = result
+            content_type = b"application/octet-stream"
+        else:
+            resp_body = _json.dumps(result).encode("utf-8")
+            content_type = b"application/json"
+
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                [b"content-type", content_type],
+                [b"server", b"TurboAPI"],
+            ],
+        })
+        await send({"type": "http.response.body", "body": resp_body})

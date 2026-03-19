@@ -21,36 +21,22 @@ pub fn build(b: *std.Build) void {
     else
         "python3.13";
 
-    // ── dhi modules ──
-    const dhi_path = b.option([]const u8, "dhi-path", "Path to dhi repository (or set DHI_PATH env)") orelse
-        @panic("pass -Ddhi-path=<path> or set DHI_PATH env var");
-    const dhi_root: std.Build.LazyPath = .{ .cwd_relative = dhi_path };
-
-    const validator_mod = b.createModule(.{
-        .root_source_file = dhi_root.path(b, "src/validator.zig"),
+    // ── dhi modules (fetched via build.zig.zon) ──
+    const dhi_dep = b.dependency("dhi", .{
         .target = target,
         .optimize = optimize,
     });
 
-    const json_validator_mod = b.createModule(.{
-        .root_source_file = dhi_root.path(b, "src/json_validator.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    json_validator_mod.addImport("validator", validator_mod);
+    const validator_mod = dhi_dep.module("validator");
+    const json_validator_mod = dhi_dep.module("json_validator");
+    const model_mod = dhi_dep.module("model");
 
+    // validators_comprehensive isn't exported by dhi — create from dep source
     const validators_comprehensive_mod = b.createModule(.{
-        .root_source_file = dhi_root.path(b, "src/validators_comprehensive.zig"),
+        .root_source_file = dhi_dep.path("src/validators_comprehensive.zig"),
         .target = target,
         .optimize = optimize,
     });
-
-    const model_mod = b.createModule(.{
-        .root_source_file = dhi_root.path(b, "src/model.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    model_mod.addImport("validators_comprehensive", validators_comprehensive_mod);
 
     // ── shared library (turbonet) ──
     const lib = b.addLibrary(.{

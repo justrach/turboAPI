@@ -30,13 +30,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y wrk
 
-      - name: Clone dhi (Zig modules)
-        run: git clone --depth 1 https://github.com/justrach/dhi.git /tmp/dhi
-
       - name: Build turbonet extension
         run: python zig/build_turbonet.py --install
-        env:
-          DHI_PATH: /tmp/dhi
 
       - name: Install packages
         run: |
@@ -50,6 +45,7 @@ jobs:
 
       - name: Comment PR with results
         if: github.event_name == 'pull_request'
+        continue-on-error: true  # Known: Linux Zig server may fail to start
         uses: actions/github-script@v7
         with:
           script: |

@@ -1,0 +1,12 @@
+.{
+    .name = .zig,
+    .version = "0.15.2",
+    .dependencies = .{
+        .dhi = .{
+            .url = "https://github.com/justrach/dhi/archive/refs/heads/main.tar.gz",
+            .hash = "dhi-0.1.0-Fz3bn-99AwDnu1OPmrQJpMD1th_OOPUIAUuQGvLHFoLj",
+        },
+    },
+    .paths = .{""},
+    .fingerprint = 0xc1ce10811168d4a1,
+}

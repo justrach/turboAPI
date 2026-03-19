@@ -1,0 +1,12 @@
+.venv314/
+.venv314t/
+.git/
+zig/.zig-cache/
+zig/zig-out/
+.ruff_cache/
+__pycache__/
+*.egg-info/
+.claude/
+frontend/
+socials/
+assets/

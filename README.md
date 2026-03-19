@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://pypi.org/project/turboapi/"><img src="https://img.shields.io/pypi/v/turboapi.svg?style=flat-square&label=version" alt="PyPI version" /></a>
   <a href="https://github.com/justrach/turboAPI/blob/main/LICENSE"><img src="https://img.shields.io/github/license/justrach/turboAPI?style=flat-square" alt="License" /></a>
-  <img src="https://img.shields.io/badge/python-3.13+-blue?style=flat-square" alt="Python 3.13+" />
+  <img src="https://img.shields.io/badge/python-3.14+-blue?style=flat-square" alt="Python 3.14+" />
   <img src="https://img.shields.io/badge/zig-0.15-f7a41d?style=flat-square" alt="Zig 0.15" />
   <img src="https://img.shields.io/badge/status-alpha-orange?style=flat-square" alt="Alpha" />
   <a href="https://deepwiki.com/justrach/turboAPI"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" /></a>
@@ -66,10 +66,28 @@
 
 ## ⚡ Quick Start
 
-**Requirements:** Python 3.13+ free-threaded (3.14t recommended)
+**Requirements:** Python 3.14+ free-threaded (`3.14t`), Zig 0.15+
+
+### Option 1: Docker (easiest)
 
 ```bash
+git clone https://github.com/justrach/turboAPI.git
+cd turboAPI
+docker compose up
+```
+
+This builds Python 3.14t from source, compiles the Zig backend, and runs the example app. Hit `http://localhost:8000` to verify.
+
+### Option 2: Local install
+
+```bash
+# Install free-threaded Python
+uv python install 3.14t
+
+# Install turboapi
 pip install turboapi
+
+# Or build from source (see below)
 ```
 
 ```python
@@ -95,10 +113,16 @@ def get_item(item_id: int):
 def create_item(item: Item):
     return {"item": item.model_dump(), "created": True}
 
-app.run()
+if __name__ == "__main__":
+    app.run()
 ```
 
-That's it. Your API is running on a Zig HTTP server at `http://localhost:8000`.
+```bash
+python3.14t app.py
+# 🚀 TurboNet-Zig server listening on 127.0.0.1:8000
+```
+
+The app also exposes an ASGI `__call__` fallback — you can use `uvicorn main:app` to test your route definitions before building the native backend, but this is pure-Python and much slower. For production, always use `app.run()` with the compiled Zig backend.
 
 ---
 
@@ -358,40 +382,67 @@ python3.14t app.py
 ```
 turboAPI/
 ├── python/turboapi/
-│   ├── main_app.py           # TurboAPI class (FastAPI-compatible)
+│   ├── main_app.py           # TurboAPI class (FastAPI-compatible, ASGI __call__)
 │   ├── zig_integration.py    # route registration, handler classification
 │   ├── request_handler.py    # enhanced/fast/fast_model handlers
 │   ├── security.py           # OAuth2, HTTPBearer, APIKey, Depends
 │   ├── version_check.py      # free-threading detection
 │   └── turbonet.*.so         # compiled Zig extension
-├── zig/src/
-│   ├── main.zig              # Python C extension entry
-│   ├── server.zig            # HTTP server, thread pool, dispatch, JSON→PyObject
-│   ├── router.zig            # radix trie with path params + wildcards
-│   ├── dhi_validator.zig     # runtime JSON schema validation
-│   └── py.zig                # Python C-API wrappers
-├── tests/                    # 253+ tests
+├── zig/
+│   ├── src/
+│   │   ├── main.zig          # Python C extension entry
+│   │   ├── server.zig        # HTTP server, thread pool, dispatch, JSON→PyObject
+│   │   ├── router.zig        # radix trie with path params + wildcards
+│   │   ├── dhi_validator.zig # runtime JSON schema validation
+│   │   └── py.zig            # Python C-API wrappers
+│   ├── build.zig             # Zig build system
+│   ├── build.zig.zon         # dependencies (dhi fetched automatically)
+│   └── build_turbonet.py     # auto-detect Python, invoke zig build
+├── tests/                    # 275+ tests
 ├── benchmarks/
-│   └── turboapi_vs_fastapi.py
-└── zig/build.zig
+├── Dockerfile                # Python 3.14t + Zig 0.15 + turbonet
+├── docker-compose.yml
+└── Makefile                  # make build, make test, make release
 ```
 
 ---
 
 ## Building from Source
 
+**Requirements:** [Python 3.14t](https://docs.python.org/3.14/whatsnew/3.14.html) (free-threaded) and [Zig 0.15+](https://ziglang.org/download/)
+
 ```bash
+# 1. Clone
 git clone https://github.com/justrach/turboAPI.git
 cd turboAPI
 
-# Build the Zig extension for your Python
+# 2. Install free-threaded Python (if you don't have it)
+uv python install 3.14t
+
+# 3. Build the Zig native backend (dhi dependency fetched automatically)
 python3.14t zig/build_turbonet.py --install
 
-# Install the Python package
-pip install -e .
+# 4. Install the Python package
+pip install -e ".[dev]"
 
-# Run tests
-python -m pytest tests/ -v
+# 5. Run tests
+python -m pytest tests/ -p no:anchorpy \
+  --deselect tests/test_fastapi_parity.py::TestWebSocket -v
+```
+
+Or use the Makefile:
+
+```bash
+make build       # debug build + install
+make release     # ReleaseFast build + install
+make test        # run Python tests
+make zig-test    # run Zig unit tests
+```
+
+Or just Docker:
+
+```bash
+docker compose up --build
 ```
 
 ---
@@ -518,7 +569,11 @@ Open an issue before submitting a large PR so we can align on the approach.
 ```bash
 git clone https://github.com/justrach/turboAPI.git
 cd turboAPI
-python -m pytest tests/   # make sure tests pass before and after your change
+uv python install 3.14t
+python3.14t zig/build_turbonet.py --install   # build Zig backend
+pip install -e ".[dev]"                        # install in dev mode
+make hooks                                     # install pre-commit hook
+make test                                      # verify everything works
 ```
 
 ---

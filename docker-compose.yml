@@ -1,0 +1,7 @@
+services:
+  turboapi:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - TURBO_DISABLE_RATE_LIMITING=1
