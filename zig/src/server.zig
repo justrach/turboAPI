@@ -1520,7 +1520,6 @@ fn errorResponse(ct: []const u8, body_str: []const u8) PythonResponse {
     };
 }
 
-/// Map HTTP status code to reason phrase.
 fn statusText(status: u16) []const u8 {
     return switch (status) {
         200 => "OK",
@@ -1545,28 +1544,28 @@ fn statusText(status: u16) []const u8 {
     };
 }
 
-/// Zero-alloc response writer.  Header is formatted into a 512-byte stack
-/// buffer; body is written as a second syscall (TCP corking coalesces them).
-/// Previous version did 2 heap allocs + 2 memcpys + 2 frees per response.
+/// Zero-alloc response writer.  Header + body are concatenated into a stack
+/// buffer for a single write syscall (most API responses are <4KB).
+/// Falls back to two writes only for large responses.
 fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
     var header_buf: [512]u8 = undefined;
     const header = std.fmt.bufPrint(&header_buf,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n",
         .{ status, statusText(status), content_type, body.len },
-    ) catch {
-        // Content-type exceeded ~380 chars — fall back to heap
-        const h = std.fmt.allocPrint(allocator,
-            "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n",
-            .{ status, statusText(status), content_type, body.len },
-        ) catch return;
-        defer allocator.free(h);
-        stream.writeAll(h) catch return;
-        if (body.len > 0) stream.writeAll(body) catch return;
-        return;
-    };
+    ) catch return;
 
-    stream.writeAll(header) catch return;
-    if (body.len > 0) stream.writeAll(body) catch return;
+    const total = header.len + body.len;
+    if (total <= 4096) {
+        // Small response: single write from stack — zero allocs, one syscall
+        var resp_buf: [4096]u8 = undefined;
+        @memcpy(resp_buf[0..header.len], header);
+        @memcpy(resp_buf[header.len..total], body);
+        stream.writeAll(resp_buf[0..total]) catch return;
+    } else {
+        // Large response: two writes to avoid huge stack usage
+        stream.writeAll(header) catch return;
+        if (body.len > 0) stream.writeAll(body) catch return;
+    }
 }
 
 // ── configure_rate_limiting(enabled, requests_per_minute) ──
