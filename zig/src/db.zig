@@ -123,37 +123,41 @@ fn serializeRow(row: anytype, col_names: []const []const u8, buf: []u8) ![]const
         buf[pos] = ':';
         pos += 1;
 
-        // Value — get as text (row.get returns error union, use catch for null)
-        const val = row.get([]const u8, @intCast(i)) catch {
-            @memcpy(buf[pos..][0..4], "null");
-            pos += 4;
-            continue;
-        };
-        // Check if it looks like a number
-        const is_num = blk: {
-            if (val.len == 0) break :blk false;
-            for (val) |ch| {
-                if (ch != '.' and ch != '-' and !std.ascii.isDigit(ch)) break :blk false;
-            }
-            break :blk true;
-        };
-        if (is_num) {
-            @memcpy(buf[pos..][0..val.len], val);
-            pos += val.len;
-        } else {
-            buf[pos] = '"';
-            pos += 1;
-            for (val) |ch| {
-                if (pos + 2 >= buf.len) break;
-                if (ch == '"' or ch == '\\') {
-                    buf[pos] = '\\';
+        // Try integer first, then text fallback
+        if (row.get(i32, @intCast(i))) |int_val| {
+            const num_str = std.fmt.bufPrint(buf[pos..], "{d}", .{int_val}) catch break;
+            pos += num_str.len;
+        } else |_| {
+            if (row.get([]const u8, @intCast(i))) |val| {
+                // Check if it's a printable string (not binary garbage)
+                const printable = blk: {
+                    for (val) |ch| {
+                        if (ch < 0x20 and ch != '\t' and ch != '\n') break :blk false;
+                    }
+                    break :blk true;
+                };
+                if (printable) {
+                    buf[pos] = '"';
                     pos += 1;
+                    for (val) |ch| {
+                        if (pos + 2 >= buf.len) break;
+                        if (ch == '"' or ch == '\\') {
+                            buf[pos] = '\\';
+                            pos += 1;
+                        }
+                        buf[pos] = ch;
+                        pos += 1;
+                    }
+                    buf[pos] = '"';
+                    pos += 1;
+                } else {
+                    @memcpy(buf[pos..][0..4], "null");
+                    pos += 4;
                 }
-                buf[pos] = ch;
-                pos += 1;
+            } else |_| {
+                @memcpy(buf[pos..][0..4], "null");
+                pos += 4;
             }
-            buf[pos] = '"';
-            pos += 1;
         }
     }
 
@@ -410,22 +414,11 @@ pub fn db_configure(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     };
 
     // Extract host string from URI component
-    const host_str: []const u8 = if (uri.host) |h| switch (h) {
-        .raw => |r| r,
-        .percent_encoded => |r| r,
-    } else "127.0.0.1";
-
-    const user_str: []const u8 = if (uri.user) |u| switch (u) {
-        .raw => |r| r,
-        .percent_encoded => |r| r,
-    } else "postgres";
-
-    const db_name: []const u8 = if (uri.path.raw.len > 1) uri.path.raw[1..] else "postgres";
-
-    const pw_str: ?[]const u8 = if (uri.password) |p| switch (p) {
-        .raw => |r| r,
-        .percent_encoded => |r| r,
-    } else null;
+    // Extract strings from URI components (always use percent_encoded — safe for both)
+    const host_str: []const u8 = if (uri.host) |h| h.percent_encoded else "127.0.0.1";
+    const user_str: []const u8 = if (uri.user) |u| u.percent_encoded else "postgres";
+    const db_name: []const u8 = if (uri.path.percent_encoded.len > 1) uri.path.percent_encoded[1..] else "postgres";
+    const pw_str: ?[]const u8 = if (uri.password) |p| p.percent_encoded else null;
 
     db_pool = pg.Pool.init(allocator, .{
         .size = size,
