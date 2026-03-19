@@ -17,7 +17,7 @@ import requests
 
 sys.path.insert(0, "python")
 
-from pydantic import BaseModel
+from dhi import BaseModel
 from turboapi import TurboAPI
 from turboapi.request_handler import create_fast_handler, create_fast_model_handler
 from turboapi.zig_integration import classify_handler
