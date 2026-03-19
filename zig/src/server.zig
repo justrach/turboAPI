@@ -1821,10 +1821,22 @@ fn statusText(status: u16) []const u8 {
 /// buffer for a single write syscall (most API responses are <4KB).
 /// Falls back to two writes only for large responses.
 fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
+    // TFB requires Server + Date headers
+    var date_buf: [32]u8 = undefined;
+    const timestamp = std.time.timestamp();
+    const epoch_secs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(timestamp) };
+    const day_secs = epoch_secs.getDaySeconds();
+    const year_day = epoch_secs.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const date_str = std.fmt.bufPrint(&date_buf, "{d:0>2}/{d:0>2}/{d} {d:0>2}:{d:0>2}:{d:0>2}", .{
+        month_day.day_index + 1, @intFromEnum(month_day.month), year_day.year,
+        day_secs.getHoursIntoDay(), day_secs.getMinutesIntoHour(), day_secs.getSecondsIntoMinute(),
+    }) catch "01/01/2026 00:00:00";
+
     var header_buf: [512]u8 = undefined;
     const header = std.fmt.bufPrint(&header_buf,
-        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive",
-        .{ status, statusText(status), content_type, body.len },
+        "HTTP/1.1 {d} {s}\r\nServer: TurboAPI\r\nDate: {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive",
+        .{ status, statusText(status), date_str, content_type, body.len },
     ) catch return;
 
     // Assemble: header + cors_headers (pre-rendered, "" if disabled) + \r\n\r\n + body
