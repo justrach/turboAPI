@@ -92,7 +92,7 @@ from .version_check import check_free_threading_support, get_python_threading_in
 # WebSocket
 from .websockets import WebSocket, WebSocketDisconnect
 
-__version__ = "1.0.0"
+__version__ = "1.0.01"
 __all__ = [
     # Core
     "TurboAPI",

@@ -2,7 +2,7 @@
 
 All notable changes to TurboAPI are documented here.
 
-## [1.0.0-rc1] — 2026-03-19
+## [1.0.01] — 2026-03-19
 
 ### Performance (47k → 150k req/s)
 
