@@ -761,38 +761,94 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     if (total_read == 0) return error.ConnectionClosed;
 
     const he = header_end_pos orelse {
-        // No \r\n\r\n found — malformed or headers too large
         sendResponse(stream, 431, "text/plain", "Request Header Fields Too Large");
         return error.HeadersTooLarge;
     };
 
     const request_head = header_buf[0..total_read];
 
-    // Parse the first line to get method + path
+    // Phase 2: Parse the first line to get method + path (cheap — no allocs)
     const first_line_end = std.mem.indexOf(u8, request_head, "\r\n") orelse return;
     const first_line = request_head[0..first_line_end];
 
-    // "GET /path HTTP/1.1"
     var parts = std.mem.splitScalar(u8, first_line, ' ');
     const method = parts.next() orelse return;
     const raw_path = parts.next() orelse return;
 
-    // std.debug.print("[ZIG] {s} {s}\n", .{ method, raw_path });
-
-    // Split path from query string
     const q_idx = std.mem.indexOf(u8, raw_path, "?");
     const path = if (q_idx) |i| raw_path[0..i] else raw_path;
     const query_string = if (q_idx) |i| raw_path[i + 1 ..] else "";
 
-    // Parse HTTP headers
+    // Phase 3: Route match EARLY — before header parsing, so fast handlers
+    // can skip the expensive parseHeaders + body read entirely.
+    const rt = getRouter();
+    var match = rt.findRoute(method, path) orelse {
+        std.debug.print("[ZIG] 404 for {s} {s}\n", .{ method, path });
+        sendResponse(stream, 404, "application/json", "{\"error\": \"Not Found\"}");
+        return;
+    };
+    defer match.deinit();
+
+    // ── Fast-exit paths: no header parsing, no body read ──
+
+    // CORS preflight — immediate 204, no Python
+    if (cors_enabled and std.mem.eql(u8, method, "OPTIONS")) {
+        sendResponse(stream, 204, "", "");
+        return;
+    }
+
+    // Static routes — single writeAll of pre-rendered bytes
+    const sr = getStaticRoutes();
+    if (sr.get(match.handler_key)) |static_entry| {
+        stream.writeAll(static_entry.response_bytes) catch return;
+        return;
+    }
+
+    // Native FFI routes — no GIL, no Python
+    const nr = getNativeRoutes();
+    if (nr.get(match.handler_key)) |native_entry| {
+        // Native handlers need headers — parse them
+        var headers = parseHeaders(request_head, first_line_end, he);
+        defer headers.deinit(allocator);
+        std.debug.print("[FFI] native handler for {s}\n", .{match.handler_key});
+        const ffi_resp = callNativeHandler(native_entry, method, path, query_string, "", headers.items, &match.params);
+        const resp_ct = ffi_resp.content_type[0..ffi_resp.content_type_len];
+        const resp_body = ffi_resp.body[0..ffi_resp.body_len];
+        sendResponse(stream, ffi_resp.status_code, resp_ct, resp_body);
+        return;
+    }
+
+    // Python handler lookup
+    const r = getRoutes();
+    const entry = r.get(match.handler_key) orelse {
+        std.debug.print("[ZIG] handler entry missing for key: {s}\n", .{match.handler_key});
+        sendResponse(stream, 500, "application/json", "{\"error\": \"Internal Server Error\"}");
+        return;
+    };
+
+    // ── Ultra-fast path: simple handlers that don't need headers or body ──
+    // simple_sync_noargs and simple_sync only need method/path/query_string/params,
+    // all of which come from the first line + route match. Skip parseHeaders entirely.
+    switch (entry.handler_tag) {
+        .simple_sync_noargs => {
+            callPythonNoArgs(tstate, entry, stream);
+            return;
+        },
+        .simple_sync => {
+            callPythonVectorcall(tstate, entry, query_string, &match.params, stream);
+            return;
+        },
+        else => {},
+    }
+
+    // ── Full path: parse headers + read body (only for handlers that need them) ──
+
     var headers = parseHeaders(request_head, first_line_end, he);
     defer headers.deinit(allocator);
 
-    // Phase 2: Read body using Content-Length
-    const body_start = he + 4; // past \r\n\r\n
+    const body_start = he + 4;
     const already_read_body = request_head[body_start..total_read];
 
-    // Find Content-Length header
     var content_length: usize = 0;
     for (headers.items) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "content-length")) {
@@ -801,7 +857,6 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         }
     }
 
-    // Cap at 16 MB to prevent abuse
     const max_body: usize = 16 * 1024 * 1024;
     if (content_length > max_body) {
         sendResponse(stream, 413, "application/json", "{\"error\": \"Payload Too Large\"}");
@@ -813,85 +868,29 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     defer if (body_owned) |b| allocator.free(b);
 
     if (content_length == 0) {
-        // No body expected — use whatever we already have (typically empty)
         body = already_read_body;
     } else if (already_read_body.len >= content_length) {
-        // We already read the entire body in the header read
         body = already_read_body[0..content_length];
     } else {
-        // Need to read more body data from the stream
         const full_body = allocator.alloc(u8, content_length) catch {
             sendResponse(stream, 500, "application/json", "{\"error\": \"Out of memory\"}");
             return;
         };
         body_owned = full_body;
-
-        // Copy the portion we already have
         @memcpy(full_body[0..already_read_body.len], already_read_body);
         var body_read: usize = already_read_body.len;
-
-        // Read the rest
         while (body_read < content_length) {
             const n = stream.read(full_body[body_read..content_length]) catch |err| {
                 std.debug.print("[ZIG] body read error: {}\n", .{err});
                 return;
             };
-            if (n == 0) break; // client disconnected
+            if (n == 0) break;
             body_read += n;
         }
         body = full_body[0..body_read];
     }
 
-    // std.debug.print("[ZIG] received {d} header bytes + {d} body bytes\n", .{ he + 4, body.len });
-
-    // Match route via radix trie
-    const rt = getRouter();
-    var match = rt.findRoute(method, path) orelse {
-        std.debug.print("[ZIG] 404 for {s} {s}\n", .{ method, path });
-        sendResponse(stream, 404, "application/json", "{\"error\": \"Not Found\"}");
-        return;
-    };
-    defer match.deinit();
-
-    // ── Dispatch priority: OPTIONS preflight > static > native FFI > Python ──
-
-    // 0. CORS preflight — respond immediately in Zig, no Python
-    if (cors_enabled and std.mem.eql(u8, method, "OPTIONS")) {
-        sendResponse(stream, 204, "", "");
-        return;
-    }
-
-    // 1. Static routes — pre-rendered response, single writeAll, zero overhead
-    const sr = getStaticRoutes();
-    if (sr.get(match.handler_key)) |static_entry| {
-        stream.writeAll(static_entry.response_bytes) catch return;
-        return;
-    }
-
-    // 2. Native (FFI) routes — no GIL, no Python
-    // ABI contract: FfiResponse.body and .content_type are borrowed pointers —
-    // they must point to static data or data valid for the request lifetime.
-    const nr = getNativeRoutes();
-    if (nr.get(match.handler_key)) |native_entry| {
-        std.debug.print("[FFI] native handler for {s}\n", .{match.handler_key});
-        const ffi_resp = callNativeHandler(native_entry, method, path, query_string, body, headers.items, &match.params);
-        const resp_ct = ffi_resp.content_type[0..ffi_resp.content_type_len];
-        const resp_body = ffi_resp.body[0..ffi_resp.body_len];
-        sendResponse(stream, ffi_resp.status_code, resp_ct, resp_body);
-        return;
-    }
-
-    // 3. Python handler
-    const r = getRoutes();
-    const entry = r.get(match.handler_key) orelse {
-        std.debug.print("[ZIG] handler entry missing for key: {s}\n", .{match.handler_key});
-        sendResponse(stream, 500, "application/json", "{\"error\": \"Internal Server Error\"}");
-        return;
-    };
-
-    // Zig-native dhi validation for model_sync routes — reject invalid bodies
-    // before touching the GIL.  validateJsonRetainParsed returns the parsed
-    // JSON tree on success so callPythonModelHandlerParsed can skip re-parsing.
+    // DHI validation for model_sync — single parse, retain tree
     var cached_parse: ?std.json.Parsed(std.json.Value) = null;
     defer if (cached_parse) |*cp| cp.deinit();
 
@@ -911,16 +910,9 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         }
     }
 
-    // Fast dispatch via enum tag — single branch instead of 4x string compare
+    // Dispatch remaining handler types
     switch (entry.handler_tag) {
-        .simple_sync_noargs => {
-            callPythonNoArgs(tstate, entry, stream);
-            return;
-        },
-        .simple_sync => {
-            callPythonVectorcall(tstate, entry, query_string, &match.params, stream);
-            return;
-        },
+        .simple_sync_noargs, .simple_sync => unreachable, // handled above
         .model_sync => {
             if (body.len > 0) {
                 if (cached_parse) |cp| {
@@ -930,13 +922,10 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
                 }
                 return;
             }
-            // model_sync with no body falls through to enhanced
             callPythonHandlerDirect(tstate, entry, query_string, body, &match.params, stream);
-            return;
         },
         .body_sync => {
             callPythonHandlerDirect(tstate, entry, query_string, body, &match.params, stream);
-            return;
         },
         .enhanced => {
             const resp = callPythonHandler(tstate, entry, method, path, query_string, body, headers.items, &match.params);
