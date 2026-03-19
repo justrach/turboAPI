@@ -27,16 +27,83 @@ pub const DbRouteEntry = struct {
     schema: ?dhi.ModelSchema, // for INSERT body validation (dhi validates before query)
 };
 
-// ── Global state (same pattern as server.zig routes) ─────────────────────────
-// ── Global state (same pattern as server.zig routes) ─────────────────────────
+// ── Global state ─────────────────────────────────────────────────────────────
 
 var db_pool: ?*pg.Pool = null;
 var db_routes_map: ?std.StringHashMap(DbRouteEntry) = null;
+
+// DB response cache — keyed by "METHOD /path/with/params", value is JSON body
+var db_cache: ?std.StringHashMap([]const u8) = null;
+var db_cache_count: usize = 0;
+const DB_CACHE_MAX: usize = 10_000;
+var db_cache_enabled: bool = true;
+
+// Per-thread connections (indexed by worker thread, avoids pool mutex)
+const MAX_WORKERS: usize = 24;
+var thread_conns: [MAX_WORKERS]?*pg.Conn = [_]?*pg.Conn{null} ** MAX_WORKERS;
+var thread_conn_count: usize = 0;
+var use_thread_conns: bool = false;
 
 pub fn getDbRoutes() *std.StringHashMap(DbRouteEntry) {
     if (db_routes_map) |*m| return m;
     db_routes_map = std.StringHashMap(DbRouteEntry).init(allocator);
     return &db_routes_map.?;
+}
+
+fn getDbCache() *std.StringHashMap([]const u8) {
+    if (db_cache) |*dc| return dc;
+    db_cache = std.StringHashMap([]const u8).init(allocator);
+    return &db_cache.?;
+}
+
+fn cacheDbResponse(key: []const u8, body: []const u8) void {
+    if (db_cache_count >= DB_CACHE_MAX) return;
+    const key_dupe = allocator.dupe(u8, key) catch return;
+    const body_dupe = allocator.dupe(u8, body) catch {
+        allocator.free(key_dupe);
+        return;
+    };
+    getDbCache().put(key_dupe, body_dupe) catch {
+        allocator.free(key_dupe);
+        allocator.free(body_dupe);
+        return;
+    };
+    db_cache_count += 1;
+}
+
+fn invalidateTableCache(table: []const u8) void {
+    _ = table;
+    if (db_cache) |*dc| {
+        var it = dc.iterator();
+        while (it.next()) |entry| {
+            allocator.free(@constCast(entry.key_ptr.*));
+            allocator.free(@constCast(entry.value_ptr.*));
+        }
+        dc.clearRetainingCapacity();
+        db_cache_count = 0;
+    }
+}
+
+/// Acquire a Postgres connection — prefers per-thread conn, falls back to pool
+fn acquireConn() ?*pg.Conn {
+    // Try per-thread connection first (zero mutex overhead)
+    if (use_thread_conns) {
+        const tid = std.Thread.getCurrentId();
+        const idx = tid % MAX_WORKERS;
+        if (thread_conns[idx]) |conn| return conn;
+    }
+    // Fall back to pool
+    if (db_pool) |pool| {
+        return pool.acquire() catch null;
+    }
+    return null;
+}
+
+fn releaseConn(conn: *pg.Conn) void {
+    // Per-thread connections are never released (they persist)
+    if (use_thread_conns) return;
+    // Pool connections get released
+    conn.release();
 }
 
 pub fn getPool() ?*pg.Pool {
@@ -176,11 +243,6 @@ pub fn handleDbRoute(
     query_string: []const u8,
     sendResponseFn: *const fn (std.net.Stream, u16, []const u8, []const u8) void,
 ) void {
-    const pool = getPool() orelse {
-        sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database not configured\"}");
-        return;
-    };
-
     switch (entry.op) {
         .select_one => {
             const pk_param = entry.pk_param orelse "id";
@@ -189,11 +251,21 @@ pub fn handleDbRoute(
                 return;
             };
 
-            var conn = pool.acquire() catch {
+            // Cache check — build cache key from table + pk value
+            var cache_key_buf: [256]u8 = undefined;
+            const cache_key = std.fmt.bufPrint(&cache_key_buf, "GET:{s}:{s}", .{ entry.table, pk_val }) catch "";
+            if (db_cache_enabled and cache_key.len > 0) {
+                if (getDbCache().get(cache_key)) |cached_body| {
+                    sendResponseFn(stream, 200, "application/json", cached_body);
+                    return;
+                }
+            }
+
+            const conn = acquireConn() orelse {
                 sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database connection unavailable\"}");
                 return;
             };
-            defer conn.release();
+            defer releaseConn(conn);
 
             var result = conn.queryOpts(entry.select_sql, .{pk_val}, .{ .column_names = true }) catch {
                 sendResponseFn(stream, 500, "application/json", "{\"error\": \"Query failed\"}");
@@ -207,6 +279,10 @@ pub fn handleDbRoute(
                     sendResponseFn(stream, 500, "application/json", "{\"error\": \"Serialization failed\"}");
                     return;
                 };
+                // Cache the response
+                if (db_cache_enabled and cache_key.len > 0) {
+                    cacheDbResponse(cache_key, json);
+                }
                 sendResponseFn(stream, 200, "application/json", json);
             } else {
                 sendResponseFn(stream, 404, "application/json", "{\"error\": \"Not found\"}");
@@ -214,7 +290,6 @@ pub fn handleDbRoute(
         },
 
         .select_list => {
-            // Parse ?limit=N&offset=M from query string
             var limit: []const u8 = "50";
             var offset: []const u8 = "0";
 
@@ -229,11 +304,21 @@ pub fn handleDbRoute(
                 }
             }
 
-            var conn = pool.acquire() catch {
+            // Cache check for list queries
+            var cache_key_buf: [256]u8 = undefined;
+            const cache_key = std.fmt.bufPrint(&cache_key_buf, "LIST:{s}:{s}:{s}", .{ entry.table, limit, offset }) catch "";
+            if (db_cache_enabled and cache_key.len > 0) {
+                if (getDbCache().get(cache_key)) |cached_body| {
+                    sendResponseFn(stream, 200, "application/json", cached_body);
+                    return;
+                }
+            }
+
+            const conn = acquireConn() orelse {
                 sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database connection unavailable\"}");
                 return;
             };
-            defer conn.release();
+            defer releaseConn(conn);
 
             var result = conn.queryOpts(entry.select_sql, .{ limit, offset }, .{ .column_names = true }) catch {
                 sendResponseFn(stream, 500, "application/json", "{\"error\": \"Query failed\"}");
@@ -241,7 +326,6 @@ pub fn handleDbRoute(
             };
             defer result.deinit();
 
-            // Build JSON array
             var out_buf = allocator.alloc(u8, 65536) catch {
                 sendResponseFn(stream, 500, "application/json", "{\"error\": \"Out of memory\"}");
                 return;
@@ -260,7 +344,7 @@ pub fn handleDbRoute(
                 }
                 var row_buf: [8192]u8 = undefined;
                 const row_json = serializeRow(row, result.column_names, &row_buf) catch break;
-                if (out_pos + row_json.len + 2 > out_buf.len) break; // safety
+                if (out_pos + row_json.len + 2 > out_buf.len) break;
                 @memcpy(out_buf[out_pos..][0..row_json.len], row_json);
                 out_pos += row_json.len;
                 row_count += 1;
@@ -269,7 +353,11 @@ pub fn handleDbRoute(
             out_buf[out_pos] = ']';
             out_pos += 1;
 
-            sendResponseFn(stream, 200, "application/json", out_buf[0..out_pos]);
+            const response_body = out_buf[0..out_pos];
+            if (db_cache_enabled and cache_key.len > 0) {
+                cacheDbResponse(cache_key, response_body);
+            }
+            sendResponseFn(stream, 200, "application/json", response_body);
         },
 
         .insert => {
@@ -278,7 +366,6 @@ pub fn handleDbRoute(
                 return;
             }
 
-            // DHI validation (if schema registered)
             if (entry.schema) |schema| {
                 const vr = dhi.validateJson(body, &schema);
                 switch (vr) {
@@ -291,7 +378,6 @@ pub fn handleDbRoute(
                 }
             }
 
-            // Parse JSON body to extract column values
             const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch {
                 sendResponseFn(stream, 400, "application/json", "{\"error\": \"Invalid JSON\"}");
                 return;
@@ -306,7 +392,6 @@ pub fn handleDbRoute(
                 },
             };
 
-            // Extract column values in order
             var values: [16][]const u8 = undefined;
             const ncols = @min(entry.columns.len, 16);
 
@@ -325,16 +410,17 @@ pub fn handleDbRoute(
                 }
             }
 
-            var conn = pool.acquire() catch {
+            const conn = acquireConn() orelse {
                 sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database connection unavailable\"}");
                 return;
             };
-            defer conn.release();
+            defer releaseConn(conn);
 
-            // Execute INSERT using switch dispatch for comptime tuple
             const insert_result = execWithParams(conn, entry.insert_sql, values[0..ncols]);
             if (insert_result) |result| {
                 defer result.deinit();
+                // Invalidate cache on write
+                invalidateTableCache(entry.table);
                 if (result.next() catch null) |row| {
                     var json_buf: [8192]u8 = undefined;
                     const json = serializeRow(row, result.column_names, &json_buf) catch {
@@ -357,16 +443,19 @@ pub fn handleDbRoute(
                 return;
             };
 
-            var conn = pool.acquire() catch {
+            const conn = acquireConn() orelse {
                 sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database connection unavailable\"}");
                 return;
             };
-            defer conn.release();
+            defer releaseConn(conn);
 
             const affected = conn.exec(entry.delete_sql, .{pk_val}) catch {
                 sendResponseFn(stream, 500, "application/json", "{\"error\": \"Delete failed\"}");
                 return;
             };
+
+            // Invalidate cache on write
+            invalidateTableCache(entry.table);
 
             if (affected) |n| {
                 if (n > 0) {
@@ -380,8 +469,6 @@ pub fn handleDbRoute(
         },
     }
 }
-
-// Comptime dispatch for dynamic parameter counts (pg.zig needs comptime tuples)
 fn execWithParams(conn: *pg.Conn, sql: []const u8, values: []const []const u8) ?*pg.Result {
     return switch (values.len) {
         0 => conn.queryOpts(sql, .{}, .{ .column_names = true }) catch return null,
