@@ -67,8 +67,9 @@ jobs:
           python -m build --wheel --outdir dist-tmp/
           # Re-tag as platform-specific (contains compiled .so)
           PYTAG=$(python -c "import sys; ft='t' if hasattr(sys,'_is_gil_enabled') and not sys._is_gil_enabled() else ''; print(f'cp{sys.version_info.major}{sys.version_info.minor}{ft}')")
-          python -m wheel tags --python-tag=$PYTAG --platform-tag=$(python -c "import sysconfig; print(sysconfig.get_platform().replace('-','_').replace('.','_'))") --remove dist-tmp/*.whl
-          mv dist-tmp/*.whl dist/
+          PLAT=$(python -c "import sysconfig; print(sysconfig.get_platform().replace('-','_').replace('.','_'))")
+          python -m wheel tags --python-tag=$PYTAG --platform-tag=$PLAT --remove dist-tmp/*.whl
+          mkdir -p dist && mv dist-tmp/*.whl dist/
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
