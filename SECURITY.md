@@ -21,7 +21,7 @@ What it rejects at the TCP/parse level:
 - Headers that overflow the 8KB header buffer (returns 431)
 
 **Known gaps:**
-- No slow-loris protection (no per-connection read timeout) — mitigate with `proxy_read_timeout 10s;` (nginx) or `timeouts.read_header 5s` (Caddy)
+- `Transfer-Encoding` is not parsed; only `Content-Length` is used for body framing — requests using chunked encoding are not deserialized correctly. Put a proxy in front that normalises this before forwarding.
 - `Transfer-Encoding` is not parsed; only `Content-Length` is used for body framing — requests using chunked encoding are not deserialized correctly. Put a proxy in front that normalises this before forwarding.
 - No max header count limit (high header count won't crash, but isn't capped)
 - CRLF injection in header values is not explicitly sanitized — rely on your reverse proxy (nginx/Caddy) for this in production
@@ -108,7 +108,9 @@ We aim to acknowledge reports within **48 hours** and provide a fix or mitigatio
 | `RateLimitMiddleware` IP spoofing via `X-Forwarded-For` | Mitigated: prefers `X-Real-IP`; documented proxy-trust requirement |
 | CORS wildcard + `allow_credentials=True` | Fixed: `ValueError` raised at construction — browsers reject this combination |
 | Plaintext password "hash" in `security.py` | Fixed: `get_password_hash` / `verify_password` raise `NotImplementedError` |
+| Slowloris (no read timeout) | Fixed: `SO_RCVTIMEO` 30s on accepted sockets — worker freed if client goes silent |
 
+All security fixes are verified by `tests/test_security_audit_fixes.py` (13 tests).
 ---
 
 ## Alpha Status Notice
