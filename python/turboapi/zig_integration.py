@@ -44,10 +44,10 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
 
     # Check for Depends/SecurityBase — forces enhanced path
     try:
-        from .security import Depends, SecurityBase
+        from .security import Depends, SecurityBase, get_depends
 
         for _, param in sig.parameters.items():
-            if isinstance(param.default, (Depends, SecurityBase)):
+            if isinstance(param.default, (Depends, SecurityBase)) or get_depends(param) is not None:
                 has_depends = True
                 break
     except ImportError:

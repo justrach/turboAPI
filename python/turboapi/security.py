@@ -10,6 +10,7 @@ Includes:
 """
 
 import base64
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -554,6 +555,28 @@ class Depends:
         self.use_cache = use_cache
 
 
+
+def get_depends(param: inspect.Parameter) -> Depends | None:
+    """Extract a Depends instance from a parameter — supports both patterns:
+
+    1. Classic:   def f(db: Session = Depends(get_db))
+    2. Annotated: def f(db: Annotated[Session, Depends(get_db)])
+
+    Returns the Depends instance or None.
+    """
+    # Classic pattern: Depends in default value
+    if isinstance(param.default, Depends):
+        return param.default
+
+    # Annotated pattern: Depends in type metadata
+    ann = param.annotation
+    if ann is inspect.Parameter.empty:
+        return None
+    # Annotated types have __metadata__ with the extra args
+    for metadata in getattr(ann, "__metadata__", ()):
+        if isinstance(metadata, Depends):
+            return metadata
+    return None
 class Security(Depends):
     """
     Security dependency with scopes (compatible with FastAPI).

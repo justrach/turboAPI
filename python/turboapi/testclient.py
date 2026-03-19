@@ -206,6 +206,26 @@ class TestClient:
             if param.annotation is BackgroundTasks:
                 kwargs[param_name] = BackgroundTasks()
 
+        # Resolve Depends/Annotated[..., Depends(...)] parameters
+        try:
+            from .security import get_depends
+
+            for param_name, param in sig.parameters.items():
+                if param_name in kwargs:
+                    continue
+                dep = get_depends(param)
+                if dep is not None and dep.dependency is not None:
+                    dep_fn = dep.dependency
+                    if inspect.iscoroutinefunction(dep_fn):
+                        try:
+                            kwargs[param_name] = asyncio.run(dep_fn())
+                        except RuntimeError:
+                            kwargs[param_name] = dep_fn()
+                    else:
+                        kwargs[param_name] = dep_fn()
+        except ImportError:
+            pass
+
         # Call handler
         try:
             if inspect.iscoroutinefunction(handler):
