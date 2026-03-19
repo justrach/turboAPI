@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "turboapi"
-version = "1.0.13"
+version = "1.0.14"
 description = "FastAPI-compatible web framework with Zig HTTP core — 20x faster with Python 3.14 free-threading"
 readme = "README.md"
 requires-python = ">=3.14"
