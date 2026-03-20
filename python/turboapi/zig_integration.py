@@ -647,8 +647,10 @@ class ZigIntegratedTurboAPI(TurboAPI):
             for mw in reversed(middleware_instances):
                 response = mw.after_request(request, response)
 
-            # Merge middleware-added headers back
+            # Merge middleware-added headers back, including any body modifications
+            # (e.g. GZipMiddleware sets response.content to compressed bytes)
             result["status_code"] = response.status_code
+            result["content"] = response.content
             if response.headers:
                 result["extra_headers"] = response.headers
 
