@@ -1,21 +1,35 @@
-# TurboAPI + pg.zig — Twitter/X Thread
+# TurboPG + TurboAPI — Twitter/X Thread
 
 **Best times to post (PST):** Tue-Thu, 8-10 AM
 **Best times to post (SGT):** Tue-Thu, 11 PM - 1 AM
 
 ---
 
-## Tweet 1 (Hook)
+## Tweet 1 (Hook — introduce TurboPG)
 
-SQLAlchemy is elegant. It's also why your FastAPI app spends more time serializing rows than running queries.
+Introducing TurboPG — a Zig-native Postgres client for Python.
 
-We wired Postgres directly into TurboAPI's Zig core. HTTP in, JSON out. Python never touches the data.
+pip install turbopg
 
-128k req/s on DB routes. Here's how.
+Use it standalone, or pair it with TurboAPI for zero-Python database routes. HTTP request hits Zig, Zig queries Postgres, Zig writes JSON. Python never touches the data.
+
+128k req/s on DB routes. ~100x faster than FastAPI + SQLAlchemy.
 
 ---
 
-## Tweet 2 (The problem)
+## Tweet 2 (What is TurboPG)
+
+TurboPG is two things:
+
+1. A standalone Python package — `from turbopg import Database` — query Postgres with $1/$2 params, get dicts back. Works with psycopg2 fallback or Zig native.
+
+2. The DB engine inside TurboAPI — when you use `@app.db_get()`, TurboPG's Zig core handles the entire request. No ORM. No serializer. No GIL.
+
+Same library, two modes. Use what you need.
+
+---
+
+## Tweet 3 (The problem it solves)
 
 FastAPI + SQLAlchemy on a simple SELECT by id:
 
@@ -23,7 +37,7 @@ request → Starlette → Pydantic → SQLAlchemy ORM → psycopg → Postgres �
 
 That's 6 layers of Python on every single row.
 
-TurboAPI + pg.zig:
+TurboAPI + TurboPG:
 
 request → Zig HTTP parse → pg.zig query → writeJsonRow → response
 
@@ -31,18 +45,18 @@ Zero Python. Zero GIL. One syscall out.
 
 ---
 
-## Tweet 3 (The fork — credit + why)
+## Tweet 4 (The fork — credit + why)
 
 pg.zig is Karl Seguin's excellent Postgres client for Zig. Connection pooling, prepared statements, binary protocol — all native.
 
 But we needed things it didn't have. So we forked it:
 https://github.com/justrach/pg.zig
 
-Full credit to @karlseguin for the foundation. We just made it work for our use case.
+Full credit to @karlseguin for the foundation. We built TurboPG on top of it.
 
 ---
 
-## Tweet 4 (What we added to the fork)
+## Tweet 5 (What we added to the fork)
 
 What we changed in our pg.zig fork:
 
@@ -56,11 +70,11 @@ What we changed in our pg.zig fork:
 
 ---
 
-## Tweet 5 (Numbers)
+## Tweet 6 (Numbers)
 
 The numbers (Postgres 16, M3 Pro, wrk 4t/100c/10s):
 
-Endpoint              TurboAPI+pg.zig   FastAPI+SQLAlchemy
+Endpoint              TurboAPI+TurboPG  FastAPI+SQLAlchemy
 -----------------------------------------------------
 GET /users/:id        128,000/s         ~1,200/s
 GET /users (list)     125,000/s         ~900/s
@@ -73,7 +87,7 @@ That's ~100x on real DB routes. Not a typo.
 
 ---
 
-## Tweet 6 (Production features)
+## Tweet 7 (Production features)
 
 This isn't a demo. Production features:
 
@@ -86,9 +100,17 @@ This isn't a demo. Production features:
 
 ---
 
-## Tweet 7 (Developer experience)
+## Tweet 8 (Developer experience)
 
 The Python API is still clean:
+
+```python
+from turbopg import Database
+db = Database("postgres://localhost/mydb")
+users = db.query("SELECT * FROM users WHERE age > $1", [18])
+```
+
+Or with TurboAPI (zero-Python hot path):
 
 ```python
 @app.db_get("/users/{id}", table="users", pk="id")
@@ -100,12 +122,11 @@ async def search(q: str): ...
 
 Decorators define the route. Zig handles HTTP + Postgres + JSON. Your handler body is optional — for simple CRUD, you don't even need one.
 
-Custom SQL supports pgvector, JSONB, full-text search, JOINs, CTEs. Anything Postgres can run.
-
 ---
 
-## Tweet 8 (CTA)
+## Tweet 9 (CTA)
 
+pip install turbopg
 https://github.com/justrach/turboAPI
 Fork: https://github.com/justrach/pg.zig
 
@@ -117,9 +138,9 @@ Still experimental. PRs welcome.
 
 ## Alt: Single tweet
 
-We forked @karlseguin's pg.zig, added SIMD JSON escaping + pgvector + writeJsonRow, and wired it into TurboAPI's Zig HTTP core.
+Introducing TurboPG — a Zig-native Postgres client for Python. Use standalone or with TurboAPI for zero-Python DB routes.
 
-Result: 128k req/s on Postgres routes. ~100x faster than FastAPI + SQLAlchemy. Zero Python in the data path.
+Forked @karlseguin's pg.zig, added SIMD JSON escaping + pgvector + writeJsonRow. 128k req/s on Postgres routes. ~100x faster than FastAPI + SQLAlchemy.
 
+pip install turbopg
 https://github.com/justrach/turboAPI
-https://github.com/justrach/pg.zig
