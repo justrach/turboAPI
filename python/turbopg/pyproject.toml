@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "turbopg"
+version = "0.1.0rc1"
+description = "Zig-native Postgres client for Python — zero-overhead queries powered by pg.zig"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Rach Pradhan", email = "rach@turboapi.dev"}
+]
+keywords = ["postgres", "database", "zig", "performance", "pg", "sql", "pool"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+]
+dependencies = []
+
+[project.optional-dependencies]
+psycopg2 = ["psycopg2-binary>=2.9"]
+psycopg = ["psycopg>=3.1"]
+turbo = ["turboapi>=1.0.0"]
+dev = [
+    "pytest>=7.0.0",
+    "psycopg2-binary>=2.9",
+]
+
+[project.urls]
+Homepage = "https://github.com/justrach/turboAPI"
+Repository = "https://github.com/justrach/turboAPI"
+Documentation = "https://github.com/justrach/turboAPI#turbopg"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["turbopg*"]

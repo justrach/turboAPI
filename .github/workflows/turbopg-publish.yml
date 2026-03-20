@@ -1,0 +1,79 @@
+name: TurboPG Publish
+
+on:
+  push:
+    tags: ['turbopg-v*']
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: 'Version to publish (e.g. 0.1.0rc1, 0.1.0)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: "TurboPG tests (Python ${{ matrix.python }})"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.12', '3.13', '3.14']
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+
+      - name: Install test deps
+        run: pip install pytest
+
+      - name: Install TurboPG
+        run: pip install -e python/turbopg/
+
+      - name: Run TurboPG tests
+        run: python -m pytest tests/test_turbopg.py -v --tb=short
+
+  build:
+    name: Build TurboPG sdist + wheel
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build
+        run: |
+          pip install build
+          cd python/turbopg
+          python -m build --outdir ../../dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: turbopg-dist
+          path: dist/*
+
+  publish:
+    name: Publish TurboPG to PyPI
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: turbopg-dist
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_TOKEN_TURBOPG }}
+          skip-existing: true
