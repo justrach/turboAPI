@@ -1,0 +1,342 @@
+const mer = @import("mer");
+
+pub const meta: mer.Meta = .{
+    .title = "TurboPG",
+    .description = "Zig-native Postgres — 12-96x faster than FastAPI + SQLAlchemy. Zero Python in the hot path.",
+};
+
+pub fn render(req: mer.Request) mer.Response {
+    _ = req;
+    return .{
+        .status = .ok,
+        .content_type = .html,
+        .body = html,
+    };
+}
+
+const html =
+    \\<!DOCTYPE html>
+    \\<html lang="en">
+    \\<head>
+    \\  <meta charset="UTF-8">
+    \\  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    \\  <title>TurboPG — Zig-native Postgres</title>
+    \\  <link rel="preconnect" href="https://fonts.googleapis.com">
+    \\  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    \\  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    \\  <style>
+    \\    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    \\    :root {
+    \\      --dark: #0e0d0b; --dark2: #1a1916; --dark3: #252320;
+    \\      --text: #e8e4dc; --muted: #8a8478; --border: rgba(255,255,255,0.08);
+    \\      --accent: #e8821a; --accent-dim: rgba(232,130,26,0.15);
+    \\      --green: #22c55e; --red: #ef4444;
+    \\      --mono: 'JetBrains Mono', monospace;
+    \\      --sans: 'Inter', sans-serif;
+    \\      --display: 'Space Grotesk', sans-serif;
+    \\    }
+    \\    body { background: var(--dark); color: var(--text); font-family: var(--sans); }
+    \\    a { color: var(--accent); text-decoration: none; }
+    \\    a:hover { text-decoration: underline; }
+    \\
+    \\    /* Nav */
+    \\    nav { position: sticky; top: 0; z-index: 100; background: rgba(14,13,11,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }
+    \\    .nav-inner { max-width: 1100px; margin: 0 auto; padding: 0 40px; display: flex; align-items: center; justify-content: space-between; height: 60px; }
+    \\    .wordmark { font-family: var(--display); font-size: 16px; font-weight: 800; color: #fff; }
+    \\    .wordmark em { font-style: normal; color: var(--accent); }
+    \\    .nav-links { display: flex; gap: 32px; align-items: center; }
+    \\    .nav-links a { font-size: 13px; font-weight: 500; color: rgba(255,255,255,0.5); text-decoration: none; }
+    \\    .nav-links a:hover { color: #fff; }
+    \\    .nav-cta { color: #fff !important; background: var(--accent); padding: 8px 18px; border-radius: 4px; font-family: var(--display); font-weight: 700 !important; }
+    \\
+    \\    /* Hero */
+    \\    .hero { padding: 100px 40px 60px; text-align: center; }
+    \\    .hero h1 { font-family: var(--display); font-size: 56px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.1; }
+    \\    .hero h1 span { color: var(--accent); }
+    \\    .hero p { max-width: 600px; margin: 20px auto 0; font-size: 18px; color: var(--muted); line-height: 1.6; }
+    \\    .hero-stat { display: inline-flex; align-items: center; gap: 8px; margin-top: 32px; padding: 12px 24px; background: var(--accent-dim); border: 1px solid rgba(232,130,26,0.3); border-radius: 8px; font-family: var(--mono); font-size: 15px; }
+    \\    .hero-stat strong { color: var(--accent); font-size: 28px; }
+    \\
+    \\    /* Section */
+    \\    .section { max-width: 1000px; margin: 0 auto; padding: 60px 40px; }
+    \\    .section-eyebrow { font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent); margin-bottom: 8px; }
+    \\    .section h2 { font-family: var(--display); font-size: 32px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 12px; }
+    \\    .section p.sub { color: var(--muted); font-size: 16px; margin-bottom: 40px; }
+    \\
+    \\    /* Bar chart */
+    \\    .bar-group { margin-bottom: 48px; }
+    \\    .bar-group h3 { font-family: var(--display); font-size: 18px; margin-bottom: 16px; color: var(--muted); }
+    \\    .bar-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+    \\    .bar-label { width: 180px; font-size: 14px; color: var(--muted); text-align: right; flex-shrink: 0; }
+    \\    .bar-track { flex: 1; height: 32px; background: var(--dark3); border-radius: 4px; overflow: hidden; position: relative; }
+    \\    .bar-fill { height: 100%; border-radius: 4px; transition: width 1s ease; }
+    \\    .bar-fill.turbo { background: linear-gradient(90deg, var(--accent), #f5a623); }
+    \\    .bar-fill.other { background: rgba(255,255,255,0.12); }
+    \\    .bar-num { width: 120px; font-family: var(--mono); font-size: 14px; color: var(--text); }
+    \\    .bar-speedup { font-family: var(--mono); font-size: 13px; color: var(--green); font-weight: 600; }
+    \\
+    \\    /* Pipeline */
+    \\    .pipeline { display: flex; align-items: center; gap: 0; margin: 40px 0; flex-wrap: wrap; justify-content: center; }
+    \\    .pipe-step { padding: 14px 20px; background: var(--dark3); border: 1px solid var(--border); font-family: var(--mono); font-size: 13px; text-align: center; }
+    \\    .pipe-step.zig { border-color: var(--accent); color: var(--accent); }
+    \\    .pipe-arrow { font-size: 20px; color: var(--muted); padding: 0 4px; }
+    \\    .pipe-step:first-child { border-radius: 6px 0 0 6px; }
+    \\    .pipe-step:last-child { border-radius: 0 6px 6px 0; }
+    \\
+    \\    /* Code */
+    \\    .code-block { background: var(--dark2); border: 1px solid var(--border); border-radius: 8px; padding: 24px; overflow-x: auto; margin: 24px 0; }
+    \\    .code-block pre { font-family: var(--mono); font-size: 13px; line-height: 1.6; color: var(--text); }
+    \\    .code-block .kw { color: var(--accent); }
+    \\    .code-block .str { color: var(--green); }
+    \\    .code-block .cmt { color: var(--muted); }
+    \\
+    \\    /* Features grid */
+    \\    .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin: 40px 0; }
+    \\    .feature { padding: 24px; background: var(--dark2); border: 1px solid var(--border); border-radius: 8px; }
+    \\    .feature h4 { font-family: var(--display); font-size: 16px; margin-bottom: 8px; }
+    \\    .feature p { font-size: 14px; color: var(--muted); line-height: 1.5; }
+    \\
+    \\    /* Table */
+    \\    table { width: 100%; border-collapse: collapse; margin: 24px 0; }
+    \\    th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14px; }
+    \\    th { font-family: var(--display); font-weight: 600; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+    \\    td:nth-child(2), td:nth-child(3) { font-family: var(--mono); }
+    \\    .highlight { color: var(--accent); font-weight: 600; }
+    \\
+    \\    /* Footer */
+    \\    footer { padding: 40px; text-align: center; color: var(--muted); font-size: 13px; border-top: 1px solid var(--border); margin-top: 60px; }
+    \\    @media (max-width: 640px) {
+    \\      .hero h1 { font-size: 36px; }
+    \\      .bar-label { width: 100px; font-size: 12px; }
+    \\      .bar-num { width: 80px; font-size: 12px; }
+    \\      .nav-links { display: none; }
+    \\    }
+    \\  </style>
+    \\</head>
+    \\<body>
+    \\
+    \\<!-- Nav -->
+    \\<nav>
+    \\  <div class="nav-inner">
+    \\    <a href="/" class="wordmark">Turbo<em>API</em></a>
+    \\    <div class="nav-links">
+    \\      <a href="/benchmarks">Benchmarks</a>
+    \\      <a href="/turbopg" style="color:#fff">TurboPG</a>
+    \\      <a href="/docs">Docs</a>
+    \\      <a href="https://github.com/justrach/turboAPI">GitHub</a>
+    \\      <a href="/quickstart" class="nav-cta">Get started</a>
+    \\    </div>
+    \\  </div>
+    \\</nav>
+    \\
+    \\<!-- Hero -->
+    \\<div class="hero">
+    \\  <h1>Turbo<span>PG</span></h1>
+    \\  <p>Zig-native Postgres. The entire request cycle &mdash; HTTP parse, validation, SQL query, JSON response &mdash; runs in Zig. Zero Python. Zero GIL.</p>
+    \\  <div class="hero-stat">
+    \\    <strong>96x</strong> faster than FastAPI + SQLAlchemy
+    \\  </div>
+    \\</div>
+    \\
+    \\<!-- Pipeline -->
+    \\<div class="section">
+    \\  <div class="section-eyebrow">Architecture</div>
+    \\  <h2>Zero-Python request pipeline</h2>
+    \\  <p class="sub">Every step runs in Zig &mdash; Python never touches the hot path</p>
+    \\  <div class="pipeline">
+    \\    <div class="pipe-step zig">HTTP Request</div>
+    \\    <div class="pipe-arrow">&rarr;</div>
+    \\    <div class="pipe-step zig">Zig HTTP Server</div>
+    \\    <div class="pipe-arrow">&rarr;</div>
+    \\    <div class="pipe-step zig">dhi Validate</div>
+    \\    <div class="pipe-arrow">&rarr;</div>
+    \\    <div class="pipe-step zig">pg.zig Query</div>
+    \\    <div class="pipe-arrow">&rarr;</div>
+    \\    <div class="pipe-step zig">SIMD JSON</div>
+    \\    <div class="pipe-arrow">&rarr;</div>
+    \\    <div class="pipe-step zig">Response</div>
+    \\  </div>
+    \\</div>
+    \\
+    \\<!-- Benchmarks -->
+    \\<div class="section">
+    \\  <div class="section-eyebrow">Performance</div>
+    \\  <h2>TurboAPI + pg.zig vs FastAPI + SQLAlchemy</h2>
+    \\  <p class="sub">Postgres 18, wrk 2t/50c/5s, Python 3.14t free-threaded</p>
+    \\
+    \\  <div class="bar-group">
+    \\    <h3>Requests per second (higher is better)</h3>
+    \\
+    \\    <div class="bar-row">
+    \\      <div class="bar-label">Baseline (no DB)</div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:88%"></div></div>
+    \\      <div class="bar-num">117,440/s</div>
+    \\      <div class="bar-speedup">12x</div>
+    \\    </div>
+    \\    <div class="bar-row">
+    \\      <div class="bar-label" style="color:var(--muted);font-size:12px">&nbsp;</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:7%"></div></div>
+    \\      <div class="bar-num" style="color:var(--muted)">9,782/s</div>
+    \\      <div class="bar-speedup">&nbsp;</div>
+    \\    </div>
+    \\
+    \\    <div class="bar-row" style="margin-top:20px">
+    \\      <div class="bar-label">SELECT by PK</div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:94%"></div></div>
+    \\      <div class="bar-num">125,778/s</div>
+    \\      <div class="bar-speedup">48x</div>
+    \\    </div>
+    \\    <div class="bar-row">
+    \\      <div class="bar-label" style="color:var(--muted);font-size:12px">&nbsp;</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:2%"></div></div>
+    \\      <div class="bar-num" style="color:var(--muted)">2,639/s</div>
+    \\      <div class="bar-speedup">&nbsp;</div>
+    \\    </div>
+    \\
+    \\    <div class="bar-row" style="margin-top:20px">
+    \\      <div class="bar-label">Full-text search</div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:82%"></div></div>
+    \\      <div class="bar-num">109,626/s</div>
+    \\      <div class="bar-speedup">44x</div>
+    \\    </div>
+    \\    <div class="bar-row">
+    \\      <div class="bar-label" style="color:var(--muted);font-size:12px">&nbsp;</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:2%"></div></div>
+    \\      <div class="bar-num" style="color:var(--muted)">2,483/s</div>
+    \\      <div class="bar-speedup">&nbsp;</div>
+    \\    </div>
+    \\
+    \\    <div class="bar-row" style="margin-top:20px">
+    \\      <div class="bar-label">GROUP BY sum/avg</div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:97%"></div></div>
+    \\      <div class="bar-num">129,444/s</div>
+    \\      <div class="bar-speedup">96x</div>
+    \\    </div>
+    \\    <div class="bar-row">
+    \\      <div class="bar-label" style="color:var(--muted);font-size:12px">&nbsp;</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:1%"></div></div>
+    \\      <div class="bar-num" style="color:var(--muted)">1,354/s</div>
+    \\      <div class="bar-speedup">&nbsp;</div>
+    \\    </div>
+    \\
+    \\    <div class="bar-row" style="margin-top:20px">
+    \\      <div class="bar-label">Paginated list</div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:28%"></div></div>
+    \\      <div class="bar-num">37,729/s</div>
+    \\      <div class="bar-speedup">15x</div>
+    \\    </div>
+    \\    <div class="bar-row">
+    \\      <div class="bar-label" style="color:var(--muted);font-size:12px">&nbsp;</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:2%"></div></div>
+    \\      <div class="bar-num" style="color:var(--muted)">2,517/s</div>
+    \\      <div class="bar-speedup">&nbsp;</div>
+    \\    </div>
+    \\  </div>
+    \\</div>
+    \\
+    \\<!-- What it supports -->
+    \\<div class="section">
+    \\  <div class="section-eyebrow">Query types</div>
+    \\  <h2>Every pattern you actually use</h2>
+    \\  <p class="sub">All execute in Zig with proper type serialization</p>
+    \\  <table>
+    \\    <tr><th>Query type</th><th>Status</th><th>Example</th></tr>
+    \\    <tr><td>Simple CRUD</td><td class="highlight">&#10003;</td><td>db_get, db_post, db_list, db_delete</td></tr>
+    \\    <tr><td>JOINs + aggregation</td><td class="highlight">&#10003;</td><td>3-table LEFT JOIN + GROUP BY</td></tr>
+    \\    <tr><td>Full-text search</td><td class="highlight">&#10003;</td><td>tsv @@ plainto_tsquery + ts_rank</td></tr>
+    \\    <tr><td>JSONB filter</td><td class="highlight">&#10003;</td><td>metadata @> '{"role":"admin"}'</td></tr>
+    \\    <tr><td>GROUP BY + sum/avg</td><td class="highlight">&#10003;</td><td>count(*), sum(total), avg(price)</td></tr>
+    \\    <tr><td>Subquery + HAVING</td><td class="highlight">&#10003;</td><td>Nested SELECT with aggregate filters</td></tr>
+    \\    <tr><td>Array contains</td><td class="highlight">&#10003;</td><td>$1 = ANY(tags) &rarr; ["zig","api"]</td></tr>
+    \\    <tr><td>pgvector</td><td class="highlight">&#10003;</td><td>SIMD float32 decode + JSON array</td></tr>
+    \\    <tr><td>CTEs</td><td class="highlight">&#10003;</td><td>WITH RECURSIVE tree AS (...)</td></tr>
+    \\  </table>
+    \\</div>
+    \\
+    \\<!-- Features -->
+    \\<div class="section">
+    \\  <div class="section-eyebrow">Under the hood</div>
+    \\  <h2>What makes it fast</h2>
+    \\  <div class="features">
+    \\    <div class="feature">
+    \\      <h4>&#9889; SIMD JSON escaping</h4>
+    \\      <p>Scans 16 bytes at a time with @Vector(16, u8). Bulk memcpy when no escaping needed. ~4x faster for typical text.</p>
+    \\    </div>
+    \\    <div class="feature">
+    \\      <h4>&#128203; Response cache</h4>
+    \\      <p>Thread-safe, 30s TTL, per-table invalidation, LRU eviction. Cached reads match pure Zig baseline (~130k req/s).</p>
+    \\    </div>
+    \\    <div class="feature">
+    \\      <h4>&#128640; Prepared statements</h4>
+    \\      <p>Auto-cached per route. First query does Parse+Bind+Execute, repeat queries skip Parse entirely.</p>
+    \\    </div>
+    \\    <div class="feature">
+    \\      <h4>&#127919; pgvector native</h4>
+    \\      <p>SIMD batch float32 decode. L2 distance and cosine similarity with @Vector(4, f32) accumulation.</p>
+    \\    </div>
+    \\    <div class="feature">
+    \\      <h4>&#128274; SQL injection safe</h4>
+    \\      <p>All values go through $N parameterized bindings. Table names validated at startup (alphanumeric only).</p>
+    \\    </div>
+    \\    <div class="feature">
+    \\      <h4>&#128230; All Postgres types</h4>
+    \\      <p>int, float, numeric, bool, JSON/JSONB, TEXT[], INT[], timestamps, pgvector &mdash; all serialize to correct JSON.</p>
+    \\    </div>
+    \\  </div>
+    \\</div>
+    \\
+    \\<!-- Code example -->
+    \\<div class="section">
+    \\  <div class="section-eyebrow">Usage</div>
+    \\  <h2>Three lines to zero-Python DB</h2>
+    \\  <div class="code-block"><pre><span class="kw">from</span> turboapi <span class="kw">import</span> TurboAPI
+    \\<span class="kw">from</span> dhi <span class="kw">import</span> BaseModel, Field
+    \\
+    \\app = TurboAPI()
+    \\app.configure_db(<span class="str">"postgres://user:pass@localhost/mydb"</span>, pool_size=16)
+    \\
+    \\<span class="kw">class</span> User(BaseModel):
+    \\    name: str = Field(min_length=1, max_length=100)
+    \\    email: str
+    \\
+    \\<span class="cmt"># Auto-CRUD &mdash; Zig generates SQL from model</span>
+    \\@app.db_get(<span class="str">"/users/{user_id}"</span>, table=<span class="str">"users"</span>, pk=<span class="str">"id"</span>)
+    \\<span class="kw">def</span> get_user(): <span class="kw">pass</span>   <span class="cmt"># 130k req/s, zero Python</span>
+    \\
+    \\<span class="cmt"># Custom SQL &mdash; pgvector, FTS, JOINs, anything</span>
+    \\@app.db_query(<span class="str">"GET"</span>, <span class="str">"/search"</span>, sql=<span class="str">"""
+    \\    SELECT id, title, ts_rank(tsv, plainto_tsquery($1)) AS rank
+    \\    FROM articles WHERE tsv @@ plainto_tsquery($1) LIMIT 10
+    \\"""</span>, params=[<span class="str">"q"</span>])
+    \\<span class="kw">def</span> search(): <span class="kw">pass</span></pre></div>
+    \\</div>
+    \\
+    \\<!-- Standalone -->
+    \\<div class="section">
+    \\  <h2>Works standalone too</h2>
+    \\  <p class="sub">pip install turboapi &mdash; use TurboPG without the web framework</p>
+    \\  <div class="code-block"><pre><span class="kw">from</span> turbopg <span class="kw">import</span> Database
+    \\
+    \\db = Database(<span class="str">"postgres://user:pass@localhost/mydb"</span>)
+    \\users = db.query(<span class="str">"SELECT * FROM users WHERE age > $1"</span>, [18])
+    \\user = db.query_one(<span class="str">"SELECT * FROM users WHERE id = $1"</span>, [42])
+    \\db.execute(<span class="str">"INSERT INTO users (name) VALUES ($1)"</span>, [<span class="str">"Alice"</span>])</pre></div>
+    \\</div>
+    \\
+    \\<!-- CTA -->
+    \\<div class="section" style="text-align:center;padding:80px 40px">
+    \\  <h2>Ship faster APIs</h2>
+    \\  <p class="sub">Drop-in FastAPI replacement. Zig-native Postgres. 12-96x faster.</p>
+    \\  <div style="display:flex;gap:16px;justify-content:center;margin-top:24px">
+    \\    <a href="/quickstart" class="nav-cta" style="font-size:15px;padding:12px 28px;border-radius:6px">Get started</a>
+    \\    <a href="https://github.com/justrach/turboAPI" class="nav-cta" style="font-size:15px;padding:12px 28px;border-radius:6px;background:var(--dark3);border:1px solid var(--border)">GitHub</a>
+    \\  </div>
+    \\</div>
+    \\
+    \\<footer>
+    \\  TurboAPI &middot; MIT License &middot; <a href="https://github.com/justrach/turboAPI">GitHub</a>
+    \\</footer>
+    \\
+    \\</body>
+    \\</html>
+;
