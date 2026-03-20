@@ -13,7 +13,7 @@ import time
 import pytest
 import requests
 from turboapi import TurboAPI
-from turboapi.middleware import CORSMiddleware
+from turboapi.middleware import CORSMiddleware, GZipMiddleware, LoggingMiddleware
 
 
 def _start(app, port):
@@ -21,6 +21,47 @@ def _start(app, port):
     t.start()
     time.sleep(1.5)
 
+@pytest.fixture(scope="module")
+def gzip_app():
+    app = TurboAPI()
+    app.add_middleware(GZipMiddleware, minimum_size=10)
+
+    @app.get("/large")
+    def large_response():
+        return {"data": "A" * 1000}
+
+    _start(app, 9851)
+    return "http://127.0.0.1:9851"
+def test_gzip_middleware_compat(gzip_app):
+    """GZip middleware must correctly compress and return 200."""
+    headers = {"Accept-Encoding": "gzip"}
+    r = requests.get(f"{gzip_app}/large", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.headers.get("Content-Encoding") == "gzip"
+
+@pytest.fixture(scope="module")
+def stacked_app():
+    app = TurboAPI()
+    # Stacking Auth (simulated via logging) and CORS
+    app.add_middleware(LoggingMiddleware)
+    app.add_middleware(
+        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    )
+
+    @app.get("/stacked")
+    def stacked_route():
+        return {"status": "ok", "latency": "stable"}
+
+    _start(app, 9852)
+    return "http://127.0.0.1:9852"
+
+def test_stacked_middleware_compat(stacked_app):
+    """Stacked middlewares must process the request and return 200 successfully."""
+    r = requests.get(f"{stacked_app}/stacked")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["status"] == "ok"
+    assert "Access-Control-Allow-Origin" in r.headers
 
 @pytest.fixture(scope="module")
 def cors_app():
