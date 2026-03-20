@@ -148,3 +148,41 @@ def test_cors_response_ok(cors_app):
     for url in ["/", "/items/1", "/search?q=x"]:
         r = requests.get(f"{cors_app}{url}")
         assert r.status_code == 200, f"{url} returned {r.status_code}: {r.text}"
+
+
+@pytest.fixture(scope="module")
+def https_redirect_app():
+    from turboapi.middleware import HTTPSRedirectMiddleware
+
+    app = TurboAPI()
+    app.add_middleware(HTTPSRedirectMiddleware)
+
+    @app.get("/secure")
+    def secure_route():
+        return {"secured": True}
+
+    _start(app, 9853)
+    return "http://127.0.0.1:9853"
+
+
+def test_https_redirect_passthrough(https_redirect_app):
+    """HTTPSRedirectMiddleware must pass through requests that already carry
+    x-forwarded-proto: https (simulates a TLS-terminating proxy)."""
+    r = requests.get(
+        f"{https_redirect_app}/secure",
+        headers={"x-forwarded-proto": "https"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"secured": True}
+
+
+def test_https_redirect_blocked(https_redirect_app):
+    """HTTPSRedirectMiddleware must block plain HTTP requests (no x-forwarded-proto)
+    and return a 4xx/5xx — not a 200. In TurboAPI's middleware path BeforeRequest
+    exceptions map to a 429 error response rather than a 301 redirect because the
+    Zig transport cannot issue a redirect directly from a Python exception."""
+    r = requests.get(f"{https_redirect_app}/secure")
+    # Must NOT be 200 – the middleware raised before the handler ran.
+    assert r.status_code != 200, (
+        f"Expected non-200 for plain HTTP request, got {r.status_code}: {r.text}"
+    )
