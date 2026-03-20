@@ -381,7 +381,15 @@ class ZigIntegratedTurboAPI(TurboAPI):
     # ── Zig-native DB routes (pg.zig — zero Python CRUD) ─────────────────────
 
     def configure_db(self, conn_string: str, pool_size: int = 16):
-        """Configure Postgres connection pool in Zig (pg.zig)."""
+        """Configure Postgres connection pool in Zig (pg.zig).
+
+        Supports TCP and Unix sockets:
+            app.configure_db("postgres://user:pass@localhost/mydb")
+            app.configure_db("postgres://user:pass@/var/run/postgresql/mydb")
+
+        Prepared statements are enabled automatically — each route's SQL
+        is cached on first execution for faster repeat queries.
+        """
         self._db_config = (conn_string, pool_size)
         print(f"{CHECK_MARK} DB configured: pool_size={pool_size}")
 

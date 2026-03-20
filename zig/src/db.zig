@@ -24,8 +24,9 @@ pub const DbRouteEntry = struct {
     select_sql: []const u8,
     insert_sql: []const u8,
     delete_sql: []const u8,
-    custom_sql: []const u8, // raw SQL for custom_query ops
-    param_names: []const []const u8, // ordered param names for custom queries
+    custom_sql: []const u8,
+    param_names: []const []const u8,
+    cache_name: ?[]const u8, // prepared statement cache name (skips Parse on repeat queries)
     schema: ?dhi.ModelSchema,
 };
 
@@ -211,7 +212,7 @@ pub fn handleDbRoute(
             };
             defer releaseConn(conn);
 
-            var result = conn.queryOpts(entry.select_sql, .{pk_val}, .{ .column_names = true }) catch {
+            var result = conn.queryOpts(entry.select_sql, .{pk_val}, .{ .column_names = true, .cache_name = entry.cache_name }) catch {
                 sendResponseFn(stream, 500, "application/json", "{\"error\": \"Query failed\"}");
                 return;
             };
@@ -264,7 +265,7 @@ pub fn handleDbRoute(
             };
             defer releaseConn(conn);
 
-            var result = conn.queryOpts(entry.select_sql, .{ limit, offset }, .{ .column_names = true }) catch {
+            var result = conn.queryOpts(entry.select_sql, .{ limit, offset }, .{ .column_names = true, .cache_name = entry.cache_name }) catch {
                 sendResponseFn(stream, 500, "application/json", "{\"error\": \"Query failed\"}");
                 return;
             };
@@ -360,7 +361,7 @@ pub fn handleDbRoute(
             };
             defer releaseConn(conn);
 
-            const insert_result = execWithParams(conn, entry.insert_sql, values[0..ncols]);
+            const insert_result = execWithParams(conn, entry.insert_sql, values[0..ncols], entry.cache_name);
             if (insert_result) |result| {
                 defer result.deinit();
                 // Invalidate cache on write
@@ -475,7 +476,7 @@ pub fn handleDbRoute(
             };
             defer releaseConn(conn);
 
-            const result_opt = execWithParams(conn, entry.custom_sql, param_values[0..param_count]);
+            const result_opt = execWithParams(conn, entry.custom_sql, param_values[0..param_count], entry.cache_name);
             if (result_opt) |result| {
                 defer result.deinit();
 
@@ -531,17 +532,18 @@ pub fn handleDbRoute(
         },
     }
 }
-fn execWithParams(conn: *pg.Conn, sql: []const u8, values: []const []const u8) ?*pg.Result {
+fn execWithParams(conn: *pg.Conn, sql: []const u8, values: []const []const u8, cache_name: ?[]const u8) ?*pg.Result {
+    const opts = pg.Conn.QueryOpts{ .column_names = true, .cache_name = cache_name };
     return switch (values.len) {
-        0 => conn.queryOpts(sql, .{}, .{ .column_names = true }) catch return null,
-        1 => conn.queryOpts(sql, .{values[0]}, .{ .column_names = true }) catch return null,
-        2 => conn.queryOpts(sql, .{ values[0], values[1] }, .{ .column_names = true }) catch return null,
-        3 => conn.queryOpts(sql, .{ values[0], values[1], values[2] }, .{ .column_names = true }) catch return null,
-        4 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3] }, .{ .column_names = true }) catch return null,
-        5 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3], values[4] }, .{ .column_names = true }) catch return null,
-        6 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3], values[4], values[5] }, .{ .column_names = true }) catch return null,
-        7 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3], values[4], values[5], values[6] }, .{ .column_names = true }) catch return null,
-        8 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7] }, .{ .column_names = true }) catch return null,
+        0 => conn.queryOpts(sql, .{}, opts) catch return null,
+        1 => conn.queryOpts(sql, .{values[0]}, opts) catch return null,
+        2 => conn.queryOpts(sql, .{ values[0], values[1] }, opts) catch return null,
+        3 => conn.queryOpts(sql, .{ values[0], values[1], values[2] }, opts) catch return null,
+        4 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3] }, opts) catch return null,
+        5 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3], values[4] }, opts) catch return null,
+        6 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3], values[4], values[5] }, opts) catch return null,
+        7 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3], values[4], values[5], values[6] }, opts) catch return null,
+        8 => conn.queryOpts(sql, .{ values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7] }, opts) catch return null,
         else => null,
     };
 }
@@ -671,6 +673,10 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         }
     }
     const param_names_owned = allocator.dupe([]const u8, pnames[0..npnames]) catch return null;
+    // Generate prepared statement cache name: "db_METHOD_path"
+    var cache_name_counter: usize = 0;
+    _ = @atomicRmw(usize, &cache_name_counter, .Add, 1, .seq_cst);
+    const cache_name = std.fmt.allocPrint(allocator, "db_{s}_{s}", .{ method_s, path_s }) catch null;
 
     const entry = DbRouteEntry{
         .op = op,
@@ -683,6 +689,7 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         .delete_sql = if (pk_col) |pk| buildDeleteSql(table, pk) else "",
         .custom_sql = custom_sql,
         .param_names = param_names_owned,
+        .cache_name = cache_name,
         .schema = null,
     };
 
