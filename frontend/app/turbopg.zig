@@ -27,40 +27,39 @@ const html =
     \\  <style>
     \\    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     \\    :root {
-    \\      --dark: #0e0d0b; --dark2: #1a1916; --dark3: #252320;
-    \\      --text: #e8e4dc; --muted: #8a8478; --border: rgba(255,255,255,0.08);
-    \\      --accent: #e8821a; --accent-dim: rgba(232,130,26,0.15);
-    \\      --green: #22c55e; --red: #ef4444;
+    \\      --bg: #fafaf9; --bg2: #f3f3f1; --bg3: #e8e8e5;
+    \\      --text: #1a1a1a; --muted: #6b7280; --border: #e5e5e3;
+    \\      --accent: #e8821a; --accent-dim: rgba(232,130,26,0.12);
+    \\      --green: #16a34a; --green-dim: rgba(22,163,74,0.1); --green-border: rgba(22,163,74,0.25);
     \\      --mono: 'JetBrains Mono', monospace;
     \\      --sans: 'Inter', sans-serif;
     \\      --display: 'Space Grotesk', sans-serif;
     \\    }
-    \\    body { background: var(--dark); color: var(--text); font-family: var(--sans); }
+    \\    body { background: var(--bg); color: var(--text); font-family: var(--sans); }
     \\    a { color: var(--accent); text-decoration: none; }
     \\    a:hover { text-decoration: underline; }
     \\
     \\    /* Nav */
-    \\    nav { position: sticky; top: 0; z-index: 100; background: rgba(14,13,11,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }
+    \\    nav { position: sticky; top: 0; z-index: 100; background: rgba(250,250,249,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }
     \\    .nav-inner { max-width: 1100px; margin: 0 auto; padding: 0 40px; display: flex; align-items: center; justify-content: space-between; height: 60px; }
-    \\    .wordmark { font-family: var(--display); font-size: 16px; font-weight: 800; color: #fff; }
-    \\    .wordmark em { font-style: normal; color: var(--accent); }
+    \\    .wordmark { font-family: var(--display); font-size: 16px; font-weight: 800; color: var(--text); }
+    \\    .wordmark em { font-style: normal; color: var(--green); }
     \\    .nav-links { display: flex; gap: 32px; align-items: center; }
-    \\    .nav-links a { font-size: 13px; font-weight: 500; color: rgba(255,255,255,0.5); text-decoration: none; }
-    \\    .nav-links a:hover { color: #fff; }
-    \\    .nav-cta { color: #fff !important; background: var(--accent); padding: 8px 18px; border-radius: 4px; font-family: var(--display); font-weight: 700 !important; }
+    \\    .nav-links a { font-size: 13px; font-weight: 500; color: var(--muted); text-decoration: none; }
+    \\    .nav-links a:hover { color: var(--text); }
+    \\    .nav-cta { color: #fff !important; background: var(--green); padding: 8px 18px; border-radius: 4px; font-family: var(--display); font-weight: 700 !important; }
     \\
     \\    /* Hero */
-    \\    .hero { padding: 100px 40px 60px; text-align: center; }
     \\    .hero h1 { font-family: var(--display); font-size: 56px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.1; }
-    \\    .hero h1 span { color: var(--accent); }
+    \\    .hero h1 span { color: var(--green); }
     \\    .hero p { max-width: 600px; margin: 20px auto 0; font-size: 18px; color: var(--muted); line-height: 1.6; }
-    \\    .hero-stat { display: inline-flex; align-items: center; gap: 8px; margin-top: 32px; padding: 12px 24px; background: var(--accent-dim); border: 1px solid rgba(232,130,26,0.3); border-radius: 8px; font-family: var(--mono); font-size: 15px; }
-    \\    .hero-stat strong { color: var(--accent); font-size: 28px; }
+    \\    .hero-stat { display: inline-flex; align-items: center; gap: 8px; margin-top: 32px; padding: 12px 24px; background: var(--green-dim); border: 1px solid var(--green-border); border-radius: 8px; font-family: var(--mono); font-size: 15px; color: var(--text); }
+    \\    .hero-stat strong { color: var(--green); font-size: 28px; }
+    \\    .exp-badge { display: inline-block; margin-top: 16px; padding: 6px 14px; background: var(--green-dim); border: 1px solid var(--green-border); border-radius: 20px; font-family: var(--mono); font-size: 12px; color: var(--green); font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
     \\
     \\    /* Section */
-    \\    .section { max-width: 1000px; margin: 0 auto; padding: 60px 40px; }
-    \\    .section-eyebrow { font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent); margin-bottom: 8px; }
-    \\    .section h2 { font-family: var(--display); font-size: 32px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 12px; }
+    \\    .section-eyebrow { font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--green); margin-bottom: 8px; }
+    \\    .section h2 { font-family: var(--display); font-size: 32px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 12px; color: var(--text); }
     \\    .section p.sub { color: var(--muted); font-size: 16px; margin-bottom: 40px; }
     \\
     \\    /* Bar chart */
@@ -68,31 +67,31 @@ const html =
     \\    .bar-group h3 { font-family: var(--display); font-size: 18px; margin-bottom: 16px; color: var(--muted); }
     \\    .bar-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
     \\    .bar-label { width: 180px; font-size: 14px; color: var(--muted); text-align: right; flex-shrink: 0; }
-    \\    .bar-track { flex: 1; height: 32px; background: var(--dark3); border-radius: 4px; overflow: hidden; position: relative; }
+    \\    .bar-track { flex: 1; height: 32px; background: var(--bg3); border-radius: 4px; overflow: hidden; position: relative; }
     \\    .bar-fill { height: 100%; border-radius: 4px; transition: width 1s ease; }
     \\    .bar-fill.turbo { background: linear-gradient(90deg, var(--accent), #f5a623); }
-    \\    .bar-fill.other { background: rgba(255,255,255,0.12); }
+    \\    .bar-fill.other { background: rgba(0,0,0,0.08); }
     \\    .bar-num { width: 120px; font-family: var(--mono); font-size: 14px; color: var(--text); }
     \\    .bar-speedup { font-family: var(--mono); font-size: 13px; color: var(--green); font-weight: 600; }
     \\
     \\    /* Pipeline */
     \\    .pipeline { display: flex; align-items: center; gap: 0; margin: 40px 0; flex-wrap: wrap; justify-content: center; }
-    \\    .pipe-step { padding: 14px 20px; background: var(--dark3); border: 1px solid var(--border); font-family: var(--mono); font-size: 13px; text-align: center; }
+    \\    .pipe-step { padding: 14px 20px; background: var(--bg2); border: 1px solid var(--border); font-family: var(--mono); font-size: 13px; text-align: center; color: var(--text); }
     \\    .pipe-step.zig { border-color: var(--accent); color: var(--accent); }
     \\    .pipe-arrow { font-size: 20px; color: var(--muted); padding: 0 4px; }
     \\    .pipe-step:first-child { border-radius: 6px 0 0 6px; }
     \\    .pipe-step:last-child { border-radius: 0 6px 6px 0; }
     \\
     \\    /* Code */
-    \\    .code-block { background: var(--dark2); border: 1px solid var(--border); border-radius: 8px; padding: 24px; overflow-x: auto; margin: 24px 0; }
-    \\    .code-block pre { font-family: var(--mono); font-size: 13px; line-height: 1.6; color: var(--text); }
+    \\    .code-block { background: #1a1a2e; border: 1px solid #2d2d44; border-radius: 8px; padding: 24px; overflow-x: auto; margin: 24px 0; }
+    \\    .code-block pre { font-family: var(--mono); font-size: 13px; line-height: 1.6; color: #e8e4dc; }
     \\    .code-block .kw { color: var(--accent); }
     \\    .code-block .str { color: var(--green); }
     \\    .code-block .cmt { color: var(--muted); }
     \\
     \\    /* Features grid */
     \\    .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin: 40px 0; }
-    \\    .feature { padding: 24px; background: var(--dark2); border: 1px solid var(--border); border-radius: 8px; }
+    \\    .feature { padding: 24px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; }
     \\    .feature h4 { font-family: var(--display); font-size: 16px; margin-bottom: 8px; }
     \\    .feature p { font-size: 14px; color: var(--muted); line-height: 1.5; }
     \\
@@ -121,7 +120,7 @@ const html =
     \\    <a href="/" class="wordmark">Turbo<em>API</em></a>
     \\    <div class="nav-links">
     \\      <a href="/benchmarks">Benchmarks</a>
-    \\      <a href="/turbopg" style="color:#fff">TurboPG</a>
+    \\      <a href="/turbopg" style="color:var(--green);font-weight:600">TurboPG</a>
     \\      <a href="/docs">Docs</a>
     \\      <a href="https://github.com/justrach/turboAPI">GitHub</a>
     \\      <a href="/quickstart" class="nav-cta">Get started</a>
@@ -131,6 +130,7 @@ const html =
     \\
     \\<!-- Hero -->
     \\<div class="hero">
+    \\  <div class="exp-badge">&#9889; Experimental &mdash; coming soon</div>
     \\  <h1>Turbo<span>PG</span></h1>
     \\  <p>Zig-native Postgres. The entire request cycle &mdash; HTTP parse, validation, SQL query, JSON response &mdash; runs in Zig. Zero Python. Zero GIL.</p>
     \\  <div class="hero-stat">
@@ -329,7 +329,7 @@ const html =
     \\  <p class="sub">Drop-in FastAPI replacement. Zig-native Postgres. 12-96x faster.</p>
     \\  <div style="display:flex;gap:16px;justify-content:center;margin-top:24px">
     \\    <a href="/quickstart" class="nav-cta" style="font-size:15px;padding:12px 28px;border-radius:6px">Get started</a>
-    \\    <a href="https://github.com/justrach/turboAPI" class="nav-cta" style="font-size:15px;padding:12px 28px;border-radius:6px;background:var(--dark3);border:1px solid var(--border)">GitHub</a>
+    \\    <a href="https://github.com/justrach/turboAPI" class="nav-cta" style="font-size:15px;padding:12px 28px;border-radius:6px;background:var(--bg3);color:var(--text) !important;border:1px solid var(--border)">GitHub</a>
     \\  </div>
     \\</div>
     \\
