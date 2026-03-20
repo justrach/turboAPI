@@ -5,6 +5,8 @@ pub const meta: mer.Meta = .{
     .description = "Zig-native Postgres — 12-96x faster than FastAPI + SQLAlchemy. Zero Python in the hot path.",
 };
 
+pub const prerender = true;
+
 pub fn render(req: mer.Request) mer.Response {
     _ = req;
     return .{
