@@ -13,6 +13,10 @@ try:
 except ImportError:
     # Dhi not installed - Model-based handlers won't get special treatment
     BaseModel = None
+try:
+    from .async_pool import EventLoopPool
+except ImportError:
+    EventLoopPool = None  # type: ignore
 
 from .main_app import TurboAPI
 from .models import Request, Response
@@ -622,10 +626,17 @@ class ZigIntegratedTurboAPI(TurboAPI):
 
             # Call actual handler — may be async (simple_async/body_async), in which
             # case enhanced_handler returns a coroutine that we must run to completion.
+            # Use a per-thread event loop (EventLoopPool) instead of asyncio.run() so
+            # that 24 concurrent Zig worker threads don't each create/destroy a loop,
+            # which corrupts Python async state under high concurrency.
             try:
                 result = enhanced_handler(**kwargs)
                 if inspect.iscoroutine(result):
-                    result = asyncio.run(result)
+                    if EventLoopPool is not None:
+                        loop = EventLoopPool.get_loop_for_thread()
+                        result = loop.run_until_complete(result)
+                    else:
+                        result = asyncio.run(result)
             except Exception as e:
                 for mw in reversed(middleware_instances):
                     err_resp = mw.on_error(request, e)
@@ -650,10 +661,14 @@ class ZigIntegratedTurboAPI(TurboAPI):
             for mw in reversed(middleware_instances):
                 response = mw.after_request(request, response)
 
-            # Merge middleware-added headers back, including any body modifications
-            # (e.g. GZipMiddleware sets response.content to compressed bytes)
+            # Merge middleware-added headers and any body modifications back.
+            # Only overwrite content if middleware actually mutated it
+            # (e.g. GZipMiddleware compresses bytes) — avoids blanking a valid
+            # response body when middleware only touches headers.
             result["status_code"] = response.status_code
-            result["content"] = response.content
+            original_content = result.get("content", "")
+            if response.content != original_content:
+                result["content"] = response.content
             if response.headers:
                 result["extra_headers"] = response.headers
 

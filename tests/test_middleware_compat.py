@@ -7,6 +7,7 @@ Previously these routes were registered with the wrong Zig dispatch type and
 returned 500 with "bad tuple[0]".
 """
 
+import socket
 import threading
 import time
 
@@ -14,6 +15,13 @@ import pytest
 import requests
 from turboapi import TurboAPI
 from turboapi.middleware import CORSMiddleware, GZipMiddleware, LoggingMiddleware
+
+
+def _free_port() -> int:
+    """Ask the OS for a free port, then release it for the server to bind."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def _start(app, port):
@@ -30,8 +38,9 @@ def gzip_app():
     def large_response():
         return {"data": "A" * 1000}
 
-    _start(app, 9851)
-    return "http://127.0.0.1:9851"
+    port = _free_port()
+    _start(app, port)
+    return f"http://127.0.0.1:{port}"
 def test_gzip_middleware_compat(gzip_app):
     """GZip middleware must correctly compress and return 200."""
     headers = {"Accept-Encoding": "gzip"}
@@ -52,8 +61,9 @@ def stacked_app():
     def stacked_route():
         return {"status": "ok", "latency": "stable"}
 
-    _start(app, 9852)
-    return "http://127.0.0.1:9852"
+    port = _free_port()
+    _start(app, port)
+    return f"http://127.0.0.1:{port}"
 
 def test_stacked_middleware_compat(stacked_app):
     """Stacked middlewares must process the request and return 200 successfully."""
@@ -95,8 +105,9 @@ def cors_app():
     def create_item(body: Item):
         return {"id": 1, "name": body.name, "price": body.price}
 
-    _start(app, 9850)
-    return "http://127.0.0.1:9850"
+    port = _free_port()
+    _start(app, port)
+    return f"http://127.0.0.1:{port}"
 
 
 def test_cors_noargs_get(cors_app):
@@ -161,8 +172,9 @@ def https_redirect_app():
     def secure_route():
         return {"secured": True}
 
-    _start(app, 9853)
-    return "http://127.0.0.1:9853"
+    port = _free_port()
+    _start(app, port)
+    return f"http://127.0.0.1:{port}"
 
 
 def test_https_redirect_passthrough(https_redirect_app):
