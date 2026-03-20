@@ -5,13 +5,20 @@ These features are WORKING and TESTED!
 
 Path parameters use Zig radix-trie router.
 """
-
+import os
+import socket
 import threading
 import time
 
 import pytest
 import requests
 from turboapi import TurboAPI
+
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
 
 # Mark tests that require header extraction feature (not yet implemented)
 HEADER_EXTRACTION = pytest.mark.xfail(
@@ -25,6 +32,8 @@ def test_query_parameters_comprehensive():
     print("TEST 1: Query Parameters (COMPREHENSIVE)")
     print("=" * 70)
 
+    port = _free_port()
+    os.environ["TURBO_DISABLE_CACHE"] = "1"
     app = TurboAPI(title="Query Test")
 
     @app.get("/search")
@@ -36,14 +45,16 @@ def test_query_parameters_comprehensive():
         return {"category": category, "price_range": f"{min_price}-{max_price}", "success": True}
 
     def start_server():
-        app.run(host="127.0.0.1", port=9300)
+        app.run(host="127.0.0.1", port=port)
 
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
     time.sleep(2)
 
+    base = f"http://127.0.0.1:{port}"
+
     # Test 1: Basic query params
-    r = requests.get("http://127.0.0.1:9300/search?q=turboapi&limit=20&sort=date")
+    r = requests.get(f"{base}/search?q=turboapi&limit=20&sort=date")
     print(f"Test 1a - Basic: {r.status_code}")
     print(f"Response: {r.json()}")
     assert r.status_code == 200
@@ -54,7 +65,7 @@ def test_query_parameters_comprehensive():
     print("✅ PASSED: Basic query params")
 
     # Test 2: Default values
-    r = requests.get("http://127.0.0.1:9300/search?q=test")
+    r = requests.get(f"{base}/search?q=test")
     print(f"\nTest 1b - Defaults: {r.status_code}")
     print(f"Response: {r.json()}")
     assert r.status_code == 200
@@ -66,7 +77,7 @@ def test_query_parameters_comprehensive():
 
     # Test 3: Multiple params
     r = requests.get(
-        "http://127.0.0.1:9300/filter?category=electronics&min_price=100&max_price=500"
+        f"{base}/filter?category=electronics&min_price=100&max_price=500"
     )
     print(f"\nTest 1c - Multiple: {r.status_code}")
     print(f"Response: {r.json()}")
@@ -78,7 +89,7 @@ def test_query_parameters_comprehensive():
     print("✅ PASSED: Multiple params")
 
     # Test 4: Special characters (URL encoded)
-    r = requests.get("http://127.0.0.1:9300/search?q=hello%20world&limit=5")
+    r = requests.get(f"{base}/search?q=hello%20world&limit=5")
     print(f"\nTest 1d - Special chars: {r.status_code}")
     print(f"Response: {r.json()}")
     assert r.status_code == 200
@@ -87,9 +98,7 @@ def test_query_parameters_comprehensive():
     print("✅ PASSED: Special characters")
 
     print("\n✅ ALL QUERY PARAMETER TESTS PASSED!")
-    return True
-
-
+@HEADER_EXTRACTION
 @HEADER_EXTRACTION
 def test_headers_comprehensive():
     """Comprehensive test of header parsing"""
@@ -97,6 +106,7 @@ def test_headers_comprehensive():
     print("TEST 2: Headers (COMPREHENSIVE)")
     print("=" * 70)
 
+    port = _free_port()
     app = TurboAPI(title="Header Test")
 
     @app.get("/auth")
@@ -128,14 +138,16 @@ def test_headers_comprehensive():
         }
 
     def start_server():
-        app.run(host="127.0.0.1", port=9301)
+        app.run(host="127.0.0.1", port=port)
 
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
     time.sleep(2)
 
+    base = f"http://127.0.0.1:{port}"
+
     # Test 1: Authorization header
-    r = requests.get("http://127.0.0.1:9301/auth", headers={"Authorization": "Bearer token123"})
+    r = requests.get(f"{base}/auth", headers={"Authorization": "Bearer token123"})
     print(f"Test 2a - Authorization: {r.status_code}")
     print(f"Response: {r.json()}")
     assert r.status_code == 200
@@ -146,7 +158,7 @@ def test_headers_comprehensive():
 
     # Test 2: Standard headers
     r = requests.get(
-        "http://127.0.0.1:9301/info",
+        f"{base}/info",
         headers={
             "User-Agent": "TurboAPI-Test/1.0",
             "Accept": "application/json",
@@ -163,7 +175,7 @@ def test_headers_comprehensive():
 
     # Test 3: Custom headers with dashes
     r = requests.get(
-        "http://127.0.0.1:9301/custom",
+        f"{base}/custom",
         headers={"X-API-Key": "secret-key-123", "X-Request-ID": "req-456"},
     )
     print(f"\nTest 2c - Custom headers: {r.status_code}")
@@ -175,7 +187,7 @@ def test_headers_comprehensive():
     print("✅ PASSED: Custom headers")
 
     # Test 4: Missing headers (defaults)
-    r = requests.get("http://127.0.0.1:9301/auth")
+    r = requests.get(f"{base}/auth")
     print(f"\nTest 2d - Missing headers: {r.status_code}")
     print(f"Response: {r.json()}")
     assert r.status_code == 200
@@ -184,9 +196,7 @@ def test_headers_comprehensive():
     print("✅ PASSED: Missing headers (defaults)")
 
     print("\n✅ ALL HEADER TESTS PASSED!")
-    return True
-
-
+@HEADER_EXTRACTION
 @HEADER_EXTRACTION
 def test_combined_query_and_headers():
     """Test combining query params and headers"""
@@ -194,6 +204,7 @@ def test_combined_query_and_headers():
     print("TEST 3: Combined Query + Headers")
     print("=" * 70)
 
+    port = _free_port()
     app = TurboAPI(title="Combined Test")
 
     @app.get("/api/data")
@@ -212,15 +223,17 @@ def test_combined_query_and_headers():
         }
 
     def start_server():
-        app.run(host="127.0.0.1", port=9302)
+        app.run(host="127.0.0.1", port=port)
 
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
     time.sleep(2)
 
+    base = f"http://127.0.0.1:{port}"
+
     # Test: Query params + headers
     r = requests.get(
-        "http://127.0.0.1:9302/api/data?format=xml&limit=50",
+        f"{base}/api/data?format=xml&limit=50",
         headers={"Authorization": "Bearer xyz789", "X-API-Version": "v2"},
     )
     print(f"Combined test: {r.status_code}")
@@ -233,9 +246,6 @@ def test_combined_query_and_headers():
     print("✅ PASSED: Combined query + headers!")
 
     print("\n✅ COMBINED TEST PASSED!")
-    return True
-
-
 def main():
     """Run all tests"""
     print("\n" + "=" * 70)

@@ -6,6 +6,7 @@ Phase 3: Handler classification for fast dispatch (bypass Python enhanced wrappe
 
 import inspect
 import json
+import os
 from typing import Any, get_origin
 
 try:
@@ -278,8 +279,6 @@ class ZigIntegratedTurboAPI(TurboAPI):
         print(f"{ROCKET} ZigIntegratedTurboAPI created - direct Zig integration")
 
         # Check environment variable to disable rate limiting for benchmarking
-        import os
-
         if os.getenv("TURBO_DISABLE_RATE_LIMITING") == "1":
             self.configure_rate_limiting(enabled=False)
             print("[CONFIG] Rate limiting disabled via environment variable")
@@ -578,7 +577,8 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 )
 
             # Enable response caching for noargs handlers (auto-cache after first call)
-            if hasattr(self.zig_server, "enable_response_cache"):
+            # Disable with TURBO_DISABLE_CACHE=1 (e.g. for TFB compliance)
+            if not os.environ.get("TURBO_DISABLE_CACHE") and hasattr(self.zig_server, "enable_response_cache"):
                 self.zig_server.enable_response_cache()
 
             native_count = len(getattr(self, "_native_routes", []))
