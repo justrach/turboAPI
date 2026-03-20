@@ -678,7 +678,7 @@ fn renderResponse(status: u16, content_type: []const u8, body: []const u8) ?[]co
     const dw = [7][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
     const mn = [12][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
     const dt = std.fmt.bufPrint(&date_buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
-        dw[di], md.day_index + 1, mn[@intFromEnum(md.month) - 1], yd.year,
+        dw[di],               md.day_index + 1,        mn[@intFromEnum(md.month) - 1], yd.year,
         ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     }) catch "Thu, 01 Jan 2026 00:00:00 GMT";
     return std.fmt.allocPrint(
@@ -1970,7 +1970,7 @@ fn sendResponseExt(stream: std.net.Stream, status: u16, content_type: []const u8
     const mon_str = mon_names[@intFromEnum(month_day.month) - 1];
     // RFC 2822: "Wed, 19 Mar 2026 11:30:27 GMT"
     const date_str = std.fmt.bufPrint(&date_buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
-        dow_str, month_day.day_index + 1, mon_str, year_day.year,
+        dow_str,                    month_day.day_index + 1,       mon_str,                         year_day.year,
         day_secs.getHoursIntoDay(), day_secs.getMinutesIntoHour(), day_secs.getSecondsIntoMinute(),
     }) catch "Thu, 01 Jan 2026 00:00:00 GMT";
 
@@ -1982,13 +1982,17 @@ fn sendResponseExt(stream: std.net.Stream, status: u16, content_type: []const u8
     ) catch return;
 
     // Build extra header bytes (middleware-injected, e.g. "Content-Encoding: gzip")
-    var extra_buf: [2048]u8 = undefined;
-    var extra_pos: usize = 0;
-    for (extra_headers) |h| {
-        const piece = std.fmt.bufPrint(extra_buf[extra_pos..], "\r\n{s}: {s}", .{ h.name, h.value }) catch break;
-        extra_pos += piece.len;
-    }
-    const extra_slice = extra_buf[0..extra_pos];
+    // Fast path: skip buffer setup entirely when no middleware headers are present.
+    // This keeps non-middleware routes at zero overhead vs the original sendResponse.
+    const extra_slice: []const u8 = if (extra_headers.len == 0) "" else blk: {
+        var extra_buf: [2048]u8 = undefined;
+        var extra_pos: usize = 0;
+        for (extra_headers) |h| {
+            const piece = std.fmt.bufPrint(extra_buf[extra_pos..], "\r\n{s}: {s}", .{ h.name, h.value }) catch break;
+            extra_pos += piece.len;
+        }
+        break :blk extra_buf[0..extra_pos];
+    };
 
     // Assemble: header + extra_slice + cors_headers (pre-rendered, "" if disabled) + \r\n\r\n + body
     const cors = cors_headers; // "" when disabled — zero overhead
@@ -1997,19 +2001,19 @@ fn sendResponseExt(stream: std.net.Stream, status: u16, content_type: []const u8
     if (total <= 4096) {
         var resp_buf: [4096]u8 = undefined;
         var pos: usize = 0;
-        @memcpy(resp_buf[pos..pos + header.len], header);
+        @memcpy(resp_buf[pos .. pos + header.len], header);
         pos += header.len;
         if (extra_slice.len > 0) {
             @memcpy(resp_buf[pos .. pos + extra_slice.len], extra_slice);
             pos += extra_slice.len;
         }
         if (cors.len > 0) {
-            @memcpy(resp_buf[pos..pos + cors.len], cors);
+            @memcpy(resp_buf[pos .. pos + cors.len], cors);
             pos += cors.len;
         }
-        @memcpy(resp_buf[pos..pos + trailer.len], trailer);
+        @memcpy(resp_buf[pos .. pos + trailer.len], trailer);
         pos += trailer.len;
-        @memcpy(resp_buf[pos..pos + body.len], body);
+        @memcpy(resp_buf[pos .. pos + body.len], body);
         pos += body.len;
         stream.writeAll(resp_buf[0..pos]) catch return;
     } else {
