@@ -578,7 +578,8 @@ pub fn server_add_static_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c)
     const st: u16 = if (status >= 100 and status <= 599) @intCast(status) else 200;
 
     const status_text = statusText(st);
-    const response_bytes = std.fmt.allocPrint(allocator,
+    const response_bytes = std.fmt.allocPrint(
+        allocator,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n{s}",
         .{ st, status_text, ct_s, body_s.len, body_s },
     ) catch return null;
@@ -631,12 +632,13 @@ pub fn server_configure_cors(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?
     var age_buf: [16]u8 = undefined;
     const age_str = std.fmt.bufPrint(&age_buf, "{d}", .{max_age}) catch "600";
 
-    cors_headers = std.fmt.allocPrint(allocator,
+    cors_headers = std.fmt.allocPrint(
+        allocator,
         "\r\nAccess-Control-Allow-Origin: {s}" ++
-        "\r\nAccess-Control-Allow-Methods: {s}" ++
-        "\r\nAccess-Control-Allow-Headers: {s}" ++
-        "{s}" ++
-        "\r\nAccess-Control-Max-Age: {s}",
+            "\r\nAccess-Control-Allow-Methods: {s}" ++
+            "\r\nAccess-Control-Allow-Headers: {s}" ++
+            "{s}" ++
+            "\r\nAccess-Control-Max-Age: {s}",
         .{ origins_s, methods_s, hdrs_s, cred_hdr, age_str },
     ) catch return null;
     cors_enabled = true;
@@ -676,10 +678,11 @@ fn renderResponse(status: u16, content_type: []const u8, body: []const u8) ?[]co
     const dw = [7][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
     const mn = [12][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
     const dt = std.fmt.bufPrint(&date_buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
-        dw[di], md.day_index + 1, mn[@intFromEnum(md.month) - 1], yd.year,
+        dw[di],               md.day_index + 1,        mn[@intFromEnum(md.month) - 1], yd.year,
         ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     }) catch "Thu, 01 Jan 2026 00:00:00 GMT";
-    return std.fmt.allocPrint(allocator,
+    return std.fmt.allocPrint(
+        allocator,
         "HTTP/1.1 {d} {s}\r\nServer: TurboAPI\r\nDate: {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive{s}\r\n\r\n{s}",
         .{ status, statusText(status), dt, content_type, body.len, cors, body },
     ) catch null;
@@ -1075,7 +1078,9 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         if (ms.get(match.handler_key)) |schema| {
             const vr = dhi.validateJsonRetainParsed(body, &schema);
             switch (vr) {
-                .ok => |parsed| { cached_parse = parsed; },
+                .ok => |parsed| {
+                    cached_parse = parsed;
+                },
                 .err => |ve| {
                     defer ve.deinit();
                     std.debug.print("[DHI] validation failed for {s}\n", .{match.handler_key});
