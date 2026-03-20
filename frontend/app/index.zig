@@ -1,10 +1,8 @@
 const mer = @import("mer");
 
 pub const meta: mer.Meta = .{
-pub const meta: mer.Meta = .{
     .title = "TurboAPI — FastAPI-compatible. Zig HTTP core. 20x faster.",
     .description = "Drop-in FastAPI replacement with a Zig HTTP core. 20x faster, zero-copy responses, free-threading, per-worker tstate, dhi validation.",
-};
 };
 
 pub fn render(req: mer.Request) mer.Response {
