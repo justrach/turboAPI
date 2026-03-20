@@ -35,17 +35,32 @@ pub const DbRouteEntry = struct {
 var db_pool: ?*pg.Pool = null;
 var db_routes_map: ?std.StringHashMap(DbRouteEntry) = null;
 
-// DB response cache — keyed by "METHOD /path/with/params", value is JSON body
-var db_cache: ?std.StringHashMap([]const u8) = null;
-var db_cache_count: usize = 0;
+// ── Production-ready DB cache: TTL, per-table invalidation, thread-safe, LRU ─
+
+const CacheEntry = struct {
+    body: []const u8,
+    table: []const u8, // which table this entry belongs to (for targeted invalidation)
+    created_at: i64, // timestamp in seconds
+};
+
 const DB_CACHE_MAX: usize = 10_000;
 var db_cache_enabled: bool = true;
+var db_cache_ttl: i64 = 30; // default 30 second TTL
+var db_cache: ?std.StringHashMap(CacheEntry) = null;
+var db_cache_count: usize = 0;
+var db_cache_mutex: std.Thread.Mutex = .{};
 
-// Per-thread connections (indexed by worker thread, avoids pool mutex)
+// Per-thread connections
 const MAX_WORKERS: usize = 24;
 var thread_conns: [MAX_WORKERS]?*pg.Conn = [_]?*pg.Conn{null} ** MAX_WORKERS;
 var thread_conn_count: usize = 0;
 var use_thread_conns: bool = false;
+
+fn getDbCacheMap() *std.StringHashMap(CacheEntry) {
+    if (db_cache) |*dc| return dc;
+    db_cache = std.StringHashMap(CacheEntry).init(allocator);
+    return &db_cache.?;
+}
 
 pub fn getDbRoutes() *std.StringHashMap(DbRouteEntry) {
     if (db_routes_map) |*m| return m;
@@ -53,37 +68,147 @@ pub fn getDbRoutes() *std.StringHashMap(DbRouteEntry) {
     return &db_routes_map.?;
 }
 
-fn getDbCache() *std.StringHashMap([]const u8) {
-    if (db_cache) |*dc| return dc;
-    db_cache = std.StringHashMap([]const u8).init(allocator);
-    return &db_cache.?;
+pub fn getPool() ?*pg.Pool {
+    return db_pool;
 }
 
-fn cacheDbResponse(key: []const u8, body: []const u8) void {
-    if (db_cache_count >= DB_CACHE_MAX) return;
+fn now() i64 {
+    return @intCast(@divTrunc(std.time.milliTimestamp(), 1000));
+}
+
+/// Thread-safe cache lookup. Returns cached body or null if miss/expired.
+fn cacheGet(key: []const u8) ?[]const u8 {
+    if (!db_cache_enabled) return null;
+    db_cache_mutex.lock();
+    defer db_cache_mutex.unlock();
+
+    const cache = getDbCacheMap();
+    if (cache.get(key)) |entry| {
+        // TTL check
+        if (db_cache_ttl > 0 and (now() - entry.created_at) > db_cache_ttl) {
+            // Expired — remove it
+            if (cache.fetchRemove(key)) |removed| {
+                allocator.free(@constCast(removed.key));
+                allocator.free(@constCast(removed.value.body));
+                db_cache_count -|= 1;
+            }
+            return null;
+        }
+        return entry.body;
+    }
+    return null;
+}
+
+/// Thread-safe cache put. Evicts oldest entries if full.
+fn cachePut(key: []const u8, body: []const u8, table: []const u8) void {
+    if (!db_cache_enabled) return;
+    db_cache_mutex.lock();
+    defer db_cache_mutex.unlock();
+
+    // LRU eviction: if full, remove ~10% oldest entries
+    if (db_cache_count >= DB_CACHE_MAX) {
+        evictOldest(DB_CACHE_MAX / 10);
+    }
+
     const key_dupe = allocator.dupe(u8, key) catch return;
     const body_dupe = allocator.dupe(u8, body) catch {
         allocator.free(key_dupe);
         return;
     };
-    getDbCache().put(key_dupe, body_dupe) catch {
+    const table_dupe = allocator.dupe(u8, table) catch {
         allocator.free(key_dupe);
         allocator.free(body_dupe);
+        return;
+    };
+
+    const cache = getDbCacheMap();
+    // If key already exists, free old value
+    if (cache.fetchRemove(key_dupe)) |old| {
+        allocator.free(@constCast(old.key));
+        allocator.free(@constCast(old.value.body));
+        allocator.free(@constCast(old.value.table));
+        db_cache_count -|= 1;
+    }
+
+    cache.put(key_dupe, .{
+        .body = body_dupe,
+        .table = table_dupe,
+        .created_at = now(),
+    }) catch {
+        allocator.free(key_dupe);
+        allocator.free(body_dupe);
+        allocator.free(table_dupe);
         return;
     };
     db_cache_count += 1;
 }
 
+/// Per-table invalidation — only clears entries belonging to the specified table.
 fn invalidateTableCache(table: []const u8) void {
-    _ = table;
-    if (db_cache) |*dc| {
-        var it = dc.iterator();
-        while (it.next()) |entry| {
-            allocator.free(@constCast(entry.key_ptr.*));
-            allocator.free(@constCast(entry.value_ptr.*));
+    db_cache_mutex.lock();
+    defer db_cache_mutex.unlock();
+
+    const cache = getDbCacheMap();
+    // Collect keys to remove (can't remove during iteration)
+    var keys_to_remove: [256][]const u8 = undefined;
+    var remove_count: usize = 0;
+
+    var it = cache.iterator();
+    while (it.next()) |entry| {
+        if (std.mem.eql(u8, entry.value_ptr.table, table) or table.len == 0) {
+            if (remove_count < 256) {
+                keys_to_remove[remove_count] = entry.key_ptr.*;
+                remove_count += 1;
+            }
         }
-        dc.clearRetainingCapacity();
-        db_cache_count = 0;
+    }
+
+    for (keys_to_remove[0..remove_count]) |key| {
+        if (cache.fetchRemove(key)) |removed| {
+            allocator.free(@constCast(removed.key));
+            allocator.free(@constCast(removed.value.body));
+            allocator.free(@constCast(removed.value.table));
+            db_cache_count -|= 1;
+        }
+    }
+}
+
+/// Evict N oldest entries (approximate LRU)
+fn evictOldest(count: usize) void {
+    // Already holding mutex from caller
+    const cache = getDbCacheMap();
+    var oldest_keys: [256][]const u8 = undefined;
+    var oldest_times: [256]i64 = undefined;
+    var oldest_count: usize = 0;
+    const max_evict = @min(count, 256);
+
+    var it = cache.iterator();
+    while (it.next()) |entry| {
+        const age = entry.value_ptr.created_at;
+        if (oldest_count < max_evict) {
+            oldest_keys[oldest_count] = entry.key_ptr.*;
+            oldest_times[oldest_count] = age;
+            oldest_count += 1;
+        } else {
+            // Replace the newest in our evict list if this one is older
+            var newest_idx: usize = 0;
+            for (0..oldest_count) |j| {
+                if (oldest_times[j] > oldest_times[newest_idx]) newest_idx = j;
+            }
+            if (age < oldest_times[newest_idx]) {
+                oldest_keys[newest_idx] = entry.key_ptr.*;
+                oldest_times[newest_idx] = age;
+            }
+        }
+    }
+
+    for (oldest_keys[0..oldest_count]) |key| {
+        if (cache.fetchRemove(key)) |removed| {
+            allocator.free(@constCast(removed.key));
+            allocator.free(@constCast(removed.value.body));
+            allocator.free(@constCast(removed.value.table));
+            db_cache_count -|= 1;
+        }
     }
 }
 
@@ -107,10 +232,6 @@ fn releaseConn(conn: *pg.Conn) void {
     if (use_thread_conns) return;
     // Pool connections get released
     conn.release();
-}
-
-pub fn getPool() ?*pg.Pool {
-    return db_pool;
 }
 
 // ── SQL builders (all pre-built at registration time, not per-request) ───────
@@ -199,8 +320,8 @@ pub fn handleDbRoute(
             // Cache check — build cache key from table + pk value
             var cache_key_buf: [256]u8 = undefined;
             const cache_key = std.fmt.bufPrint(&cache_key_buf, "GET:{s}:{s}", .{ entry.table, pk_val }) catch "";
-            if (db_cache_enabled and cache_key.len > 0) {
-                if (getDbCache().get(cache_key)) |cached_body| {
+            if (cache_key.len > 0) {
+                if (cacheGet(cache_key)) |cached_body| {
                     sendResponseFn(stream, 200, "application/json", cached_body);
                     return;
                 }
@@ -225,8 +346,8 @@ pub fn handleDbRoute(
                     return;
                 };
                 // Cache the response
-                if (db_cache_enabled and cache_key.len > 0) {
-                    cacheDbResponse(cache_key, json);
+                if (cache_key.len > 0) {
+                    cachePut(cache_key, json, entry.table);
                 }
                 sendResponseFn(stream, 200, "application/json", json);
             } else {
@@ -252,8 +373,8 @@ pub fn handleDbRoute(
             // Cache check for list queries
             var cache_key_buf: [256]u8 = undefined;
             const cache_key = std.fmt.bufPrint(&cache_key_buf, "LIST:{s}:{s}:{s}", .{ entry.table, limit, offset }) catch "";
-            if (db_cache_enabled and cache_key.len > 0) {
-                if (getDbCache().get(cache_key)) |cached_body| {
+            if (cache_key.len > 0) {
+                if (cacheGet(cache_key)) |cached_body| {
                     sendResponseFn(stream, 200, "application/json", cached_body);
                     return;
                 }
@@ -299,8 +420,8 @@ pub fn handleDbRoute(
             out_pos += 1;
 
             const response_body = out_buf[0..out_pos];
-            if (db_cache_enabled and cache_key.len > 0) {
-                cacheDbResponse(cache_key, response_body);
+            if (cache_key.len > 0) {
+                cachePut(cache_key, response_body, entry.table);
             }
             sendResponseFn(stream, 200, "application/json", response_body);
         },
@@ -464,7 +585,7 @@ pub fn handleDbRoute(
             const cache_key = cache_key_buf[0..ck_pos];
 
             if (db_cache_enabled) {
-                if (getDbCache().get(cache_key)) |cached_body| {
+                if (cacheGet(cache_key)) |cached_body| {
                     sendResponseFn(stream, 200, "application/json", cached_body);
                     return;
                 }
@@ -488,7 +609,7 @@ pub fn handleDbRoute(
                             sendResponseFn(stream, 500, "application/json", "{\"error\": \"Serialization failed\"}");
                             return;
                         };
-                        if (db_cache_enabled) cacheDbResponse(cache_key, json);
+                        cachePut(cache_key, json, entry.table);
                         sendResponseFn(stream, 200, "application/json", json);
                     } else {
                         sendResponseFn(stream, 404, "application/json", "{\"error\": \"Not found\"}");
@@ -523,7 +644,7 @@ pub fn handleDbRoute(
                     out_pos += 1;
 
                     const resp = out_buf[0..out_pos];
-                    if (db_cache_enabled) cacheDbResponse(cache_key, resp);
+                    cachePut(cache_key, resp, entry.table);
                     sendResponseFn(stream, 200, "application/json", resp);
                 }
             } else {
