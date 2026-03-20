@@ -5,6 +5,7 @@ These features are WORKING and TESTED!
 
 Path parameters use Zig radix-trie router.
 """
+import os
 import socket
 import threading
 import time
@@ -32,6 +33,7 @@ def test_query_parameters_comprehensive():
     print("=" * 70)
 
     port = _free_port()
+    os.environ["TURBO_DISABLE_CACHE"] = "1"
     app = TurboAPI(title="Query Test")
 
     @app.get("/search")
