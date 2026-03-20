@@ -824,3 +824,84 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     std.debug.print("[DB] Registered: {s} {s} -> {s}.{s} ({s})\n", .{ method_s, path_s, table_s, if (pk_col) |pk| pk else "*", op_s });
     return py.pyNone();
 }
+
+
+// ── Raw query API (no HTTP, direct pg.zig from Python) ──────────────────────
+// Called as: turbonet._db_query_raw(sql, params_json) -> json_string
+// This bypasses the HTTP server entirely for standalone TurboPG usage.
+
+pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var sql_ptr: [*c]const u8 = null;
+    var params_ptr: [*c]const u8 = null;
+    if (c.PyArg_ParseTuple(args, "ss", &sql_ptr, &params_ptr) == 0) return null;
+
+    const sql = std.mem.span(sql_ptr);
+    const params_json = std.mem.span(params_ptr);
+
+    if (db_pool == null) {
+        py.setError("Database not configured. Call configure_db() first.", .{});
+        return null;
+    }
+
+    // Parse params JSON array: ["val1", "val2", ...]
+    var param_values: [16][]const u8 = undefined;
+    var param_count: usize = 0;
+
+    if (params_json.len > 2) {
+        var i: usize = 1; // skip opening [
+        while (i < params_json.len and param_count < 16) {
+            while (i < params_json.len and (params_json[i] == ' ' or params_json[i] == ',' or params_json[i] == '\n')) : (i += 1) {}
+            if (i >= params_json.len or params_json[i] == ']') break;
+
+            if (params_json[i] == '"') {
+                i += 1;
+                const start = i;
+                while (i < params_json.len and params_json[i] != '"') : (i += 1) {}
+                param_values[param_count] = params_json[start..i];
+                param_count += 1;
+                i += 1;
+            } else {
+                const start = i;
+                while (i < params_json.len and params_json[i] != ',' and params_json[i] != ']' and params_json[i] != ' ') : (i += 1) {}
+                param_values[param_count] = params_json[start..i];
+                param_count += 1;
+            }
+        }
+    }
+
+    const conn = acquireConn() orelse {
+        py.setError("Failed to acquire database connection", .{});
+        return null;
+    };
+    defer releaseConn(conn);
+
+    const result = execWithParams(conn, sql, param_values[0..param_count], null) orelse {
+        py.setError("Query failed: {s}", .{sql});
+        return null;
+    };
+    defer result.deinit();
+
+    const col_names = result.column_names;
+
+    // Serialize all rows as JSON array
+    var json_buf: [1024 * 1024]u8 = undefined;
+    var pos: usize = 0;
+    json_buf[pos] = '[';
+    pos += 1;
+
+    var row_count: usize = 0;
+    while (result.next() catch null) |row| {
+        if (row_count > 0) {
+            json_buf[pos] = ',';
+            pos += 1;
+        }
+        const row_json = serializeRow(row, col_names, json_buf[pos..]) catch break;
+        pos += row_json.len;
+        row_count += 1;
+    }
+
+    json_buf[pos] = ']';
+    pos += 1;
+
+    return c.PyUnicode_FromStringAndSize(@ptrCast(&json_buf), @intCast(pos));
+}
