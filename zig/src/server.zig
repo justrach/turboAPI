@@ -134,6 +134,10 @@ const HandlerEntry = struct {
     // Vectorcall dispatch: ordered param metadata parsed at registration time
     param_meta: [MAX_PARAMS]ParamMeta = undefined,
     param_count: usize = 0,
+    // Snapshot of cors_headers taken at registration time.  Lets multiple
+    // TurboAPI instances coexist in the same process (each test app gets its
+    // own snapshot) without the global cors_headers variable being shared.
+    cors_header_block: []const u8 = "",
 };
 
 const HeaderPair = struct {
@@ -311,15 +315,12 @@ pub fn server_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
     server_host = allocator.dupe(u8, std.mem.span(host)) catch "127.0.0.1";
     server_port = @intCast(port);
 
-    // Reset per-server-instance state so that a new TurboAPI() app in the same
-    // process doesn't inherit configuration from a previous one.  Without this,
-    // Zig-native CORS set by an earlier app leaks into apps that don't configure
-    // it, causing test_non_middleware_route_no_extra_headers to detect the leak.
-    if (cors_enabled) {
-        allocator.free(cors_headers);
-        cors_headers = "";
-        cors_enabled = false;
-    }
+    // Reset cors_enabled so that routes registered for this new app snapshot
+    // cors_header_block = "" (i.e. no CORS) unless configure_cors() is called
+    // after server_new().  We do NOT free or clear cors_headers here: existing
+    // running apps may have route entries whose cors_header_block slices point
+    // into the same allocation.  Those slices remain valid and independent.
+    cors_enabled = false;
 
     // Eagerly initialize all globals — workers must never hit the lazy-init
     // path, which has a check-then-act race condition.
@@ -360,6 +361,7 @@ pub fn server_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.Py
         .original_handler = null,
         .model_param_name = null,
         .model_class = null,
+        .cors_header_block = if (cors_enabled) cors_headers else "",
     }) catch return null;
     getRouter().addRoute(method_s, path_s, key) catch return null;
 
@@ -405,6 +407,7 @@ pub fn server_add_route_fast(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?
         .original_handler = orig,
         .model_param_name = null,
         .model_class = null,
+        .cors_header_block = if (cors_enabled) cors_headers else "",
     };
 
     if (std.mem.eql(u8, ht_s, "simple_sync")) {
@@ -442,6 +445,7 @@ pub fn server_add_route_model(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) 
         .original_handler = orig,
         .model_param_name = std.mem.span(param_name),
         .model_class = model_class,
+        .cors_header_block = if (cors_enabled) cors_headers else "",
     }) catch return null;
     getRouter().addRoute(method_s, path_s, key) catch return null;
 
@@ -475,6 +479,7 @@ pub fn server_add_route_model_validated(_: ?*c.PyObject, args: ?*c.PyObject) cal
         .original_handler = orig,
         .model_param_name = std.mem.span(param_name),
         .model_class = model_class,
+        .cors_header_block = if (cors_enabled) cors_headers else "",
     }) catch return null;
     getRouter().addRoute(method_s, path_s, key) catch return null;
 
@@ -616,6 +621,10 @@ pub fn server_add_static_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c)
 var cors_headers: []const u8 = ""; // "" = disabled; otherwise pre-rendered CORS header block
 var cors_enabled: bool = false;
 
+/// Per-request CORS block driven from the matched route's cors_header_block.
+/// Thread-local so concurrent Zig worker threads don't interfere with each other.
+threadlocal var tl_cors_block: []const u8 = "";
+
 pub fn server_configure_cors(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var origins: [*c]const u8 = "*";
     var methods: [*c]const u8 = "GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD";
@@ -673,7 +682,7 @@ pub fn server_enable_response_cache(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.
 
 /// Pre-render a full HTTP response into a heap-allocated buffer.
 fn renderResponse(status: u16, content_type: []const u8, body: []const u8) ?[]const u8 {
-    const cors = cors_headers;
+    const cors = tl_cors_block;
     // Note: Date is static for cached responses. TFB just needs the header present.
     var date_buf: [40]u8 = undefined;
     const ts = std.time.timestamp();
@@ -975,6 +984,10 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         sendResponse(stream, 500, "application/json", "{\"error\": \"Internal Server Error\"}");
         return;
     };
+
+    // Load the per-route CORS snapshot into the thread-local so sendResponseExt
+    // picks it up without needing an extra parameter through the whole call chain.
+    tl_cors_block = entry.cors_header_block;
 
     // ── Ultra-fast path: simple handlers that don't need headers or body ──
     switch (entry.handler_tag) {
@@ -1998,8 +2011,8 @@ fn sendResponseExt(stream: std.net.Stream, status: u16, content_type: []const u8
         break :blk extra_buf[0..extra_pos];
     };
 
-    // Assemble: header + extra_slice + cors_headers (pre-rendered, "" if disabled) + \r\n\r\n + body
-    const cors = cors_headers; // "" when disabled — zero overhead
+    // Assemble: header + extra_slice + per-route CORS block + \r\n\r\n + body
+    const cors = tl_cors_block; // per-route snapshot — "" for non-CORS routes
     const trailer = "\r\n\r\n";
     const total = header.len + extra_slice.len + cors.len + trailer.len + body.len;
     if (total <= 4096) {
