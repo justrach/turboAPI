@@ -170,70 +170,13 @@ fn buildInsertSql(table: []const u8, columns: []const []const u8) []const u8 {
 fn buildDeleteSql(table: []const u8, pk_column: []const u8) []const u8 {
     return std.fmt.allocPrint(allocator, "DELETE FROM {s} WHERE {s} = $1", .{ table, pk_column }) catch "";
 }
-// ── JSON serialization from pg.zig result rows ───────────────────────────────
+// ── JSON serialization — delegates to pg.zig's writeJsonRow ──────────────────
 
 fn serializeRow(row: anytype, col_names: []const []const u8, buf: []u8) ![]const u8 {
-    var pos: usize = 0;
-    buf[pos] = '{';
-    pos += 1;
-
-    for (col_names, 0..) |col_name, i| {
-        if (i > 0) {
-            buf[pos] = ',';
-            pos += 1;
-        }
-        // Column name
-        buf[pos] = '"';
-        pos += 1;
-        @memcpy(buf[pos..][0..col_name.len], col_name);
-        pos += col_name.len;
-        buf[pos] = '"';
-        pos += 1;
-        buf[pos] = ':';
-        pos += 1;
-
-        // Try types in order: i32, i64, f32, f64, bool, then text fallback
-        if (row.get(i32, @intCast(i))) |v| {
-            const s = std.fmt.bufPrint(buf[pos..], "{d}", .{v}) catch break;
-            pos += s.len;
-        } else |_| if (row.get(i64, @intCast(i))) |v| {
-            const s = std.fmt.bufPrint(buf[pos..], "{d}", .{v}) catch break;
-            pos += s.len;
-        } else |_| if (row.get(f32, @intCast(i))) |v| {
-            const s = std.fmt.bufPrint(buf[pos..], "{d}", .{v}) catch break;
-            pos += s.len;
-        } else |_| if (row.get(f64, @intCast(i))) |v| {
-            const s = std.fmt.bufPrint(buf[pos..], "{d}", .{v}) catch break;
-            pos += s.len;
-        } else |_| if (row.get(bool, @intCast(i))) |v| {
-            const s = if (v) "true" else "false";
-            @memcpy(buf[pos..][0..s.len], s);
-            pos += s.len;
-        } else |_| if (row.get([]const u8, @intCast(i))) |val| {
-            buf[pos] = '"';
-            pos += 1;
-            for (val) |ch| {
-                if (pos + 2 >= buf.len) break;
-                if (ch == '"' or ch == '\\') {
-                    buf[pos] = '\\';
-                    pos += 1;
-                }
-                buf[pos] = ch;
-                pos += 1;
-            }
-            buf[pos] = '"';
-            pos += 1;
-        } else |_| {
-            @memcpy(buf[pos..][0..4], "null");
-            pos += 4;
-        }
-    }
-
-    buf[pos] = '}';
-    pos += 1;
-    return buf[0..pos];
+    const len = row.writeJsonRow(col_names, buf);
+    if (len == 0) return error.SerializationFailed;
+    return buf[0..len];
 }
-
 // ── Request dispatch (called from server.zig fast-exit path) ─────────────────
 
 pub fn handleDbRoute(
