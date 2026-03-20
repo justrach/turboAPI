@@ -146,7 +146,7 @@ const PythonResponse = struct {
     content_type: []const u8,
     body: []const u8,
     ct_owned: bool = true,
-    extra_headers: []HeaderPair = &.{},
+    extra_headers: []const HeaderPair = &.{},
 
     fn deinit(self: PythonResponse) void {
         if (self.ct_owned and self.content_type.len > 0) allocator.free(self.content_type);
