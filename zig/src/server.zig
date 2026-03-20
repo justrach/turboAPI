@@ -321,6 +321,13 @@ pub fn server_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
     // running apps may have route entries whose cors_header_block slices point
     // into the same allocation.  Those slices remain valid and independent.
     cors_enabled = false;
+    // Reset response cache flag — once any test app enables caching it must
+    // not leak into subsequent apps that never called enable_response_cache().
+    // Leaking this flag flips callPythonVectorcall → callPythonVectorcallCaching,
+    // which has different missing-param semantics and causes query-param tests
+    // to return 422 {"error":"missing required param"} instead of the handler
+    // response, producing KeyError on result["query"] etc.
+    cache_noargs_responses = false;
 
     // Eagerly initialize all globals — workers must never hit the lazy-init
     // path, which has a check-then-act race condition.
