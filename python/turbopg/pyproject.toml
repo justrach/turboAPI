@@ -41,6 +41,6 @@ Homepage = "https://github.com/justrach/turboAPI"
 Repository = "https://github.com/justrach/turboAPI"
 Documentation = "https://github.com/justrach/turboAPI#turbopg"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["turbopg*"]
+[tool.setuptools]
+packages = ["turbopg"]
+package-dir = {"turbopg" = "."}
