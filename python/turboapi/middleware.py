@@ -184,10 +184,12 @@ class GZipMiddleware(Middleware):
 
     def after_request(self, request: Request, response: Response) -> Response:
         """Compress response if client accepts gzip."""
-        # Handle case-insensitive header retrieval
-        accept_encoding = request.headers.get("accept-encoding", "")
-        if not accept_encoding:
-            accept_encoding = request.headers.get("Accept-Encoding", "")
+        # Case-insensitive header check
+        accept_encoding = ""
+        for k, v in request.headers.items():
+            if k.lower() == "accept-encoding":
+                accept_encoding = v
+                break
 
         if "gzip" not in accept_encoding.lower():
             return response
@@ -195,25 +197,27 @@ class GZipMiddleware(Middleware):
         # Check if response is large enough to compress
         if hasattr(response, "body"):
             content = response.body
+            
+            # Ensure content is serialized to bytes (it might be a dict or str)
+            if not isinstance(content, (bytes, bytearray)):
+                if isinstance(content, str):
+                    content = content.encode("utf-8")
+                else:
+                    content = json.dumps(content).encode("utf-8")
 
-            # Ensure content is bytes before calculating length or compressing
-            if not isinstance(content, (bytes, str)):
-                content_bytes = json.dumps(content).encode("utf-8")
-            elif isinstance(content, str):
-                content_bytes = content.encode("utf-8")
-            else:
-                content_bytes = content
-
-            if len(content_bytes) < self.minimum_size:
+            # Calculate length on the raw byte size
+            if len(content) < self.minimum_size:
                 return response
 
             # Compress content
-            compressed = gzip.compress(content_bytes, compresslevel=self.compresslevel)
+            compressed = gzip.compress(content, compresslevel=self.compresslevel)
             
-            # Safely update the response payload
-            response.body = compressed
-            if hasattr(response, "content"):
-                response.content = compressed
+            # Safely update payload
+            response.content = compressed
+            try:
+                response.body = compressed  # Attempt to update if it's not a read-only property
+            except Exception:
+                pass
                 
             response.set_header("Content-Encoding", "gzip")
             response.set_header("Content-Length", str(len(compressed)))
