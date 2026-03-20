@@ -378,6 +378,117 @@ class ZigIntegratedTurboAPI(TurboAPI):
         else:
             print("[WARN] Rate limiting configuration requires native core")
 
+    # ── Zig-native DB routes (pg.zig — zero Python CRUD) ─────────────────────
+
+    def configure_db(self, conn_string: str, pool_size: int = 16):
+        """Configure Postgres connection pool in Zig (pg.zig).
+
+        Supports TCP and Unix sockets:
+            app.configure_db("postgres://user:pass@localhost/mydb")
+            app.configure_db("postgres://user:pass@/var/run/postgresql/mydb")
+
+        Prepared statements are enabled automatically — each route's SQL
+        is cached on first execution for faster repeat queries.
+        """
+        self._db_config = (conn_string, pool_size)
+        print(f"{CHECK_MARK} DB configured: pool_size={pool_size}")
+
+    def db_get(self, path: str, *, table: str, pk: str = "id"):
+        """Zig-native SELECT by primary key. No Python, no GIL."""
+        import re
+
+        params = re.findall(r"\{([^}]+)\}", path)
+        pk_param = params[0] if params else pk
+        self._db_routes = getattr(self, "_db_routes", [])
+        self._db_routes.append(("GET", path, "select_one", table, pk, pk_param, ""))
+        print(f"{CHECK_MARK} [db:select_one] GET {path} -> {table}.{pk}")
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+    def db_list(self, path: str, *, table: str):
+        """Zig-native SELECT * with ?limit=N&offset=M. No Python, no GIL."""
+        self._db_routes = getattr(self, "_db_routes", [])
+        self._db_routes.append(("GET", path, "select_list", table, "", "", ""))
+        print(f"{CHECK_MARK} [db:select_list] GET {path} -> {table}")
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+    def db_post(self, path: str, *, table: str, model=None):
+        """Zig-native INSERT from validated JSON body. No Python, no GIL."""
+        columns = ""
+        if model is not None:
+            try:
+                fields = model.model_fields if hasattr(model, "model_fields") else {}
+                columns = ",".join(fields.keys())
+            except Exception:
+                pass
+        self._db_routes = getattr(self, "_db_routes", [])
+        self._db_routes.append(("POST", path, "insert", table, "", "", columns))
+        print(f"{CHECK_MARK} [db:insert] POST {path} -> {table}")
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+    def db_delete(self, path: str, *, table: str, pk: str = "id"):
+        """Zig-native DELETE by primary key. No Python, no GIL."""
+        import re
+
+        params = re.findall(r"\{([^}]+)\}", path)
+        pk_param = params[0] if params else pk
+        self._db_routes = getattr(self, "_db_routes", [])
+        self._db_routes.append(("DELETE", path, "delete", table, pk, pk_param, ""))
+        print(f"{CHECK_MARK} [db:delete] DELETE {path} -> {table}.{pk}")
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+    def db_query(self, method: str, path: str, *, sql: str, params: list[str] | None = None, single: bool = False):
+        """Zig-native custom SQL query. Supports pgvector, JSONB, full-text search, CTEs.
+
+        Args:
+            method: HTTP method ("GET", "POST", etc.)
+            path: URL path with {param} placeholders
+            sql: Raw SQL with $1, $2, ... parameter placeholders
+            params: Ordered list of parameter names (from path params + query string)
+            single: If True, return single JSON object; if False, return JSON array
+
+        Usage:
+            @app.db_query("GET", "/similar/{item_id}", sql='''
+                SELECT id, name, 1 - (embedding <=> (SELECT embedding FROM items WHERE id = $1)) AS sim
+                FROM items ORDER BY embedding <=> (SELECT embedding FROM items WHERE id = $1) LIMIT $2
+            ''', params=["item_id", "limit"])
+            def similar(): pass
+        """
+        import re
+
+        op = "custom_query_single" if single else "custom_query"
+
+        # Auto-detect params from path if not specified
+        if params is None:
+            params = re.findall(r"\{([^}]+)\}", path)
+
+        param_str = ",".join(params) if params else ""
+
+        # For custom queries: table carries the SQL, pk_col carries param names
+        self._db_routes = getattr(self, "_db_routes", [])
+        self._db_routes.append((method, path, op, sql.strip(), param_str, "", ""))
+        print(f"{CHECK_MARK} [db:{op}] {method} {path} ({len(params)} params)")
+
+        def decorator(func):
+            return func
+
+        return decorator
+
     def _initialize_zig_server(self, host: str = "127.0.0.1", port: int = 8000):
         """Initialize the Zig HTTP server with direct integration."""
         if not NATIVE_CORE_AVAILABLE:
@@ -453,16 +564,30 @@ class ZigIntegratedTurboAPI(TurboAPI):
             for method, path, status, ct, body in getattr(self, "_static_routes", []):
                 self.zig_server.add_static_route(method, path, status, ct, body)
 
+            # Configure DB pool (if configured)
+            if hasattr(self, "_db_config"):
+                conn_str, pool_size = self._db_config
+                self.zig_server.configure_db(conn_str, pool_size)
+
+            # Register DB routes (Zig-native CRUD, no Python)
+            for method, path, op, table, pk_col, pk_param, columns in getattr(
+                self, "_db_routes", []
+            ):
+                self.zig_server.add_db_route(
+                    method, path, op, table, pk_col or "", pk_param or "", columns or ""
+                )
+
             # Enable response caching for noargs handlers (auto-cache after first call)
             if hasattr(self.zig_server, "enable_response_cache"):
                 self.zig_server.enable_response_cache()
 
             native_count = len(getattr(self, "_native_routes", []))
             static_count = len(getattr(self, "_static_routes", []))
+            db_count = len(getattr(self, "_db_routes", []))
             py_count = len(self.registry.get_routes())
             print(
                 f"{CHECK_MARK} Zig server initialized with {py_count} Python"
-                f" + {native_count} native + {static_count} static routes"
+                f" + {native_count} native + {static_count} static + {db_count} db routes"
             )
             return True
 

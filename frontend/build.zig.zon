@@ -1,0 +1,20 @@
+.{
+    .fingerprint = 0xf5794ba041c0e27d,
+    .name = .turboapi_frontend,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.0",
+    .dependencies = .{
+        .merjs = .{
+            .url = "git+https://github.com/justrach/merjs.git?ref=main#3e42284ded9515e6569e6ad5473fc6262eef59c5",
+            .hash = "merjs-0.1.1-qL9LkpH4XQBPo46-T6Pj5kMbpm0z_kpBoXDLQToOEhSH",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "app",
+        "api",
+        "public",
+    },
+}

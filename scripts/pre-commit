@@ -1,23 +1,34 @@
 #!/usr/bin/env bash
 # TurboAPI pre-commit hook
-# Runs: 1) ruff lint+format on staged .py  2) zig build check on staged .zig
+# Runs: 1) ruff lint  2) zig build check  3) unit tests  4) smoke test
 # Install: make hooks
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PASS=true
 
+# ── Detect Python ─────────────────────────────────────────────────────────────
+
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+    PYTHON="$VIRTUAL_ENV/bin/python"
+elif [ -x "$ROOT/.venv314t/bin/python" ]; then
+    PYTHON="$ROOT/.venv314t/bin/python"
+elif [ -x "$ROOT/.venv/bin/python" ]; then
+    PYTHON="$ROOT/.venv/bin/python"
+else
+    PYTHON="$(command -v python3 || command -v python)"
+fi
+
 # ── Collect staged files ─────────────────────────────────────────────────────
 
 STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM -- '*.py' || true)
 STAGED_ZIG=$(git diff --cached --name-only --diff-filter=ACM -- '*.zig' || true)
 
-# ── 1. Python: ruff lint + format check ──────────────────────────────────────
+# ── 1. Python: ruff lint ─────────────────────────────────────────────────────
 
 if [ -n "$STAGED_PY" ]; then
     echo "🐍 Checking Python files..."
 
-    # Find ruff
     if command -v ruff &>/dev/null; then
         RUFF=ruff
     elif [ -x "$ROOT/.venv314t/bin/ruff" ]; then
@@ -30,7 +41,6 @@ if [ -n "$STAGED_PY" ]; then
     fi
 
     if [ -n "$RUFF" ]; then
-        # Lint using project config (pyproject.toml [tool.ruff])
         if ! $RUFF check --no-fix --config "$ROOT/pyproject.toml" $STAGED_PY 2>/dev/null; then
             echo "   ❌ ruff lint failed — run 'make lint' to see details, 'make fmt' to auto-fix"
             PASS=false
@@ -53,21 +63,40 @@ if [ -n "$STAGED_ZIG" ]; then
     fi
 fi
 
-# ── 3. Quick smoke test (only if both Zig and Python changed) ────────────────
+# ── 3. Unit tests (fast, no DB needed) ──────────────────────────────────────
+
+if [ -n "$STAGED_PY" ]; then
+    echo "🧪 Running unit tests..."
+
+    # TurboPG tests (17 tests, 0.02s, no DB)
+    if $PYTHON -m pytest "$ROOT/tests/test_turbopg.py" -q --no-header 2>/dev/null; then
+        echo "   ✅ TurboPG tests passed"
+    else
+        echo "   ❌ TurboPG tests failed"
+        PASS=false
+    fi
+
+    # Annotated Depends tests (7 tests, 0.07s, no DB)
+    if $PYTHON -m pytest "$ROOT/tests/test_annotated_depends.py" -q --no-header 2>/dev/null; then
+        echo "   ✅ Annotated Depends tests passed"
+    else
+        echo "   ❌ Annotated Depends tests failed"
+        PASS=false
+    fi
+
+    # Security audit tests (12 tests, 0.09s, no DB)
+    if $PYTHON -m pytest "$ROOT/tests/test_security_audit_fixes.py" -q --no-header 2>/dev/null; then
+        echo "   ✅ Security tests passed"
+    else
+        echo "   ❌ Security tests failed"
+        PASS=false
+    fi
+fi
+
+# ── 4. Smoke test ────────────────────────────────────────────────────────────
 
 if [ -n "$STAGED_ZIG" ] && [ -n "$STAGED_PY" ]; then
-    echo "🧪 Running quick smoke test..."
-
-    # Detect Python
-    if [ -n "${VIRTUAL_ENV:-}" ]; then
-        PYTHON="$VIRTUAL_ENV/bin/python"
-    elif [ -x "$ROOT/.venv314t/bin/python" ]; then
-        PYTHON="$ROOT/.venv314t/bin/python"
-    elif [ -x "$ROOT/.venv/bin/python" ]; then
-        PYTHON="$ROOT/.venv/bin/python"
-    else
-        PYTHON="$(command -v python3 || command -v python)"
-    fi
+    echo "🔌 Running smoke test..."
 
     if $PYTHON -c "from turboapi import TurboAPI; print('   ✅ Import check passed')" 2>/dev/null; then
         :

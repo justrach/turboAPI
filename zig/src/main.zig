@@ -7,6 +7,7 @@ const c = py.c;
 const response = @import("response.zig");
 const server = @import("server.zig");
 pub const router = @import("router.zig");
+const db = @import("db.zig");
 
 // ── Method table ────────────────────────────────────────────────────────────
 
@@ -41,6 +42,9 @@ var methods = [_]py.PyMethodDef{
     .{ .ml_name = "configure_rate_limiting", .ml_meth = @ptrCast(&server.configure_rate_limiting), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_server_configure_cors", .ml_meth = @ptrCast(&server.server_configure_cors), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_server_enable_response_cache", .ml_meth = @ptrCast(&server.server_enable_response_cache), .ml_flags = c.METH_NOARGS, .ml_doc = null },
+    // DB functions
+    .{ .ml_name = "_db_configure", .ml_meth = @ptrCast(&db.db_configure), .ml_flags = c.METH_VARARGS, .ml_doc = null },
+    .{ .ml_name = "_db_add_route", .ml_meth = @ptrCast(&db.db_add_route), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     // sentinel
     .{ .ml_name = null, .ml_meth = null, .ml_flags = 0, .ml_doc = null },
 };
@@ -111,6 +115,10 @@ const bootstrap_code: [*:0]const u8 =
     \\        _m._server_configure_cors(origins, methods, headers, max_age, int(credentials))
     \\    def enable_response_cache(self):
     \\        _m._server_enable_response_cache()
+    \\    def configure_db(self, conn_string, pool_size=16):
+    \\        _m._db_configure(conn_string, pool_size)
+    \\    def add_db_route(self, method, path, op, table, pk_column, pk_param, columns):
+    \\        _m._db_add_route(method, path, op, table, pk_column or "", pk_param or "", columns or "")
     \\
     \\class RequestContext:
     \\    def __init__(self):

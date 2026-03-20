@@ -36,12 +36,11 @@ jobs:
           pip install -e .
           pip install pytest requests
 
-      - name: Run tests
+      - name: Run tests (TurboAPI + TurboPG)
         run: |
           python -m pytest tests/ -v --tb=short \
             --deselect tests/test_fastapi_parity.py::TestWebSocket::test_websocket_send_receive \
             --deselect tests/test_fastapi_parity.py::TestWebSocket::test_websocket_send_json
-        # Known: WebSocket not implemented (Issue #24)
         # Known: Linux x86_64 may segfault on Zig thread cleanup between tests
         continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
 

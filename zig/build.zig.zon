@@ -6,6 +6,10 @@
             .url = "https://github.com/justrach/dhi/archive/refs/heads/main.tar.gz",
             .hash = "dhi-0.1.0-Fz3bn5eCAwDRf4m3si1vzVVvfOAhg7QBJmc5B8LgK2QI",
         },
+        .pg = .{
+            .url = "git+https://github.com/justrach/pg.zig?ref=master#ce026efad4a24569c473763f80aed71c868973d7",
+            .hash = "pg-0.0.0-Wp_7gd6yBgDtZMrVDmn77u5l0Wi5J39JJ-VgAuoXR0Dy",
+        },
     },
     .paths = .{""},
     .fingerprint = 0xc1ce10811168d4a1,
