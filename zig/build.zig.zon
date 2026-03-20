@@ -7,7 +7,7 @@
             .hash = "dhi-0.1.0-Fz3bn5eCAwDRf4m3si1vzVVvfOAhg7QBJmc5B8LgK2QI",
         },
         .pg = .{
-            .url = "git+https://github.com/karlseguin/pg.zig?ref=master#e58b318b7867ef065b3135983f829219c5eef891",
+            .url = "git+https://github.com/justrach/pg.zig?ref=master#e58b318b7867ef065b3135983f829219c5eef891",
             .hash = "pg-0.0.0-Wp_7gXFoBgD0fQ72WICKa-bxLga03AXXQ3BbIsjjohQ3",
         },
     },
