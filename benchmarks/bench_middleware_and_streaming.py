@@ -14,7 +14,6 @@ NOTE on streaming:
   documents this by collecting all SSE chunks in memory and returning them
   as a single text/event-stream body.  This is the "safe" middleware path.
 """
-import asyncio
 import os
 import statistics
 import subprocess
@@ -41,17 +40,14 @@ def stacked_endpoint():
 
 # /stream: collects all SSE chunks in-process and returns them as one body.
 # This is the correct behaviour for TurboAPI's buffered response path and
-# serves as a benchmark for the overhead of an async generator + middleware.
+# serves as a benchmark for the overhead of a generator + middleware.
+# Kept synchronous: asyncio.run() called from multiple Zig worker threads
+# simultaneously under high concurrency causes Python async-state corruption.
+# See docs/ARCHITECTURE.md — async handlers under middleware should be
+# registered as sync wrappers or handled via ASGI mode.
 @app.get("/stream")
-async def stream_endpoint():
-    async def generator():
-        for i in range(50):
-            yield f"data: chunk {i}\n\n"
-            await asyncio.sleep(0)  # yield event-loop without real delay
-
-    chunks = []
-    async for chunk in generator():
-        chunks.append(chunk)
+def stream_endpoint():
+    chunks = [f"data: chunk {i}\n\n" for i in range(50)]
     body = "".join(chunks)
     return {"chunks": len(chunks), "bytes": len(body), "sample": chunks[0].strip()}
 
