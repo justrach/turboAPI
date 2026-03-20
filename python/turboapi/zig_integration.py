@@ -603,7 +603,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
             request = Request(
                 method=kwargs.get("method", ""),
                 path=kwargs.get("path", ""),
-                headers=kwargs.get("headers", {}),
+                headers={k.lower(): v for k, v in kwargs.get("headers", {}).items()},
                 body=kwargs.get("body", b""),
                 query_string=kwargs.get("query_string", ""),
                 path_params=kwargs.get("path_params", {}),
