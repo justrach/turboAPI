@@ -69,10 +69,10 @@ const html =
     \\    .bar-group h3 { font-family: var(--display); font-size: 18px; margin-bottom: 16px; color: var(--muted); }
     \\    .bar-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
     \\    .bar-label { width: 180px; font-size: 14px; color: var(--muted); text-align: right; flex-shrink: 0; }
-    \\    .bar-track { flex: 1; height: 32px; background: var(--bg3); border-radius: 4px; overflow: hidden; position: relative; }
-    \\    .bar-fill { height: 100%; border-radius: 4px; transition: width 1s ease; }
+    \\    .bar-track { flex: 1; height: 32px; background: transparent; border-radius: 4px; overflow: hidden; position: relative; }
+    \\    .bar-fill { height: 100%; border-radius: 4px; min-width: 4px; }
     \\    .bar-fill.turbo { background: linear-gradient(90deg, var(--accent), #f5a623); }
-    \\    .bar-fill.other { background: rgba(0,0,0,0.08); }
+    \\    .bar-fill.other { background: var(--bg3); }
     \\    .bar-num { width: 120px; font-family: var(--mono); font-size: 14px; color: var(--text); }
     \\    .bar-speedup { font-family: var(--mono); font-size: 13px; color: var(--green); font-weight: 600; }
     \\
