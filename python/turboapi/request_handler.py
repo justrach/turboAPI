@@ -6,11 +6,8 @@ Supports query parameters, path parameters, headers, request body, and dependenc
 
 import inspect
 import json
-import logging
 import urllib.parse
 from typing import Any, get_origin
-
-logger = logging.getLogger(__name__)
 
 from dhi import BaseModel as Model
 
@@ -364,7 +361,7 @@ class RequestBodyParser:
                     parsed_params[param_name] = param.annotation(**json_data)
                     return parsed_params
                 except Exception:
-                    logger.debug("Failed to construct %s from JSON body, falling through to multi-param parsing", param.annotation.__name__)
+                    pass
 
         # PATTERN 2: Multiple parameters - extract individual fields
         # Example: handler(name: str, age: int, email: str)
@@ -594,7 +591,7 @@ def _format_zig_tuple(content, status_code, content_type=None):
     try:
         return (status_code, ct, _json_dumps(content))
     except Exception:
-        logger.debug("JSON serialization failed for response content, falling back to str()", exc_info=True)
+        pass  # JSON serialization failed; fall back to str()
         return (status_code, "application/json", _json_dumps({"error": str(content)}))
 
 
@@ -719,7 +716,7 @@ def create_enhanced_handler(original_handler, route_definition):
                     except StopIteration:
                         pass  # intentionally silent: generator finished normally
                     except Exception:
-                        logger.debug("Dependency cleanup generator raised during teardown", exc_info=True)
+                        pass
 
                 # Normalize response - may return (content, status) or (content, status, content_type)
                 normalized = ResponseHandler.normalize_response(result)
@@ -820,7 +817,7 @@ def create_enhanced_handler(original_handler, route_definition):
                         except StopIteration:
                             pass  # intentionally silent: generator finished normally
                         except Exception:
-                            logger.debug("Dependency cleanup generator raised during teardown", exc_info=True)
+                            pass
 
                 # Normalize response - may return (content, status) or (content, status, content_type)
                 normalized = ResponseHandler.normalize_response(result)

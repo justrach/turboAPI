@@ -6,11 +6,8 @@ parallel execution of async handlers across multiple threads.
 """
 
 import asyncio
-import logging
 import sys
 import threading
-
-logger = logging.getLogger(__name__)
 
 
 class EventLoopPool:
@@ -46,7 +43,7 @@ class EventLoopPool:
 
                 num_threads = os.cpu_count() or 4
 
-            logger.debug("Initializing EventLoopPool with %d threads", num_threads)
+            print(f"🔄 Initializing EventLoopPool with {num_threads} threads")
             cls._initialized = True
 
     @classmethod
@@ -71,7 +68,7 @@ def is_free_threading_enabled() -> bool:
 
 # Initialize on import
 if is_free_threading_enabled():
-    logger.info("Python 3.13+ free-threading detected - enabling parallel event loops")
+    print("🚀 Python 3.13+ free-threading detected - enabling parallel event loops!")
     EventLoopPool.initialize()
 else:
-    logger.debug("Free-threading not enabled - async performance may be limited")
+    print("⚠️  Free-threading not enabled - async performance may be limited")

@@ -6,10 +6,7 @@ Phase 3: Handler classification for fast dispatch (bypass Python enhanced wrappe
 
 import inspect
 import json
-import logging
 from typing import Any, get_origin
-
-logger = logging.getLogger(__name__)
 
 try:
     from dhi import BaseModel
@@ -25,6 +22,7 @@ from .request_handler import (
     create_fast_model_handler,
     create_pos_handler,
 )
+from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
 
 def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
     """Classify a handler for fast dispatch (Phase 3 + Phase 4 async).
@@ -133,7 +131,7 @@ def _extract_model_schema(model_class) -> str | None:
         schema = _build_schema(model_class)
         return json.dumps(schema) if schema else None
     except Exception:
-        logger.debug("Failed to extract model schema for %s, skipping Zig-native validation", model_class.__name__, exc_info=True)
+        pass  # failed to extract model schema; skip Zig-native validation
         return None
 
 
@@ -266,7 +264,7 @@ try:
 except ImportError:
     NATIVE_CORE_AVAILABLE = False
     turbonet = None
-    logger.warning("Native core not available - running in simulation mode")
+    print("[WARN] Native core not available - running in simulation mode")
 
 
 class ZigIntegratedTurboAPI(TurboAPI):
@@ -277,14 +275,14 @@ class ZigIntegratedTurboAPI(TurboAPI):
         self.zig_server = None
         self.route_handlers = {}  # Store Python handlers by route key
         self._middleware_instances = []
-        logger.info("ZigIntegratedTurboAPI created - direct Zig integration")
+        print(f"{ROCKET} ZigIntegratedTurboAPI created - direct Zig integration")
 
         # Check environment variable to disable rate limiting for benchmarking
         import os
 
         if os.getenv("TURBO_DISABLE_RATE_LIMITING") == "1":
             self.configure_rate_limiting(enabled=False)
-            logger.info("Rate limiting disabled via environment variable")
+            print("[CONFIG] Rate limiting disabled via environment variable")
 
     # FastAPI-like decorators for better developer experience
     def get(self, path: str, **kwargs):
@@ -326,12 +324,12 @@ class ZigIntegratedTurboAPI(TurboAPI):
 
         abs_path = os.path.abspath(lib_path)
         if not os.path.exists(abs_path):
-            logger.error("Native lib not found: %s", abs_path)
+            print(f"{CROSS_MARK} Native lib not found: {abs_path}")
             return
         self._native_routes = getattr(self, "_native_routes", [])
         self._native_routes.append((method.upper(), path, abs_path, symbol_name))
-        logger.debug(
-            "[native] %s %s -> %s:%s", method.upper(), path, os.path.basename(lib_path), symbol_name
+        print(
+            f"{CHECK_MARK} [native] {method.upper()} {path} -> {os.path.basename(lib_path)}:{symbol_name}"
         )
 
     def static_route(
@@ -361,7 +359,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
         """
         self._static_routes = getattr(self, "_static_routes", [])
         self._static_routes.append((method.upper(), path, status, content_type, body))
-        logger.debug("[static] %s %s -> %d (%d bytes)", method.upper(), path, status, len(body))
+        print(f"{CHECK_MARK} [static] {method.upper()} {path} -> {status} ({len(body)} bytes)")
 
     def configure_rate_limiting(self, enabled: bool = False, requests_per_minute: int = 1000000):
         """Configure rate limiting for the server.
@@ -374,18 +372,18 @@ class ZigIntegratedTurboAPI(TurboAPI):
             try:
                 turbonet.configure_rate_limiting(enabled, requests_per_minute)
                 status = "enabled" if enabled else "disabled"
-                logger.info("Rate limiting %s (%s req/min)", status, f"{requests_per_minute:,}")
+                print(f"[CONFIG] Rate limiting {status} ({requests_per_minute:,} req/min)")
             except Exception as e:
-                logger.warning("Failed to configure rate limiting: %s", e)
+                print(f"[WARN] Failed to configure rate limiting: {e}")
         else:
-            logger.warning("Rate limiting configuration requires native core")
+            print("[WARN] Rate limiting configuration requires native core")
 
     def _initialize_zig_server(self, host: str = "127.0.0.1", port: int = 8000):
         """Initialize the Zig HTTP server with direct integration."""
         if not NATIVE_CORE_AVAILABLE:
-            logger.error("Native Zig backend not available.")
-            logger.error("Build it first: python zig/build_turbonet.py")
-            logger.error("Requires: Python 3.14+ and Zig 0.15+")
+            print("[ERROR] Native Zig backend not available.")
+            print("        Build it first: python zig/build_turbonet.py")
+            print("        Requires: Python 3.14+ and Zig 0.15+")
             return False
 
         try:
@@ -413,7 +411,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
                     )
                     # Mark this middleware as handled natively — don't add to Python pipeline
                     self._zig_cors_enabled = True
-                    logger.info("CORS handled by Zig (zero overhead)")
+                    print(f"{CHECK_MARK} CORS handled by Zig (zero overhead)")
                     continue  # skip adding to Python middleware instances
 
                 elif middleware_name == "CorsMiddleware":
@@ -425,14 +423,14 @@ class ZigIntegratedTurboAPI(TurboAPI):
                         kwargs.get("max_age", 3600),
                     )
                     self.zig_server.add_middleware(cors_middleware)
-                    logger.info("Added CORS middleware to Zig server")
+                    print(f"{CHECK_MARK} Added CORS middleware to Zig server")
 
                 elif middleware_name == "RateLimitMiddleware":
                     rate_limit = turbonet.RateLimitMiddleware(
                         kwargs.get("requests_per_minute", 1000)
                     )
                     self.zig_server.add_middleware(rate_limit)
-                    logger.info("Added Rate Limiting middleware to Zig server")
+                    print(f"{CHECK_MARK} Added Rate Limiting middleware to Zig server")
 
                 # Add more middleware types as needed
 
@@ -462,14 +460,14 @@ class ZigIntegratedTurboAPI(TurboAPI):
             native_count = len(getattr(self, "_native_routes", []))
             static_count = len(getattr(self, "_static_routes", []))
             py_count = len(self.registry.get_routes())
-            logger.info(
-                "Zig server initialized with %d Python + %d native + %d static routes",
-                py_count, native_count, static_count,
+            print(
+                f"{CHECK_MARK} Zig server initialized with {py_count} Python"
+                f" + {native_count} native + {static_count} static routes"
             )
             return True
 
         except Exception as e:
-            logger.error("Zig server initialization failed: %s", e)
+            print(f"{CROSS_MARK} Zig server initialization failed: {e}")
             return False
 
     def _wrap_with_middleware(self, enhanced_handler):
@@ -561,9 +559,9 @@ class ZigIntegratedTurboAPI(TurboAPI):
                             "{}",
                             route.handler,
                         )
-                        logger.debug("[model_sync+middleware->enhanced] %s %s", route.method.value, route.path)
+                        print(f"{CHECK_MARK} [model_sync+middleware→enhanced] {route.method.value} {route.path}")
                     else:
-                        # Minimal handler: json.loads -> Model(**data) -> handler(model) -> json.dumps
+                        # Minimal handler: json.loads → Model(**data) → handler(model) → json.dumps
                         enhanced_handler = create_fast_model_handler(
                             route.handler,
                             model_info["model_class"],
@@ -582,7 +580,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
                                 route.handler,
                                 schema_json,
                             )
-                            logger.debug("[model_sync+dhi] %s %s", route.method.value, route.path)
+                            print(f"{CHECK_MARK} [model_sync+dhi] {route.method.value} {route.path}")
                         else:
                             self.zig_server.add_route_model(
                                 route.method.value,
@@ -592,7 +590,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
                                 model_info["model_class"],
                                 route.handler,
                             )
-                            logger.debug("[model_sync] %s %s", route.method.value, route.path)
+                            print(f"{CHECK_MARK} [model_sync] {route.method.value} {route.path}")
                 elif handler_type in ("simple_sync", "simple_sync_noargs", "body_sync"):
                     # SYNC FAST PATH: Use minimal-overhead fast handler (returns 3-tuple)
                     if self._middleware_instances:
@@ -611,7 +609,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
                         registered_type = handler_type
 
                     # simple_sync: ordered "name:type[?]|..." string for Zig vectorcall arg assembly
-                    # '?' suffix = has a Python default -> Zig skips trailing missing optionals
+                    # '?' suffix = has a Python default → Zig skips trailing missing optionals
                     # Other types: legacy JSON dict (unused in Zig dispatch, kept for compat)
                     if handler_type == "simple_sync" and not self._middleware_instances:
                         sig = inspect.signature(route.handler)
@@ -634,7 +632,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
                         param_meta_str,
                         route.handler,
                     )
-                    logger.debug("[%s] %s %s", registered_type, route.method.value, route.path)
+                    print(f"{CHECK_MARK} [{registered_type}] {route.method.value} {route.path}")
                 elif handler_type in ("simple_async", "body_async"):
                     # ASYNC FAST PATH: Register with async runtime
                     enhanced_handler = create_enhanced_handler(route.handler, route)
@@ -650,7 +648,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
                         param_types_json,
                         route.handler,  # Original async handler
                     )
-                    logger.debug("[%s] %s %s", handler_type, route.method.value, route.path)
+                    print(f"{CHECK_MARK} [{handler_type}] {route.method.value} {route.path}")
                 else:
                     # ENHANCED PATH: Full Python wrapper needed
                     enhanced_handler = create_enhanced_handler(route.handler, route)
@@ -661,11 +659,11 @@ class ZigIntegratedTurboAPI(TurboAPI):
                         route.path,
                         enhanced_handler,
                     )
-                    logger.debug("[enhanced] %s %s", route.method.value, route.path)
+                    print(f"{CHECK_MARK} [enhanced] {route.method.value} {route.path}")
 
             except Exception as e:
-                logger.error(
-                    "Failed to register route %s %s: %s", route.method.value, route.path, e
+                print(
+                    f"{CROSS_MARK} Failed to register route {route.method.value} {route.path}: {e}"
                 )
 
     def _extract_path_params(self, route_path: str, actual_path: str) -> dict[str, str]:
@@ -724,30 +722,32 @@ class ZigIntegratedTurboAPI(TurboAPI):
 
     def run(self, host: str = "127.0.0.1", port: int = 8000, **kwargs):
         """Run with direct Zig server integration."""
-        logger.info("Starting TurboAPI with Direct Zig Integration...")
-        logger.info("   Host: %s:%d", host, port)
-        logger.info("   Title: %s v%s", self.title, self.version)
+        print(f"\n{ROCKET} Starting TurboAPI with Direct Zig Integration...")
+        print(f"   Host: {host}:{port}")
+        print(f"   Title: {self.title} v{self.version}")
 
         # Initialize Zig server
         if not self._initialize_zig_server(host, port):
-            logger.error("Failed to initialize Zig server")
-            logger.error("Use an ASGI server as fallback: uvicorn main:app --host %s --port %d", host, port)
+            print(f"{CROSS_MARK} Failed to initialize Zig server")
+            print(f"   Use an ASGI server as fallback: uvicorn main:app --host {host} --port {port}")
             return
 
         # Print integration info
-        logger.info("Direct Zig Integration:")
-        logger.info("   Zig HTTP Server: Active")
-        logger.info("   Middleware Pipeline: Zig-native (zero Python overhead)")
-        logger.info("   Route Handlers: %d Python functions registered", len(self.route_handlers))
-        logger.info("   Performance: 5-10x FastAPI target (no Python middleware overhead)")
+        print("\n[CONFIG] Direct Zig Integration:")
+        print(f"   Zig HTTP Server: {CHECK_MARK} Active")
+        print(f"   Middleware Pipeline: {CHECK_MARK} Zig-native (zero Python overhead)")
+        print(
+            f"   Route Handlers: {CHECK_MARK} {len(self.route_handlers)} Python functions registered"
+        )
+        print(f"   Performance: {CHECK_MARK} 5-10x FastAPI target (no Python middleware overhead)")
 
         # Print route information
         self.print_routes()
 
-        logger.info("Zero-Overhead Architecture:")
-        logger.info("   HTTP Request -> Zig Middleware -> Python Handler -> Zig Response")
-        logger.info("   No Python middleware overhead!")
-        logger.info("   Direct Zig-to-Python calls only for route handlers")
+        print("\n[PERF] Zero-Overhead Architecture:")
+        print("   HTTP Request → Zig Middleware → Python Handler → Zig Response")
+        print("   No Python middleware overhead!")
+        print("   Direct Zig-to-Python calls only for route handlers")
 
         # Run startup handlers
         if self.startup_handlers:
@@ -755,24 +755,24 @@ class ZigIntegratedTurboAPI(TurboAPI):
 
             asyncio.run(self._run_startup_handlers())
 
-        logger.info("TurboAPI Direct Zig Integration ready!")
-        logger.info("   Visit: http://%s:%d", host, port)
+        print(f"\n{CHECK_MARK} TurboAPI Direct Zig Integration ready!")
+        print(f"   Visit: http://{host}:{port}")
 
         try:
             if NATIVE_CORE_AVAILABLE:
                 # Start the actual Zig server
-                logger.info("Starting Zig HTTP server with zero overhead...")
+                print("\n[SERVER] Starting Zig HTTP server with zero overhead...")
                 self.zig_server.run()
             else:
-                logger.warning("Native core not available - simulation mode")
-                logger.info("Press Ctrl+C to stop")
+                print("\n[WARN] Native core not available - simulation mode")
+                print("Press Ctrl+C to stop")
                 import time
 
                 while True:
                     time.sleep(1)
 
         except KeyboardInterrupt:
-            logger.info("Shutting down TurboAPI server...")
+            print("\n[STOP] Shutting down TurboAPI server...")
 
             # Run shutdown handlers
             if self.shutdown_handlers:
@@ -780,7 +780,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
 
                 asyncio.run(self._run_shutdown_handlers())
 
-            logger.info("Server stopped")
+            print("[BYE] Server stopped")
 
 
 # Export the correct integration class

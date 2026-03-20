@@ -6,12 +6,11 @@ Connects FastAPI-compatible routing to Zig HTTP core with middleware pipeline
 import asyncio
 import inspect
 import json
-import logging
+import traceback
 from typing import Any
 
 from .main_app import TurboAPI
-
-logger = logging.getLogger(__name__)
+from .version_check import CHECK_MARK, ROCKET
 
 
 try:
@@ -21,7 +20,7 @@ try:
 except ImportError:
     ZIG_CORE_AVAILABLE = False
     turbonet = None
-    logger.warning("Zig core not available - running in simulation mode")
+    print("[WARN] Zig core not available - running in simulation mode")
 
 
 class RequestContextAdapter:
@@ -50,7 +49,7 @@ class RequestContextAdapter:
             try:
                 self.json_data = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
-                logger.debug("Request body is not valid JSON, leaving json_data as None")
+                pass
 
     def to_middleware_context(self):
         """Convert to middleware RequestContext."""
@@ -153,15 +152,14 @@ class TurboHTTPServer:
                             self.middleware_pipeline.add_middleware(rate_limit)
                         # Add more middleware types as needed
             except Exception as e:
-                logger.warning("Middleware pipeline initialization failed: %s", e)
-                logger.warning("Running in simulation mode")
+                print(f"⚠️ Middleware pipeline initialization failed: {e}")
+                print("🔄 Running in simulation mode")
                 self.middleware_pipeline = None
         else:
             self.middleware_pipeline = None
 
-        logger.info(
-            "TurboHTTPServer initialized with %d middleware components",
-            len(self.app.middleware_stack),
+        print(
+            f"🔧 TurboHTTPServer initialized with {len(self.app.middleware_stack)} middleware components"
         )
 
     async def handle_request(
@@ -201,7 +199,7 @@ class TurboHTTPServer:
                     return processed_context["early_response"]
             else:
                 # Simulation mode - log middleware processing
-                logger.debug("Middleware processing (simulated): %s %s", method, path)
+                print(f"🔧 Middleware processing (simulated): {method} {path}")
 
             # 3. Route to handler function
             route_response = await self._route_request(request_adapter)
@@ -249,7 +247,8 @@ class TurboHTTPServer:
             # Error handling
             error_time = (asyncio.get_event_loop().time() - start_time) * 1000
 
-            logger.error("Request error: %s", e, exc_info=True)
+            print(f"❌ Request error: {e}")
+            traceback.print_exc()
 
             return {
                 "status_code": 500,
@@ -278,7 +277,7 @@ class TurboHTTPServer:
                 processed = await self.middleware_pipeline.process_request(context)
                 return processed
             except Exception as e:
-                logger.warning("Middleware request processing error: %s", e)
+                print(f"⚠️ Middleware request processing error: {e}")
                 return context
         else:
             # Simulation mode
@@ -305,7 +304,7 @@ class TurboHTTPServer:
 
                 return response_adapter
             except Exception as e:
-                logger.warning("Middleware response processing error: %s", e)
+                print(f"⚠️ Middleware response processing error: {e}")
                 return response_adapter
         else:
             # Simulation mode

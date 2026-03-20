@@ -5,10 +5,7 @@ This module is the stable Python-facing seam for the native HTTP core.
 It loads the Zig turbonet extension and detects free-threading support.
 """
 
-import logging
 import sys
-
-logger = logging.getLogger(__name__)
 
 _BACKEND = None
 turbonet = None
@@ -25,12 +22,12 @@ try:
         NATIVE_CORE_AVAILABLE = True
         _BACKEND = "zig"
         _ft_tag = " (free-threaded)" if _FREE_THREADED else ""
-        logger.info("Using Zig native backend%s", _ft_tag)
+        print(f"[ZIG] 🚀 Using Zig native backend{_ft_tag}")
     else:
         raise ImportError("Zig turbonet missing required classes")
 except ImportError:
     NATIVE_CORE_AVAILABLE = False
-    logger.warning("Native core not available - running in simulation mode")
+    print("[WARN] Native core not available - running in simulation mode")
 
 from .zig_integration import (  # noqa: E402
     ZigIntegratedTurboAPI,

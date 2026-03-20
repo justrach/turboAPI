@@ -4,11 +4,8 @@ TurboAPI Version & Free-Threading Check
 Ensures TurboAPI runs on Python 3.14+ free-threading builds only.
 """
 
-import logging
 import sys
 import sysconfig
-
-logger = logging.getLogger(__name__)
 
 # ── Emoji / ASCII symbols ────────────────────────────────────────────────────
 
@@ -96,7 +93,7 @@ def check_free_threading_support():
         )
 
     v = sys.version_info
-    logger.info("TurboAPI: Python %d.%d.%d free-threading active", v.major, v.minor, v.micro)
+    print(f"{CHECK_MARK} TurboAPI: Python {v.major}.{v.minor}.{v.micro} free-threading active")
 
 
 def get_python_threading_info() -> dict:
