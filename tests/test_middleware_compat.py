@@ -170,17 +170,6 @@ def https_redirect_app():
     @app.get("/secure")
     def secure_route():
         return {"secured": True}
-# ---- Stricter middleware compat tests ----
-
-
-@pytest.fixture(scope="module")
-def gzip_app():
-    app = TurboAPI()
-    app.add_middleware(GZipMiddleware, minimum_size=10)
-
-    @app.get("/large")
-    def large_response():
-        return {"data": "A" * 1000}
 
     port = _free_port()
     _start(app, port)
@@ -208,14 +197,6 @@ def test_https_redirect_blocked(https_redirect_app):
     assert r.status_code != 200, (
         f"Expected non-200 for plain HTTP request, got {r.status_code}: {r.text}"
     )
-@pytest.mark.xfail(reason="Requires middleware header/body passthrough (PR #55)")
-def test_gzip_middleware_compat(gzip_app):
-    """GZip middleware must correctly compress and return 200."""
-    r = requests.get(f"{gzip_app}/large", headers={"Accept-Encoding": "gzip"})
-    assert r.status_code == 200, r.text
-    assert r.headers.get("Content-Encoding") == "gzip"
-
-@pytest.mark.xfail(reason="Requires middleware header/body passthrough (PR #55)")
 def test_gzip_body_is_actually_compressed(gzip_app):
     """The body must actually be gzip-compressed bytes, not original JSON.
     Decompress and verify the data survived the round trip."""
@@ -274,8 +255,8 @@ def test_async_handler_under_middleware():
 
 def test_non_middleware_route_no_extra_headers():
     """Routes without middleware must NOT have middleware-injected headers
-    like Content-Encoding leaking into the response. CORS headers are
-    excluded from this check because cors_enabled is global Zig state."""
+    leaking into the response. Guards against CORS/Content-Encoding
+    being inherited from a previous TurboAPI app in the same process."""
     app = TurboAPI()
 
     @app.get("/clean")
@@ -287,6 +268,7 @@ def test_non_middleware_route_no_extra_headers():
     r = requests.get(f"http://127.0.0.1:{port}/clean")
     assert r.status_code == 200
     # No middleware-injected headers should appear
+    assert "Access-Control-Allow-Origin" not in r.headers
     assert "Content-Encoding" not in r.headers
     assert r.json() == {"clean": True}
 

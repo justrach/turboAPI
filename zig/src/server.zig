@@ -311,6 +311,16 @@ pub fn server_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
     server_host = allocator.dupe(u8, std.mem.span(host)) catch "127.0.0.1";
     server_port = @intCast(port);
 
+    // Reset per-server-instance state so that a new TurboAPI() app in the same
+    // process doesn't inherit configuration from a previous one.  Without this,
+    // Zig-native CORS set by an earlier app leaks into apps that don't configure
+    // it, causing test_non_middleware_route_no_extra_headers to detect the leak.
+    if (cors_enabled) {
+        allocator.free(cors_headers);
+        cors_headers = "";
+        cors_enabled = false;
+    }
+
     // Eagerly initialize all globals — workers must never hit the lazy-init
     // path, which has a check-then-act race condition.
     _ = getRoutes();
