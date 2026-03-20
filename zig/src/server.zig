@@ -642,7 +642,7 @@ pub fn server_configure_cors(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?
     const age_str = std.fmt.bufPrint(&age_buf, "{d}", .{max_age}) catch "600";
 
     cors_headers = std.fmt.allocPrint(allocator,
-"\r\nAccess-Control-Allow-Origin: {s}" ++
+        "\r\nAccess-Control-Allow-Origin: {s}" ++
         "\r\nAccess-Control-Allow-Methods: {s}" ++
         "\r\nAccess-Control-Allow-Headers: {s}" ++
         "{s}" ++
