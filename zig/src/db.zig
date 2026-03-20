@@ -192,41 +192,40 @@ fn serializeRow(row: anytype, col_names: []const []const u8, buf: []u8) ![]const
         buf[pos] = ':';
         pos += 1;
 
-        // Try integer first, then text fallback
-        if (row.get(i32, @intCast(i))) |int_val| {
-            const num_str = std.fmt.bufPrint(buf[pos..], "{d}", .{int_val}) catch break;
-            pos += num_str.len;
-        } else |_| {
-            if (row.get([]const u8, @intCast(i))) |val| {
-                // Check if it's a printable string (not binary garbage)
-                const printable = blk: {
-                    for (val) |ch| {
-                        if (ch < 0x20 and ch != '\t' and ch != '\n') break :blk false;
-                    }
-                    break :blk true;
-                };
-                if (printable) {
-                    buf[pos] = '"';
+        // Try types in order: i32, i64, f32, f64, bool, then text fallback
+        if (row.get(i32, @intCast(i))) |v| {
+            const s = std.fmt.bufPrint(buf[pos..], "{d}", .{v}) catch break;
+            pos += s.len;
+        } else |_| if (row.get(i64, @intCast(i))) |v| {
+            const s = std.fmt.bufPrint(buf[pos..], "{d}", .{v}) catch break;
+            pos += s.len;
+        } else |_| if (row.get(f32, @intCast(i))) |v| {
+            const s = std.fmt.bufPrint(buf[pos..], "{d}", .{v}) catch break;
+            pos += s.len;
+        } else |_| if (row.get(f64, @intCast(i))) |v| {
+            const s = std.fmt.bufPrint(buf[pos..], "{d}", .{v}) catch break;
+            pos += s.len;
+        } else |_| if (row.get(bool, @intCast(i))) |v| {
+            const s = if (v) "true" else "false";
+            @memcpy(buf[pos..][0..s.len], s);
+            pos += s.len;
+        } else |_| if (row.get([]const u8, @intCast(i))) |val| {
+            buf[pos] = '"';
+            pos += 1;
+            for (val) |ch| {
+                if (pos + 2 >= buf.len) break;
+                if (ch == '"' or ch == '\\') {
+                    buf[pos] = '\\';
                     pos += 1;
-                    for (val) |ch| {
-                        if (pos + 2 >= buf.len) break;
-                        if (ch == '"' or ch == '\\') {
-                            buf[pos] = '\\';
-                            pos += 1;
-                        }
-                        buf[pos] = ch;
-                        pos += 1;
-                    }
-                    buf[pos] = '"';
-                    pos += 1;
-                } else {
-                    @memcpy(buf[pos..][0..4], "null");
-                    pos += 4;
                 }
-            } else |_| {
-                @memcpy(buf[pos..][0..4], "null");
-                pos += 4;
+                buf[pos] = ch;
+                pos += 1;
             }
+            buf[pos] = '"';
+            pos += 1;
+        } else |_| {
+            @memcpy(buf[pos..][0..4], "null");
+            pos += 4;
         }
     }
 
@@ -508,8 +507,9 @@ pub fn handleDbRoute(
             const prefix = "Q:";
             @memcpy(cache_key_buf[ck_pos..][0..prefix.len], prefix);
             ck_pos += prefix.len;
-            @memcpy(cache_key_buf[ck_pos..][0..entry.custom_sql.len], entry.custom_sql[0..@min(entry.custom_sql.len, 64)]);
-            ck_pos += @min(entry.custom_sql.len, 64);
+            const sql_key_len = @min(entry.custom_sql.len, 64);
+            @memcpy(cache_key_buf[ck_pos..][0..sql_key_len], entry.custom_sql[0..sql_key_len]);
+            ck_pos += sql_key_len;
             for (param_values[0..param_count]) |v| {
                 cache_key_buf[ck_pos] = ':';
                 ck_pos += 1;
@@ -665,13 +665,6 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     const pk_param_s = std.mem.span(pk_param_c);
     const columns_s = std.mem.span(columns_c);
 
-    // Validate table name (SQL injection prevention)
-    if (!isValidIdentifier(table_s)) {
-        py.setError("Invalid table name: {s}", .{table_s});
-        return null;
-    }
-
-    // Parse operation
     const op: DbOp = if (std.mem.eql(u8, op_s, "select_one"))
         .select_one
     else if (std.mem.eql(u8, op_s, "select_list"))
@@ -688,6 +681,14 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         py.setError("Invalid db op: {s}", .{op_s});
         return null;
     };
+
+    // Validate table name for CRUD ops (custom queries pass SQL as table)
+    if (op != .custom_query and op != .custom_query_single) {
+        if (!isValidIdentifier(table_s)) {
+            py.setError("Invalid table name: {s}", .{table_s});
+            return null;
+        }
+    }
 
     // Parse column names (also used as param names for custom queries)
     var cols: [16][]const u8 = undefined;
