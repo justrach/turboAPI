@@ -77,10 +77,10 @@ const html =
     \\    .bar-speedup { font-family: var(--mono); font-size: 13px; color: var(--green); font-weight: 600; }
     \\
     \\    /* Pipeline */
-    \\    .pipeline { display: flex; align-items: center; gap: 0; margin: 40px 0; flex-wrap: wrap; justify-content: center; }
-    \\    .pipe-step { padding: 14px 20px; background: var(--bg2); border: 1px solid var(--border); font-family: var(--mono); font-size: 13px; text-align: center; color: var(--text); }
+    \\    .pipeline { display: flex; align-items: center; gap: 0; margin: 40px auto; justify-content: center; max-width: 900px; overflow-x: auto; }
+    \\    .pipe-step { padding: 12px 16px; background: var(--bg2); border: 1px solid var(--border); font-family: var(--mono); font-size: 13px; text-align: center; color: var(--text); white-space: nowrap; flex-shrink: 0; }
     \\    .pipe-step.zig { border-color: var(--accent); color: var(--accent); }
-    \\    .pipe-arrow { font-size: 20px; color: var(--muted); padding: 0 4px; }
+    \\    .pipe-arrow { font-size: 18px; color: var(--muted); padding: 0 2px; flex-shrink: 0; }
     \\    .pipe-step:first-child { border-radius: 6px 0 0 6px; }
     \\    .pipe-step:last-child { border-radius: 0 6px 6px 0; }
     \\
@@ -106,11 +106,23 @@ const html =
     \\
     \\    /* Footer */
     \\    footer { padding: 40px; text-align: center; color: var(--muted); font-size: 13px; border-top: 1px solid var(--border); margin-top: 60px; }
-    \\    @media (max-width: 640px) {
+    \\    @media (max-width: 768px) {
     \\      .hero h1 { font-size: 36px; }
-    \\      .bar-label { width: 100px; font-size: 12px; }
-    \\      .bar-num { width: 80px; font-size: 12px; }
+    \\      .hero { padding: 60px 20px 40px; }
+    \\      .section { padding: 40px 20px; }
+    \\      .bar-label { width: 90px; font-size: 11px; }
+    \\      .bar-num { width: 85px; font-size: 11px; }
+    \\      .bar-speedup { width: 40px; font-size: 11px; }
+    \\      .bar-track { height: 24px; }
+    \\      .pipeline { overflow-x: auto; -webkit-overflow-scrolling: touch; justify-content: flex-start; padding: 0 20px; }
+    \\      .pipe-step { padding: 10px 12px; font-size: 11px; }
+    \\      .pipe-arrow { font-size: 14px; }
+    \\      .features { grid-template-columns: 1fr; }
     \\      .nav-links { display: none; }
+    \\      table { font-size: 12px; }
+    \\      th, td { padding: 8px 10px; }
+    \\      .code-block { padding: 16px; }
+    \\      .code-block pre { font-size: 11px; }
     \\    }
     \\  </style>
     \\</head>
