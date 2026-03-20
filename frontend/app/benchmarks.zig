@@ -1,0 +1,319 @@
+const mer = @import("mer");
+
+pub const meta: mer.Meta = .{
+    .title = "Benchmarks",
+    .description = "TurboAPI vs FastAPI vs Starlette vs Flask — interactive performance benchmarks.",
+};
+
+pub const prerender = true;
+
+pub fn render(req: mer.Request) mer.Response {
+    _ = req;
+    return .{
+        .status = .ok,
+        .content_type = .html,
+        .body = html,
+    };
+}
+
+const html =
+    \\<!DOCTYPE html>
+    \\<html lang="en">
+    \\<head>
+    \\  <meta charset="UTF-8">
+    \\  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    \\  <title>Benchmarks — TurboAPI</title>
+    \\  <link rel="preconnect" href="https://fonts.googleapis.com">
+    \\  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    \\  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    \\  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    \\  <style>
+    \\    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    \\    :root {
+    \\      --bg: #f9f8f6; --bg2: #f2f0ec; --bg3: #e9e5de;
+    \\      --dark: #0e0d0b; --dark2: #1a1916; --dark3: #252320;
+    \\      --text: #0e0d0b; --muted: #8a8478; --border: #ddd9d2;
+    \\      --accent: #e8821a; --accent-dim: rgba(232,130,26,0.15);
+    \\      --mono: 'JetBrains Mono', monospace;
+    \\      --sans: 'Inter', sans-serif;
+    \\      --display: 'Space Grotesk', sans-serif;
+    \\    }
+    \\    html { scroll-behavior: smooth; }
+    \\    body { background: var(--dark); color: var(--text); font-family: var(--sans); min-height: 100vh; overflow-x: hidden; }
+    \\    a { color: inherit; text-decoration: none; }
+    \\
+    \\    /* ── Nav (dark) ───────────────────────────── */
+    \\    nav { position: sticky; top: 0; z-index: 100; background: rgba(14,13,11,0.9); backdrop-filter: blur(12px); border-bottom: 1px solid rgba(255,255,255,0.08); }
+    \\    .nav-inner { max-width: 1100px; margin: 0 auto; padding: 0 40px; display: flex; align-items: center; justify-content: space-between; height: 60px; }
+    \\    .wordmark { font-family: var(--display); font-size: 16px; font-weight: 800; letter-spacing: -0.02em; color: #fff; }
+    \\    .wordmark em { font-style: normal; color: var(--accent); }
+    \\    .nav-links { display: flex; gap: 32px; align-items: center; }
+    \\    .nav-links a { font-size: 13px; font-weight: 500; color: rgba(255,255,255,0.5); letter-spacing: 0.01em; transition: color 0.15s; }
+    \\    .nav-links a:hover { color: #fff; }
+    \\    .nav-cta { font-family: var(--display); font-size: 13px !important; font-weight: 700 !important; color: #fff !important; background: var(--accent); padding: 8px 18px; border-radius: 4px; }
+    \\    .nav-cta:hover { opacity: 0.88; }
+    \\    .nav-burger { display: none; flex-direction: column; gap: 5px; background: none; border: none; cursor: pointer; padding: 4px; }
+    \\    .nav-burger span { display: block; width: 22px; height: 2px; background: #fff; border-radius: 2px; transition: transform 0.2s, opacity 0.2s; }
+    \\    .nav-burger.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+    \\    .nav-burger.open span:nth-child(2) { opacity: 0; }
+    \\    .nav-burger.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+    \\    @media (max-width: 640px) {
+    \\      .nav-burger { display: flex; }
+    \\      .nav-links { display: none; flex-direction: column; gap: 0; position: absolute; top: 60px; left: 0; right: 0; background: rgba(14,13,11,0.97); backdrop-filter: blur(12px); border-bottom: 1px solid rgba(255,255,255,0.08); padding: 8px 0; }
+    \\      .nav-links.open { display: flex; }
+    \\      .nav-links a { padding: 14px 24px; font-size: 15px; }
+    \\      .nav-cta { margin: 8px 24px 12px; padding: 12px 20px; border-radius: 4px; text-align: center; }
+    \\    }
+    \\
+    \\    /* ── Hero (dark) ──────────────────────────── */
+    \\    .hero {
+    \\      background: var(--dark);
+    \\      padding: 80px 40px 0;
+    \\      max-width: 1100px; margin: 0 auto;
+    \\    }
+    \\    .hero-label { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
+    \\    .hero-label::before { content: ''; display: inline-block; width: 20px; height: 1px; background: var(--accent); }
+    \\    .hero-headline { font-family: var(--display); font-size: clamp(44px, 7vw, 88px); font-weight: 800; letter-spacing: -0.04em; line-height: 0.95; color: #fff; margin-bottom: 16px; }
+    \\    .hero-headline .hl { color: var(--accent); }
+    \\    .hero-sub { font-family: var(--mono); font-size: 12px; color: rgba(255,255,255,0.35); letter-spacing: 0.04em; margin-bottom: 64px; }
+    \\
+    \\    /* ── Stat row ─────────────────────────────── */
+    \\    .stat-row { display: grid; grid-template-columns: repeat(4,1fr); border-top: 1px solid rgba(255,255,255,0.08); }
+    \\    @media (max-width: 700px) { .stat-row { grid-template-columns: repeat(2,1fr); } }
+    \\    .stat-cell { padding: 32px 0 40px; border-right: 1px solid rgba(255,255,255,0.08); padding-right: 32px; margin-right: 0; }
+    \\    .stat-cell:first-child { padding-left: 0; }
+    \\    .stat-cell:last-child { border-right: none; }
+    \\    .stat-val { font-family: var(--display); font-size: clamp(32px, 4vw, 52px); font-weight: 800; letter-spacing: -0.04em; color: #fff; line-height: 1; margin-bottom: 4px; }
+    \\    .stat-val .unit { font-size: 0.45em; font-weight: 600; color: rgba(255,255,255,0.4); letter-spacing: 0; vertical-align: super; margin-left: 2px; }
+    \\    .stat-label { font-family: var(--mono); font-size: 11px; color: rgba(255,255,255,0.4); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 8px; }
+    \\    .stat-delta { font-family: var(--mono); font-size: 11px; color: var(--accent); letter-spacing: 0.02em; }
+    \\
+    \\    /* ── Bars section (cream) ─────────────────── */
+    \\    .bars-section { background: var(--bg); padding: 80px 40px; }
+    \\    .bars-inner { max-width: 1100px; margin: 0 auto; }
+    \\    .section-eyebrow { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 10px; }
+    \\    .section-heading { font-family: var(--display); font-size: clamp(22px, 3vw, 32px); font-weight: 800; letter-spacing: -0.025em; color: var(--dark); margin-bottom: 48px; }
+    \\    .bar-row { display: grid; grid-template-columns: 120px 1fr 80px; align-items: center; gap: 16px; margin-bottom: 14px; }
+    \\    .bar-name { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: right; letter-spacing: 0.02em; }
+    \\    .bar-name.turbo { color: var(--dark); font-weight: 500; }
+    \\    .bar-track { height: 10px; background: var(--bg3); border-radius: 99px; overflow: hidden; }
+    \\    .bar-fill { height: 100%; border-radius: 99px; width: 0; transition: width 1s cubic-bezier(0.16,1,0.3,1); }
+    \\    .bar-fill.turbo { background: var(--accent); }
+    \\    .bar-fill.other { background: var(--border); }
+    \\    .bar-num { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+    \\    .bar-num.turbo { color: var(--accent); font-weight: 500; }
+    \\    .bar-section-label { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin: 36px 0 16px 136px; }
+    \\
+    \\    /* ── Charts section (dark) ────────────────── */
+    \\    .charts-section { background: var(--dark2); padding: 80px 40px 100px; }
+    \\    .charts-inner { max-width: 1100px; margin: 0 auto; }
+    \\    .charts-section .section-heading { color: #fff; }
+    \\    .charts-section .section-eyebrow { }
+    \\    .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; margin-top: 2px; }
+    \\    @media (max-width: 700px) { .chart-grid { grid-template-columns: 1fr; } }
+    \\    .chart-card { background: var(--dark3); padding: 32px; }
+    \\    .chart-card:first-child { border-radius: 8px 0 0 0; }
+    \\    .chart-card:nth-child(2) { border-radius: 0 8px 0 0; }
+    \\    .chart-card:nth-child(3) { border-radius: 0 0 0 8px; }
+    \\    .chart-card:last-child { border-radius: 0 0 8px 0; }
+    \\    .chart-card h2 { font-family: var(--display); font-size: 15px; font-weight: 700; color: #fff; margin-bottom: 4px; }
+    \\    .chart-card .chart-sub { font-family: var(--mono); font-size: 11px; color: rgba(255,255,255,0.3); letter-spacing: 0.04em; margin-bottom: 24px; }
+    \\    .chart-wrap { position: relative; height: 220px; }
+    \\
+    \\    /* ── Methodology ─────────────────────────── */
+    \\    .method-section { background: var(--dark); padding: 0 40px 100px; }
+    \\    .method-inner { max-width: 1100px; margin: 0 auto; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 48px; display: flex; gap: 60px; align-items: flex-start; }
+    \\    @media (max-width: 700px) { .method-inner { flex-direction: column; gap: 32px; } }
+    \\    .method-text { flex: 1; font-size: 13px; color: rgba(255,255,255,0.4); line-height: 1.8; font-family: var(--mono); }
+    \\    .method-text strong { color: rgba(255,255,255,0.7); font-weight: 500; }
+    \\    .method-text a { color: var(--accent); }
+    \\    .method-ctas { display: flex; flex-direction: column; gap: 12px; flex-shrink: 0; }
+    \\    .btn { display: inline-flex; align-items: center; justify-content: center; font-family: var(--display); font-size: 14px; font-weight: 700; padding: 13px 28px; border-radius: 4px; background: var(--accent); color: #fff; transition: opacity 0.15s, transform 0.15s; white-space: nowrap; }
+    \\    .btn:hover { opacity: 0.88; transform: translateY(-1px); }
+    \\    .btn-ghost { background: transparent; border: 1px solid rgba(255,255,255,0.15); color: rgba(255,255,255,0.6); font-weight: 500; }
+    \\    .btn-ghost:hover { border-color: rgba(255,255,255,0.4); color: #fff; transform: none; }
+    \\    .layout-footer { padding: 20px 40px; border-top: 1px solid rgba(255,255,255,0.06); font-size: 11px; color: rgba(255,255,255,0.2); text-align: center; font-family: var(--mono); letter-spacing: 0.04em; background: var(--dark); max-width: none; }
+    \\    .layout-footer a { color: rgba(255,255,255,0.2); }
+    \\    .layout-footer a:hover { color: rgba(255,255,255,0.5); }
+    \\  </style>
+    \\</head>
+    \\<body>
+    \\
+    \\<!-- Nav -->
+    \\<nav>
+    \\  <div class="nav-inner">
+    \\    <a href="/" class="wordmark">Turbo<em>API</em></a>
+    \\    <button class="nav-burger" id="burger" aria-label="Menu">
+    \\      <span></span><span></span><span></span>
+    \\    </button>
+    \\    <div class="nav-links" id="nav-links">
+    \\      <a href="/benchmarks">Benchmarks</a>
+    \\      <a href="/docs">Docs</a>
+    \\      <a href="https://github.com/justrach/turboAPI">GitHub</a>
+    \\      <a href="/quickstart" class="nav-cta">Get started</a>
+    \\    </div>
+    \\  </div>
+    \\</nav>
+    \\
+    \\<!-- Hero -->
+    \\<div style="background:var(--dark);">
+    \\  <div class="hero">
+    \\    <div class="hero-label">Performance benchmarks</div>
+    \\    <div class="hero-headline">
+    \\      <span class="hl">22×</span> faster<br>than FastAPI.
+    \\    </div>
+    \\    <div class="hero-sub">Apple M3 Pro &nbsp;&middot;&nbsp; Python 3.14t free-threaded &nbsp;&middot;&nbsp; wrk 4T/100C/10s</div>
+    \\    <div class="stat-row">
+    \\      <div class="stat-cell">
+    \\        <div class="stat-label">Requests / sec</div>
+    \\        <div class="stat-val">150,000<span class="unit">req/s</span></div>
+    \\        <div class="stat-delta">vs 6,847 FastAPI</div>
+    \\      </div>
+    \\      <div class="stat-cell" style="padding-left:32px;">
+    \\        <div class="stat-label">Avg latency</div>
+    \\        <div class="stat-val">0.15<span class="unit">ms</span></div>
+    \\        <div class="stat-delta">vs 14.6ms FastAPI</div>
+    \\      </div>
+    \\      <div class="stat-cell" style="padding-left:32px;">
+    \\        <div class="stat-label">Cold start</div>
+    \\        <div class="stat-val">5<span class="unit">ms</span></div>
+    \\        <div class="stat-delta">vs 800ms FastAPI</div>
+    \\      </div>
+    \\      <div class="stat-cell" style="padding-left:32px;">
+    \\        <div class="stat-label">Memory / load</div>
+    \\        <div class="stat-val">12<span class="unit">MB</span></div>
+    \\        <div class="stat-delta">vs 72MB FastAPI</div>
+    \\      </div>
+    \\    </div>
+    \\  </div>
+    \\</div>
+    \\
+    \\<!-- Visual comparison bars -->
+    \\<div class="bars-section">
+    \\  <div class="bars-inner">
+    \\    <div class="section-eyebrow">Head to head</div>
+    \\    <div class="section-heading">Requests per second</div>
+    \\    <div class="bar-section-label">Higher is better</div>
+    \\    <div class="bar-row">
+    \\      <div class="bar-name turbo">TurboAPI</div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" data-pct="100"></div></div>
+    \\      <div class="bar-num turbo">47,832</div>
+    \\    </div>
+    \\    <div class="bar-row">
+    \\      <div class="bar-name">Starlette</div>
+    \\      <div class="bar-track"><div class="bar-fill other" data-pct="19"></div></div>
+    \\      <div class="bar-num">9,201</div>
+    \\    </div>
+    \\    <div class="bar-row">
+    \\      <div class="bar-name">FastAPI</div>
+    \\      <div class="bar-track"><div class="bar-fill other" data-pct="14"></div></div>
+    \\      <div class="bar-num">6,847</div>
+    \\    </div>
+    \\    <div class="bar-row">
+    \\      <div class="bar-name">Flask</div>
+    \\      <div class="bar-track"><div class="bar-fill other" data-pct="9"></div></div>
+    \\      <div class="bar-num">4,312</div>
+    \\    </div>
+    \\  </div>
+    \\</div>
+    \\
+    \\<!-- Charts -->
+    \\<div class="charts-section">
+    \\  <div class="charts-inner">
+    \\    <div class="section-eyebrow">All metrics</div>
+    \\    <div class="section-heading">Full benchmark breakdown</div>
+    \\    <div class="chart-grid">
+    \\      <div class="chart-card">
+    \\        <h2>Requests / second</h2>
+    \\        <p class="chart-sub">Higher is better</p>
+    \\        <div class="chart-wrap"><canvas id="rpsChart"></canvas></div>
+    \\      </div>
+    \\      <div class="chart-card">
+    \\        <h2>Avg latency (ms)</h2>
+    \\        <p class="chart-sub">Lower is better</p>
+    \\        <div class="chart-wrap"><canvas id="latChart"></canvas></div>
+    \\      </div>
+    \\      <div class="chart-card">
+    \\        <h2>Cold start (ms)</h2>
+    \\        <p class="chart-sub">Lower is better</p>
+    \\        <div class="chart-wrap"><canvas id="coldChart"></canvas></div>
+    \\      </div>
+    \\      <div class="chart-card">
+    \\        <h2>Memory under load (MB)</h2>
+    \\        <p class="chart-sub">Lower is better</p>
+    \\        <div class="chart-wrap"><canvas id="memChart"></canvas></div>
+    \\      </div>
+    \\    </div>
+    \\  </div>
+    \\</div>
+    \\
+    \\<!-- Methodology + CTA -->
+    \\<div class="method-section">
+    \\  <div class="method-inner">
+    \\    <div class="method-text">
+    \\      <strong>Methodology</strong><br><br>
+    \\      wrk · 4 threads · 100 connections · 10s duration.<br>
+    \\      Single GET / returning JSON. TurboAPI on Python 3.14t (free-threaded).<br>
+    \\      FastAPI / Starlette / Flask on uvicorn + CPython 3.12.<br>
+    \\      Numbers are local — your hardware will differ.<br><br>
+    \\      <a href="https://github.com/justrach/turboAPI/tree/main/benchmarks">View source on GitHub &rarr;</a>
+    \\    </div>
+    \\    <div class="method-ctas">
+    \\      <a href="/quickstart" class="btn">Get started</a>
+    \\      <a href="/docs" class="btn btn-ghost">Read the docs</a>
+    \\    </div>
+    \\  </div>
+    \\</div>
+    \\
+    \\<footer class="layout-footer">
+    \\  TurboAPI &mdash; FastAPI drop-in &middot; Zig HTTP core &middot; <a href="https://github.com/justrach/turboAPI">GitHub</a> &middot; <a href="https://pypi.org/project/turboapi/">PyPI</a>
+    \\</footer>
+    \\
+    \\<script>
+    \\// Animate bars on load
+    \\window.addEventListener('load', function() {
+    \\  document.querySelectorAll('.bar-fill').forEach(function(el) {
+    \\    el.style.width = el.dataset.pct + '%';
+    \\  });
+    \\});
+    \\// Charts
+    \\const labels = ['TurboAPI', 'Starlette', 'FastAPI', 'Flask'];
+    \\const colors = ['#e8821a', '#6b7280', '#4b5563', '#374151'];
+    \\const opts = (unit) => ({
+    \\  responsive: true, maintainAspectRatio: false,
+    \\  animation: { duration: 800, easing: 'easeOutQuart' },
+    \\  plugins: {
+    \\    legend: { display: false },
+    \\    tooltip: {
+    \\      backgroundColor: '#1a1916', borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1,
+    \\      titleColor: '#fff', bodyColor: 'rgba(255,255,255,0.5)', padding: 12,
+    \\      callbacks: { label: ctx => ` ${ctx.parsed.y.toLocaleString()} ${unit}` },
+    \\    },
+    \\  },
+    \\  scales: {
+    \\    x: { ticks: { color: 'rgba(255,255,255,0.3)', font: { size: 11, family: "'JetBrains Mono'" } }, grid: { color: 'rgba(255,255,255,0.04)' } },
+    \\    y: { ticks: { color: 'rgba(255,255,255,0.3)', font: { size: 11, family: "'JetBrains Mono'" } }, grid: { color: 'rgba(255,255,255,0.04)' } },
+    \\  },
+    \\});
+    \\function bar(id, data, unit) {
+    \\  new Chart(document.getElementById(id), {
+    \\    type: 'bar',
+    \\    data: { labels, datasets: [{ data, backgroundColor: colors, borderRadius: 4, borderSkipped: false }] },
+    \\    options: opts(unit),
+    \\  });
+    \\}
+    \\bar('rpsChart',  [150000, 9201, 6847, 4312], 'req/s');
+    \\bar('latChart',  [0.15, 10.9, 14.6, 23.2],  'ms');
+    \\bar('coldChart', [5, 600, 800, 400],          'ms');
+    \\bar('memChart',  [12, 58, 72, 38],            'MB');
+    \\// Burger
+    \\(function() {
+    \\  var burger = document.getElementById('burger');
+    \\  var links = document.getElementById('nav-links');
+    \\  burger.addEventListener('click', function() { burger.classList.toggle('open'); links.classList.toggle('open'); });
+    \\  links.querySelectorAll('a').forEach(function(a) { a.addEventListener('click', function() { burger.classList.remove('open'); links.classList.remove('open'); }); });
+    \\})();
+    \\</script>
+    \\</body>
+    \\</html>
+;

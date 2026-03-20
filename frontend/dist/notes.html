@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <title>Building with merjs — Notes — TurboAPI</title>
+  <meta name="description" content="Honest notes on building TurboAPI's frontend with merjs, a Zig-native SSR framework. What broke, what worked, and what to watch out for.">
+  <meta name="robots" content="index, follow">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="TurboAPI">
+  <meta property="og:image" content="https://turboapi.trilok.ai/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:site" content="@justrach">
+  <meta name="twitter:image" content="https://turboapi.trilok.ai/og.png">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"TurboAPI","description":"FastAPI-compatible Python web framework with a Zig HTTP core. 7x faster than FastAPI.","applicationCategory":"DeveloperApplication","operatingSystem":"Linux, macOS","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"url":"https://turboapi.trilok.ai"}</script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #f9f8f6; --bg2: #f2f0ec; --bg3: #e9e5de;
+      --text: #0e0d0b; --muted: #8a8478; --border: #ddd9d2;
+      --accent: #e8821a; --accent-dim: rgba(232,130,26,0.12);
+      --green: #2d7a3f;
+      --mono: 'JetBrains Mono', monospace;
+      --sans: 'Inter', sans-serif;
+      --display: 'Space Grotesk', sans-serif;
+    }
+    html { scroll-behavior: smooth; }
+    body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; line-height: 1.6; overflow-x: hidden; }
+    a { color: inherit; text-decoration: none; }
+    code { font-family: var(--mono); font-size: 0.85em; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 2px 7px; color: var(--accent); }
+    pre { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 20px 24px; overflow-x: auto; font-family: var(--mono); font-size: 13px; line-height: 1.7; color: var(--text); margin: 16px 0; }
+    pre code { background: none; border: none; padding: 0; font-size: inherit; color: inherit; }
+
+    /* Nav */
+    nav { position: sticky; top: 0; z-index: 100; background: rgba(249,248,246,0.88); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }
+    .nav-inner { max-width: 900px; margin: 0 auto; padding: 0 32px; display: flex; align-items: center; justify-content: space-between; height: 60px; }
+    .wordmark { font-family: var(--display); font-size: 16px; font-weight: 800; letter-spacing: -0.02em; }
+    .wordmark em { font-style: normal; color: var(--accent); }
+    .nav-links { display: flex; gap: 32px; align-items: center; }
+    .nav-links a { font-size: 13px; font-weight: 500; color: var(--muted); letter-spacing: 0.01em; transition: color 0.15s; }
+    .nav-links a:hover { color: var(--text); }
+    .nav-cta { font-family: var(--display); font-size: 13px !important; font-weight: 700 !important; color: #fff !important; background: var(--accent); padding: 8px 18px; border-radius: 4px; }
+    .nav-cta:hover { opacity: 0.88; }
+    .nav-burger { display: none; flex-direction: column; gap: 5px; background: none; border: none; cursor: pointer; padding: 4px; }
+    .nav-burger span { display: block; width: 22px; height: 2px; background: var(--text); border-radius: 2px; transition: transform 0.2s, opacity 0.2s; }
+    .nav-burger.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+    .nav-burger.open span:nth-child(2) { opacity: 0; }
+    .nav-burger.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+    @media (max-width: 640px) {
+      .nav-burger { display: flex; }
+      .nav-links { display: none; flex-direction: column; gap: 0; position: absolute; top: 60px; left: 0; right: 0; background: rgba(249,248,246,0.97); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 8px 0; }
+      .nav-links.open { display: flex; }
+      .nav-links a { padding: 14px 24px; font-size: 15px; }
+      .nav-cta { margin: 8px 24px 12px; padding: 12px 20px; border-radius: 4px; text-align: center; }
+    }
+
+    /* Layout */
+    .layout { max-width: 900px; margin: 0 auto; padding: 56px 32px 96px; }
+    @media (max-width: 640px) { .layout { padding: 40px 20px 72px; } }
+
+    /* Docs content */
+    .docs h1 { font-family: var(--display); font-size: clamp(26px, 4vw, 40px); font-weight: 800; letter-spacing: -0.025em; margin-bottom: 8px; }
+    .docs h2 { font-family: var(--display); font-size: 20px; font-weight: 700; letter-spacing: -0.01em; margin: 48px 0 12px; padding-top: 48px; border-top: 1px solid var(--border); }
+    .docs h2:first-of-type { margin-top: 32px; border-top: none; padding-top: 0; }
+    .docs p { color: var(--muted); font-size: 15px; margin-bottom: 16px; line-height: 1.7; }
+    .docs ul, .docs ol { color: var(--muted); font-size: 15px; margin: 12px 0 16px 20px; line-height: 1.8; }
+    .section-label { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 12px; }
+    .section-title { font-family: var(--display); font-size: clamp(22px, 4vw, 36px); font-weight: 700; letter-spacing: -0.02em; margin-bottom: 24px; }
+    .diff-del { color: #dc2626; }
+    .diff-add { color: var(--green); }
+    .hero-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 24px; }
+    .btn { display: inline-flex; align-items: center; font-family: var(--display); font-size: 14px; font-weight: 700; padding: 12px 24px; border-radius: 4px; background: var(--accent); color: #fff; transition: opacity 0.15s, transform 0.15s; }
+    .btn:hover { opacity: 0.88; transform: translateY(-1px); }
+    .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--muted); font-weight: 500; }
+    .btn-outline:hover { color: var(--text); border-color: var(--text); transform: none; }
+    .badge { display: inline-flex; align-items: center; font-family: var(--mono); font-size: 11px; padding: 3px 10px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); letter-spacing: 0.06em; }
+    .badge-green { border-color: rgba(45,122,63,0.3); color: var(--green); background: rgba(45,122,63,0.06); }
+    .badge-orange { border-color: rgba(232,130,26,0.3); color: var(--accent); background: rgba(232,130,26,0.08); }
+    .status-table { width: 100%; border-collapse: collapse; font-size: 14px; margin: 20px 0; }
+    .status-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+    .ok { color: var(--green); }
+    .wip { color: var(--accent); }
+    .bench-table { width: 100%; border-collapse: collapse; margin: 24px 0; font-size: 14px; }
+    .bench-table th { text-align: left; padding: 10px 16px; color: var(--muted); font-family: var(--mono); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; border-bottom: 1px solid var(--border); }
+    .bench-table td { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+    .bench-table tr.highlight td { color: var(--accent); font-weight: 600; }
+    .cta-section { margin: 80px 0 0; padding: 48px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; text-align: center; }
+    .cta-title { font-family: var(--display); font-size: 26px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 12px; }
+    .cta-sub { color: var(--muted); font-size: 14px; margin-bottom: 28px; }
+    .layout-footer { margin-top: 80px; padding-top: 20px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); text-align: center; font-family: var(--mono); letter-spacing: 0.02em; }
+    .layout-footer a { color: var(--muted); }
+    .layout-footer a:hover { color: var(--text); }
+    /* Docs extras */
+    .toc { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 20px 24px; margin: 24px 0 40px; display: flex; flex-direction: column; gap: 2px; }
+    .toc-label { font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+    .toc-link { font-size: 14px; color: var(--muted); padding: 4px 0; transition: color 0.15s; }
+    .toc-link:hover { color: var(--accent); }
+    .callout { display: flex; gap: 12px; align-items: flex-start; background: var(--accent-dim); border: 1px solid rgba(232,130,26,0.2); border-radius: 6px; padding: 14px 16px; margin: 16px 0; font-size: 14px; color: var(--text); line-height: 1.6; }
+    .callout-warn { background: var(--bg2); border-color: var(--border); }
+    .callout-icon { flex-shrink: 0; font-size: 16px; margin-top: 1px; }
+    .prop-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0 8px; }
+    @media (max-width: 600px) { .prop-grid { grid-template-columns: 1fr; } }
+    .prop-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 16px 18px; }
+    .prop-title { font-family: var(--display); font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+    .prop-desc { font-size: 13px; color: var(--muted); line-height: 1.6; }
+    .type-grid { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; margin: 16px 0; }
+    .type-row { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
+    .type-row:last-child { border-bottom: none; }
+    .type-row code { flex-shrink: 0; min-width: 80px; }
+    .type-row span { color: var(--muted); }
+    .issue-list { display: flex; flex-direction: column; gap: 12px; margin: 16px 0; }
+    .issue { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 18px 20px; }
+    .issue-title { font-family: var(--display); font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+    .issue-body { font-size: 13px; color: var(--muted); line-height: 1.65; }
+    .issue pre { margin-top: 10px; font-size: 12px; }
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-inner">
+    <a href="/" class="wordmark">Turbo<em>API</em></a>
+    <button class="nav-burger" id="burger" aria-label="Menu">
+      <span></span><span></span><span></span>
+    </button>
+    <div class="nav-links" id="nav-links">
+      <a href="/benchmarks">Benchmarks</a>
+      <a href="/turbopg">TurboPG</a>
+      <a href="/docs">Docs</a>
+      <a href="https://github.com/justrach/turboAPI">GitHub</a>
+      <a href="/quickstart" class="nav-cta">Get started</a>
+    </div>
+  </div>
+</nav>
+<div class="layout">
+<div class="docs"><div class="section-label">Devlog</div><h1 class="section-title">Building with merjs</h1><p>merjs is a Zig-native SSR web framework with file-based routing. We used it to build this site. Here's what we hit along the way — documented so you don't have to.</p><div class="toc"><div class="toc-label">On this page</div><a class="toc-link" href="#setup">Package setup gotchas</a><a class="toc-link" href="#missing-files">Missing files from the package</a><a class="toc-link" href="#html-dsl">h.* DSL quirks</a><a class="toc-link" href="#raw-html">Raw HTML pages</a><a class="toc-link" href="#layout">layout.zig pitfalls</a><a class="toc-link" href="#verdict">Verdict</a></div><h2 id="setup">1. Package setup gotchas</h2><p>Getting merjs into a new project requires a valid build.zig.zon. Several fields are easy to get wrong:</p><div class="issue-list"><div class="issue"><div class="issue-title">Missing fingerprint</div><div class="issue-body">Zig 0.15 requires a fingerprint field in build.zig.zon. If missing, the compiler prints the expected value — paste it in.</div><pre>.fingerprint = 0xf5794ba041c0e27d,</pre></div><div class="issue"><div class="issue-title">Invalid package name</div><div class="issue-body">Package names can't use @"..." escape syntax. Use a plain snake_case identifier instead.</div><pre>- .name = .@"frontend",
++ .name = .turboapi_frontend,</pre></div><div class="issue"><div class="issue-title">URL needs a pinned git ref</div><div class="issue-body">The dependency URL must include a specific commit hash in the fragment (#abcdef...) or Zig won't fetch it reproducibly.</div></div><div class="issue"><div class="issue-title">Missing .hash field</div><div class="issue-body">After adding the URL, run zig fetch --save to compute the content hash. Without it the build fails immediately.</div></div></div><h2 id="missing-files">2. Missing files from the package</h2><p>The biggest time sink. The published merjs package at the pinned commit was missing two categories of files — neither included in .paths in build.zig.zon:</p><div class="issue-list"><div class="issue"><div class="issue-title">wasm/counter_config.zig not in package</div><div class="issue-body">The wasm/ directory is excluded from the package. The build system imports counter_config.zig and fails with FileNotFound. Fix: create the file manually in the Zig global cache from the GitHub source.</div></div><div class="issue"><div class="issue-title">src/ runtime files missing</div><div class="issue-body">server.zig, ssr.zig, watcher.zig, prerender.zig, router.zig, request.zig, response.zig, static.zig, env.zig, html.zig, html_lint.zig, dhi.zig, worker.zig — all absent from the published package. Had to copy them manually from the Zig global cache after a failed build populated it.</div></div></div><div class="callout callout-warn"><span class="callout-icon">📦</span><span>If starting fresh: clone the repo directly rather than depending on it as a Zig package. The published package at the pinned hash is incomplete.</span></div><h2 id="html-dsl">3. h.* DSL quirks</h2><p>merjs provides a Zig HTML builder DSL. It's clean once you know the rules — but several are non-obvious:</p><div class="issue-list"><div class="issue"><div class="issue-title">Void elements take zero args</div><div class="issue-body">h.br(), h.hr(), h.input() take no arguments. Passing .{} causes "expected 0 args".</div><pre>- h.br(.{})  // compile error
++ h.br()     // correct</pre></div><div class="issue"><div class="issue-title">Single child requires a tuple</div><div class="issue-body">Passing one child node directly fails. Wrap it in a single-element tuple:</div><pre>- h.pre(.{}, h.code(.{}, "..."))
++ h.pre(.{}, .{h.code(.{}, "...")})</pre></div><div class="issue"><div class="issue-title">thead/tbody same rule</div><div class="issue-body">h.thead(.{}, h.tr(...)) fails for the same reason. Must be h.thead(.{}, .{h.tr(...)}).</div></div><div class="issue"><div class="issue-title">h.pre with h.code inside</div><div class="issue-body">Hits the single-child tuple issue. For code blocks, pass a raw string to h.pre() directly — it renders in monospace anyway and avoids the nesting problem.</div></div></div><h2 id="raw-html">4. Raw HTML pages</h2><p>For pages needing embedded JS (Chart.js, etc.), the h.* DSL is limiting. merjs lets you bypass layout.zig entirely with raw HTML responses:</p><pre>pub fn render(req: mer.Request) mer.Response {
+    _ = req;
+    return .{
+        .status    = .ok,
+        .content_type = .html,
+        .body      = html,
+    };
+}
+
+const html =
+    \\&lt;!DOCTYPE html&gt;
+    \\...
+;   // don't forget the semicolon</pre><div class="callout callout-warn"><span class="callout-icon">⚠️</span><span>Raw HTML pages still need pub const meta: mer.Meta exported — even though meta isn't used. Missing it causes a compile error from the generated router. The closing semicolon after the multiline string is also easy to forget; the error message points to the last HTML line, which is confusing.</span></div><h2 id="layout">5. layout.zig pitfalls</h2><p>layout.zig uses a Zig ArrayList writer pattern to build the HTML shell. Two things bit us:</p><div class="issue-list"><div class="issue"><div class="issue-title">CSS accidentally placed outside writeAll</div><div class="issue-body">When range-replacing inside layout.zig it's easy to insert CSS after the closing paren of writeAll("""). Zig compiles fine but the CSS never reaches the browser. Best fix: rewrite the whole file cleanly rather than patching small ranges.</div></div><div class="issue"><div class="issue-title">404.zig duplicate HTML block</div><div class="issue-body">A bad range-replace left two concatenated versions of the page HTML in the string literal. The Zig compiler error ("expected ';' after declaration") pointed to a line mid-way through the HTML, which is confusing. Fix: find and delete the orphaned duplicate block.</div></div></div><h2 id="verdict">Verdict</h2><p>merjs is a genuinely good idea. Zig-native SSR with file-based routing, sub-millisecond builds, and a clean HTML DSL. The output is lean and the dev server is fast.</p><p>The main blocker right now is the incomplete package publish — the .paths list in build.zig.zon excludes wasm/ and most of src/, so fresh installs fail immediately. Once that's resolved, setup should be straightforward.</p><p>For JS-heavy pages, raw HTML is a clean escape hatch. The framework doesn't fight you. We'd use it again once the packaging story is sorted.</p><div class="hero-actions"><a class="btn" href="https://github.com/justrach/merjs">merjs on GitHub →</a><a class="btn btn-outline" href="/docs">TurboAPI docs</a></div></div>
+  <footer class="layout-footer">
+    <p>TurboAPI &mdash; FastAPI drop-in &middot; Zig HTTP core &middot; <a href="https://github.com/justrach/turboAPI">GitHub</a> &middot; <a href="https://pypi.org/project/turboapi/">PyPI</a></p>
+  </footer>
+</div>
+<script>
+(function() {
+  var burger = document.getElementById('burger');
+  var links = document.getElementById('nav-links');
+  burger.addEventListener('click', function() {
+    burger.classList.toggle('open');
+    links.classList.toggle('open');
+  });
+  links.querySelectorAll('a').forEach(function(a) {
+    a.addEventListener('click', function() {
+      burger.classList.remove('open');
+      links.classList.remove('open');
+    });
+  });
+})();
+</script>
+</body>
+</html>

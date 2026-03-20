@@ -5,6 +5,8 @@ pub const meta: mer.Meta = .{
     .description = "Drop-in FastAPI replacement with a Zig HTTP core. 20x faster, zero-copy responses, free-threading, per-worker tstate, dhi validation.",
 };
 
+pub const prerender = true;
+
 pub fn render(req: mer.Request) mer.Response {
     _ = req;
     return .{ .status = .ok, .content_type = .html, .body = html };
