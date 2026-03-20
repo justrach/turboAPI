@@ -7,7 +7,7 @@ Phase 3: Handler classification for fast dispatch (bypass Python enhanced wrappe
 import inspect
 import json
 from typing import Any, get_origin
-
+import asyncio
 try:
     from dhi import BaseModel
 except ImportError:
@@ -620,9 +620,12 @@ class ZigIntegratedTurboAPI(TurboAPI):
                         "content_type": "application/json",
                     }
 
-            # Call actual handler
+            # Call actual handler — may be async (simple_async/body_async), in which
+            # case enhanced_handler returns a coroutine that we must run to completion.
             try:
                 result = enhanced_handler(**kwargs)
+                if inspect.iscoroutine(result):
+                    result = asyncio.run(result)
             except Exception as e:
                 for mw in reversed(middleware_instances):
                     err_resp = mw.on_error(request, e)
