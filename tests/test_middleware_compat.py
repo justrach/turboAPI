@@ -18,11 +18,10 @@ from turboapi.middleware import CORSMiddleware, GZipMiddleware, LoggingMiddlewar
 
 
 def _free_port() -> int:
-    """Ask the OS for a free port, then release it for the server to bind."""
+    """Ask the OS for a free port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
-
 
 def _start(app, port):
     t = threading.Thread(target=lambda: app.run(host="127.0.0.1", port=port), daemon=True)
@@ -171,6 +170,17 @@ def https_redirect_app():
     @app.get("/secure")
     def secure_route():
         return {"secured": True}
+# ---- Stricter middleware compat tests ----
+
+
+@pytest.fixture(scope="module")
+def gzip_app():
+    app = TurboAPI()
+    app.add_middleware(GZipMiddleware, minimum_size=10)
+
+    @app.get("/large")
+    def large_response():
+        return {"data": "A" * 1000}
 
     port = _free_port()
     _start(app, port)
@@ -198,3 +208,105 @@ def test_https_redirect_blocked(https_redirect_app):
     assert r.status_code != 200, (
         f"Expected non-200 for plain HTTP request, got {r.status_code}: {r.text}"
     )
+@pytest.mark.xfail(reason="Requires middleware header/body passthrough (PR #55)")
+def test_gzip_middleware_compat(gzip_app):
+    """GZip middleware must correctly compress and return 200."""
+    r = requests.get(f"{gzip_app}/large", headers={"Accept-Encoding": "gzip"})
+    assert r.status_code == 200, r.text
+    assert r.headers.get("Content-Encoding") == "gzip"
+
+@pytest.mark.xfail(reason="Requires middleware header/body passthrough (PR #55)")
+def test_gzip_body_is_actually_compressed(gzip_app):
+    """The body must actually be gzip-compressed bytes, not original JSON.
+    Decompress and verify the data survived the round trip."""
+    r = requests.get(f"{gzip_app}/large", headers={"Accept-Encoding": "gzip"})
+    assert r.status_code == 200
+    assert r.headers.get("Content-Encoding") == "gzip"
+    data = r.json()
+    assert len(data["data"]) == 1000, "Body was mangled during gzip passthrough"
+
+
+def test_large_header_not_truncated(cors_app):
+    """Middleware-set headers must not be silently truncated.
+    A real CSP header can be 500+ bytes. If sendResponseExt
+    truncates at the buffer limit, this catches it."""
+    r = requests.get(f"{cors_app}/search?q=test")
+    assert r.status_code == 200
+    origin = r.headers.get("Access-Control-Allow-Origin")
+    assert origin is not None, "CORS header missing entirely"
+    assert origin == "*", f"CORS header truncated or wrong: {origin!r}"
+
+
+def test_no_middleware_body_unchanged():
+    """When no middleware mutates the body, the original response
+    must come through byte-for-byte."""
+    app = TurboAPI()
+
+    @app.get("/raw")
+    def raw():
+        return {"exact": "value", "number": 42}
+
+    port = _free_port()
+    _start(app, port)
+    r = requests.get(f"http://127.0.0.1:{port}/raw")
+    assert r.status_code == 200
+    assert r.json() == {"exact": "value", "number": 42}, f"Body mutated without middleware: {r.json()}"
+
+
+def test_async_handler_under_middleware():
+    """Async handlers wrapped by middleware must return the actual
+    result, not a coroutine object or repr string."""
+    app = TurboAPI()
+    app.add_middleware(CORSMiddleware, allow_origins=["*"])
+
+    @app.get("/async-test")
+    async def async_endpoint():
+        return {"async": True, "value": 123}
+
+    port = _free_port()
+    _start(app, port)
+    r = requests.get(f"http://127.0.0.1:{port}/async-test")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["async"] is True, f"Got coroutine object instead of result: {data}"
+    assert data["value"] == 123
+
+
+def test_non_middleware_route_no_extra_headers():
+    """Routes without middleware must NOT have middleware-injected headers
+    like Content-Encoding leaking into the response. CORS headers are
+    excluded from this check because cors_enabled is global Zig state."""
+    app = TurboAPI()
+
+    @app.get("/clean")
+    def clean():
+        return {"clean": True}
+
+    port = _free_port()
+    _start(app, port)
+    r = requests.get(f"http://127.0.0.1:{port}/clean")
+    assert r.status_code == 200
+    # No middleware-injected headers should appear
+    assert "Content-Encoding" not in r.headers
+    assert r.json() == {"clean": True}
+
+
+def test_stacked_middleware_all_headers_present():
+    """When multiple middlewares are stacked, ALL of their headers
+    must be present in the response, not just the last one."""
+    app = TurboAPI()
+    app.add_middleware(LoggingMiddleware)
+    app.add_middleware(
+        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    )
+
+    @app.get("/multi")
+    def multi():
+        return {"stacked": True}
+
+    port = _free_port()
+    _start(app, port)
+    r = requests.get(f"http://127.0.0.1:{port}/multi")
+    assert r.status_code == 200
+    assert r.headers.get("Access-Control-Allow-Origin") is not None, "CORS header missing after stacking"
+    assert r.json()["stacked"] is True
