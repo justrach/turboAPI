@@ -50,14 +50,16 @@ const html =
     \\    .nav-cta { color: #fff !important; background: var(--green); padding: 8px 18px; border-radius: 4px; font-family: var(--display); font-weight: 700 !important; }
     \\
     \\    /* Hero */
+    \\    .hero { padding: 80px 40px 60px; text-align: center; }
     \\    .hero h1 { font-family: var(--display); font-size: 56px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.1; }
     \\    .hero h1 span { color: var(--green); }
     \\    .hero p { max-width: 600px; margin: 20px auto 0; font-size: 18px; color: var(--muted); line-height: 1.6; }
     \\    .hero-stat { display: inline-flex; align-items: center; gap: 8px; margin-top: 32px; padding: 12px 24px; background: var(--green-dim); border: 1px solid var(--green-border); border-radius: 8px; font-family: var(--mono); font-size: 15px; color: var(--text); }
     \\    .hero-stat strong { color: var(--green); font-size: 28px; }
-    \\    .exp-badge { display: inline-block; margin-top: 16px; padding: 6px 14px; background: var(--green-dim); border: 1px solid var(--green-border); border-radius: 20px; font-family: var(--mono); font-size: 12px; color: var(--green); font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
+    \\    .exp-badge { display: inline-block; margin-bottom: 16px; padding: 6px 14px; background: var(--green-dim); border: 1px solid var(--green-border); border-radius: 20px; font-family: var(--mono); font-size: 11px; color: var(--green); font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
     \\
     \\    /* Section */
+    \\    .section { max-width: 1000px; margin: 0 auto; padding: 60px 40px; }
     \\    .section-eyebrow { font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--green); margin-bottom: 8px; }
     \\    .section h2 { font-family: var(--display); font-size: 32px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 12px; color: var(--text); }
     \\    .section p.sub { color: var(--muted); font-size: 16px; margin-bottom: 40px; }
@@ -169,25 +171,25 @@ const html =
     \\
     \\    <div class="bar-row">
     \\      <div class="bar-label">Baseline (no DB)</div>
-    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:88%"></div></div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:90%"></div></div>
     \\      <div class="bar-num">117,440/s</div>
     \\      <div class="bar-speedup">12x</div>
     \\    </div>
     \\    <div class="bar-row">
-    \\      <div class="bar-label" style="color:var(--muted);font-size:12px">&nbsp;</div>
-    \\      <div class="bar-track"><div class="bar-fill other" style="width:7%"></div></div>
+    \\      <div class="bar-label" style="font-size:12px">FastAPI</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:7.5%"></div></div>
     \\      <div class="bar-num" style="color:var(--muted)">9,782/s</div>
     \\      <div class="bar-speedup">&nbsp;</div>
     \\    </div>
     \\
     \\    <div class="bar-row" style="margin-top:20px">
     \\      <div class="bar-label">SELECT by PK</div>
-    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:94%"></div></div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:97%"></div></div>
     \\      <div class="bar-num">125,778/s</div>
     \\      <div class="bar-speedup">48x</div>
     \\    </div>
     \\    <div class="bar-row">
-    \\      <div class="bar-label" style="color:var(--muted);font-size:12px">&nbsp;</div>
+    \\      <div class="bar-label" style="font-size:12px">FastAPI+SA</div>
     \\      <div class="bar-track"><div class="bar-fill other" style="width:2%"></div></div>
     \\      <div class="bar-num" style="color:var(--muted)">2,639/s</div>
     \\      <div class="bar-speedup">&nbsp;</div>
@@ -195,25 +197,25 @@ const html =
     \\
     \\    <div class="bar-row" style="margin-top:20px">
     \\      <div class="bar-label">Full-text search</div>
-    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:82%"></div></div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:84%"></div></div>
     \\      <div class="bar-num">109,626/s</div>
     \\      <div class="bar-speedup">44x</div>
     \\    </div>
     \\    <div class="bar-row">
-    \\      <div class="bar-label" style="color:var(--muted);font-size:12px">&nbsp;</div>
-    \\      <div class="bar-track"><div class="bar-fill other" style="width:2%"></div></div>
+    \\      <div class="bar-label" style="font-size:12px">FastAPI+SA</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:1.9%"></div></div>
     \\      <div class="bar-num" style="color:var(--muted)">2,483/s</div>
     \\      <div class="bar-speedup">&nbsp;</div>
     \\    </div>
     \\
     \\    <div class="bar-row" style="margin-top:20px">
     \\      <div class="bar-label">GROUP BY sum/avg</div>
-    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:97%"></div></div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:99%"></div></div>
     \\      <div class="bar-num">129,444/s</div>
     \\      <div class="bar-speedup">96x</div>
     \\    </div>
     \\    <div class="bar-row">
-    \\      <div class="bar-label" style="color:var(--muted);font-size:12px">&nbsp;</div>
+    \\      <div class="bar-label" style="font-size:12px">FastAPI+SA</div>
     \\      <div class="bar-track"><div class="bar-fill other" style="width:1%"></div></div>
     \\      <div class="bar-num" style="color:var(--muted)">1,354/s</div>
     \\      <div class="bar-speedup">&nbsp;</div>
@@ -221,13 +223,13 @@ const html =
     \\
     \\    <div class="bar-row" style="margin-top:20px">
     \\      <div class="bar-label">Paginated list</div>
-    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:28%"></div></div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:29%"></div></div>
     \\      <div class="bar-num">37,729/s</div>
     \\      <div class="bar-speedup">15x</div>
     \\    </div>
     \\    <div class="bar-row">
-    \\      <div class="bar-label" style="color:var(--muted);font-size:12px">&nbsp;</div>
-    \\      <div class="bar-track"><div class="bar-fill other" style="width:2%"></div></div>
+    \\      <div class="bar-label" style="font-size:12px">FastAPI+SA</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:1.9%"></div></div>
     \\      <div class="bar-num" style="color:var(--muted)">2,517/s</div>
     \\      <div class="bar-speedup">&nbsp;</div>
     \\    </div>
