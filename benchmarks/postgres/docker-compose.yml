@@ -1,0 +1,28 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./seed.sql:/docker-entrypoint-initdb.d/seed.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  bench:
+    build:
+      context: ../..
+      dockerfile: benchmarks/postgres/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      BENCH_PG_URL: postgresql://bench:bench@postgres:5432/bench
+      BENCH_DURATION: 10s
+    network_mode: "service:postgres"
