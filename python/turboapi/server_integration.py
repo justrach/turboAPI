@@ -6,11 +6,13 @@ Connects FastAPI-compatible routing to Zig HTTP core with middleware pipeline
 import asyncio
 import inspect
 import json
-import traceback
+import logging
 from typing import Any
 
 from .main_app import TurboAPI
-from .version_check import CHECK_MARK, ROCKET
+
+logger = logging.getLogger(__name__)
+
 
 try:
     from turboapi import turbonet
@@ -19,7 +21,7 @@ try:
 except ImportError:
     ZIG_CORE_AVAILABLE = False
     turbonet = None
-    print("[WARN] Zig core not available - running in simulation mode")
+    logger.warning("Zig core not available - running in simulation mode")
 
 
 class RequestContextAdapter:
@@ -48,7 +50,7 @@ class RequestContextAdapter:
             try:
                 self.json_data = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
-                pass
+                logger.debug("Request body is not valid JSON, leaving json_data as None")
 
     def to_middleware_context(self):
         """Convert to middleware RequestContext."""
@@ -151,14 +153,15 @@ class TurboHTTPServer:
                             self.middleware_pipeline.add_middleware(rate_limit)
                         # Add more middleware types as needed
             except Exception as e:
-                print(f"⚠️ Middleware pipeline initialization failed: {e}")
-                print("🔄 Running in simulation mode")
+                logger.warning("Middleware pipeline initialization failed: %s", e)
+                logger.warning("Running in simulation mode")
                 self.middleware_pipeline = None
         else:
             self.middleware_pipeline = None
 
-        print(
-            f"🔧 TurboHTTPServer initialized with {len(self.app.middleware_stack)} middleware components"
+        logger.info(
+            "TurboHTTPServer initialized with %d middleware components",
+            len(self.app.middleware_stack),
         )
 
     async def handle_request(
@@ -198,7 +201,7 @@ class TurboHTTPServer:
                     return processed_context["early_response"]
             else:
                 # Simulation mode - log middleware processing
-                print(f"🔧 Middleware processing (simulated): {method} {path}")
+                logger.debug("Middleware processing (simulated): %s %s", method, path)
 
             # 3. Route to handler function
             route_response = await self._route_request(request_adapter)
@@ -246,8 +249,7 @@ class TurboHTTPServer:
             # Error handling
             error_time = (asyncio.get_event_loop().time() - start_time) * 1000
 
-            print(f"❌ Request error: {e}")
-            traceback.print_exc()
+            logger.error("Request error: %s", e, exc_info=True)
 
             return {
                 "status_code": 500,
@@ -276,7 +278,7 @@ class TurboHTTPServer:
                 processed = await self.middleware_pipeline.process_request(context)
                 return processed
             except Exception as e:
-                print(f"⚠️ Middleware request processing error: {e}")
+                logger.warning("Middleware request processing error: %s", e)
                 return context
         else:
             # Simulation mode
@@ -303,7 +305,7 @@ class TurboHTTPServer:
 
                 return response_adapter
             except Exception as e:
-                print(f"⚠️ Middleware response processing error: {e}")
+                logger.warning("Middleware response processing error: %s", e)
                 return response_adapter
         else:
             # Simulation mode
@@ -383,78 +385,3 @@ class TurboHTTPServer:
 
         except Exception as e:
             return {"error": "Internal Server Error", "status_code": 500, "detail": str(e)}
-
-
-class IntegratedTurboAPI(TurboAPI):
-    """TurboAPI with integrated HTTP server and middleware pipeline."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.http_server = None
-        print(f"{ROCKET} IntegratedTurboAPI created with HTTP server integration")
-
-    def _initialize_server(self):
-        """Initialize the HTTP server integration."""
-        if not self.http_server:
-            self.http_server = TurboHTTPServer(self)
-            print("[CONFIG] HTTP server integration initialized")
-
-    async def handle_http_request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
-        """Handle HTTP request through integrated server."""
-        if not self.http_server:
-            self._initialize_server()
-
-        return await self.http_server.handle_request(method, path, **kwargs)
-
-    def run(self, host: str = "127.0.0.1", port: int = 8000, **kwargs):
-        """Run with integrated HTTP server."""
-        self._initialize_server()
-
-        print(f"\n{ROCKET} Starting TurboAPI with HTTP Server Integration...")
-        print(f"   Host: {host}:{port}")
-        print(f"   Title: {self.title} v{self.version}")
-
-        # Print integration info
-        print("\n[CONFIG] Integration Status:")
-        print(
-            f"   Zig Core: {CHECK_MARK + ' Available' if ZIG_CORE_AVAILABLE else '[WARN] Simulation Mode'}"
-        )
-        print(
-            f"   Middleware Pipeline: {CHECK_MARK + ' Active' if self.http_server.middleware_pipeline else '[WARN] Simulated'}"
-        )
-        print(f"   Route Registration: {CHECK_MARK} {len(self.registry.get_routes())} routes")
-
-        # Print route information
-        self.print_routes()
-
-        print("\n[PERF] Performance Pipeline:")
-        print("   HTTP Request → Middleware Pipeline → Route Handler")
-        print("   Route Handler → Middleware Pipeline → HTTP Response")
-        print("   Expected: 5-10x FastAPI overall performance")
-
-        # Run startup handlers
-        if self.startup_handlers:
-            asyncio.run(self._run_startup_handlers())
-
-        print(f"\n{CHECK_MARK} TurboAPI HTTP Server Integration ready!")
-        print(f"   Visit: http://{host}:{port}")
-
-        try:
-            # This would start the actual Zig HTTP server
-            print("\n[SERVER] HTTP Server Integration active (Phase 6.2)")
-            print("Press Ctrl+C to stop")
-
-            # Simulate server running
-            import time
-
-            while True:
-                time.sleep(1)
-
-        except KeyboardInterrupt:
-            print("\n[STOP] Shutting down TurboAPI HTTP server...")
-
-            # Run shutdown handlers
-            if self.shutdown_handlers:
-                asyncio.run(self._run_shutdown_handlers())
-
-            print("[BYE] Server stopped")

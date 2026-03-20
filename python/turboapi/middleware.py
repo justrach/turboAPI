@@ -14,6 +14,7 @@ Includes:
 import gzip
 import hashlib
 import hmac
+import logging
 import os
 import re
 import threading
@@ -21,6 +22,8 @@ import time
 from collections.abc import Callable
 
 from .models import Request, Response
+
+logger = logging.getLogger(__name__)
 
 
 class Middleware:
@@ -343,13 +346,13 @@ class LoggingMiddleware(Middleware):
     def before_request(self, request: Request) -> None:
         """Log incoming request."""
         request._start_time = time.time()
-        print(f"[REQUEST] {request.method} {request.path}")
+        logger.info("%s %s", request.method, request.path)
 
     def after_request(self, request: Request, response: Response) -> Response:
         """Log response with timing."""
         duration = time.time() - getattr(request, "_start_time", time.time())
-        print(
-            f"[RESPONSE] {request.method} {request.path} -> {response.status_code} ({duration * 1000:.2f}ms)"
+        logger.info(
+            "%s %s -> %d (%.2fms)", request.method, request.path, response.status_code, duration * 1000
         )
         return response
 

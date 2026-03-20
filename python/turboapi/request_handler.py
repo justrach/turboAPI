@@ -6,8 +6,11 @@ Supports query parameters, path parameters, headers, request body, and dependenc
 
 import inspect
 import json
+import logging
 import urllib.parse
 from typing import Any, get_origin
+
+logger = logging.getLogger(__name__)
 
 from dhi import BaseModel as Model
 
@@ -72,7 +75,7 @@ class DependencyResolver:
                             sub_dep.dependency, sub_dep.use_cache, context, cache, cleanups
                         )
             except (ValueError, TypeError):
-                pass
+                pass  # sub-dependency introspection failed; proceed without sub-deps
 
         # Check if it's a security scheme callable
         if isinstance(dep_fn, SecurityBase) and hasattr(dep_fn, "__call__"):
@@ -361,7 +364,7 @@ class RequestBodyParser:
                     parsed_params[param_name] = param.annotation(**json_data)
                     return parsed_params
                 except Exception:
-                    pass
+                    logger.debug("Failed to construct %s from JSON body, falling through to multi-param parsing", param.annotation.__name__)
 
         # PATTERN 2: Multiple parameters - extract individual fields
         # Example: handler(name: str, age: int, email: str)
@@ -591,6 +594,7 @@ def _format_zig_tuple(content, status_code, content_type=None):
     try:
         return (status_code, ct, _json_dumps(content))
     except Exception:
+        logger.debug("JSON serialization failed for response content, falling back to str()", exc_info=True)
         return (status_code, "application/json", _json_dumps({"error": str(content)}))
 
 
@@ -713,9 +717,9 @@ def create_enhanced_handler(original_handler, route_definition):
                     try:
                         next(gen)
                     except StopIteration:
-                        pass
+                        pass  # intentionally silent: generator finished normally
                     except Exception:
-                        pass
+                        logger.debug("Dependency cleanup generator raised during teardown", exc_info=True)
 
                 # Normalize response - may return (content, status) or (content, status, content_type)
                 normalized = ResponseHandler.normalize_response(result)
@@ -775,7 +779,7 @@ def create_enhanced_handler(original_handler, route_definition):
                                     try:
                                         params[k] = converter(v)
                                     except (ValueError, TypeError):
-                                        pass
+                                        pass  # keep as string if type conversion fails
                             parsed_params.update(params)
 
                 # 3. Parse headers (only if handler needs them)
@@ -814,9 +818,9 @@ def create_enhanced_handler(original_handler, route_definition):
                         try:
                             next(gen)
                         except StopIteration:
-                            pass
+                            pass  # intentionally silent: generator finished normally
                         except Exception:
-                            pass
+                            logger.debug("Dependency cleanup generator raised during teardown", exc_info=True)
 
                 # Normalize response - may return (content, status) or (content, status, content_type)
                 normalized = ResponseHandler.normalize_response(result)
@@ -882,7 +886,7 @@ def create_pos_handler(original_handler):
                 if isinstance(e, _HTTPException):
                     return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
-                pass
+                pass  # HTTPException not available; fall through to generic 500
             return (500, "application/json", _dumps({"error": str(e)}))
 
     return pos_handler
@@ -942,7 +946,7 @@ def create_fast_handler(original_handler, route_definition):
                     if isinstance(e, _HTTPException):
                         return (e.status_code, "application/json", _dumps({"detail": e.detail}))
                 except ImportError:
-                    pass
+                    pass  # HTTPException not available; fall through to generic 500
                 return (500, "application/json", _dumps({"error": str(e)}))
 
         return fast_handler_noargs
@@ -994,7 +998,7 @@ def create_fast_handler(original_handler, route_definition):
                 if isinstance(e, HTTPException):
                     return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
-                pass
+                pass  # HTTPException not available; fall through to generic 500
             return (500, "application/json", _dumps({"error": str(e)}))
 
     return fast_handler
@@ -1035,7 +1039,7 @@ def create_fast_model_handler(original_handler, model_class, param_name):
                 if isinstance(e, HTTPException):
                     return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
-                pass
+                pass  # HTTPException not available; fall through to generic 500
             return (500, "application/json", _dumps({"error": str(e)}))
 
     return fast_model_handler

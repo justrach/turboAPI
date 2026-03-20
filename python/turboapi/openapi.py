@@ -184,7 +184,7 @@ def _type_to_schema(annotation) -> dict:
         if hasattr(annotation, "__fields__") or hasattr(annotation, "model_fields"):
             return {"$ref": f"#/components/schemas/{annotation.__name__}"}
     except (TypeError, AttributeError):
-        pass
+        pass  # annotation doesn't support hasattr checks (e.g. special typing forms)
 
     return {}
 

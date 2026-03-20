@@ -4,8 +4,11 @@ TurboAPI Version & Free-Threading Check
 Ensures TurboAPI runs on Python 3.14+ free-threading builds only.
 """
 
+import logging
 import sys
 import sysconfig
+
+logger = logging.getLogger(__name__)
 
 # ── Emoji / ASCII symbols ────────────────────────────────────────────────────
 
@@ -45,14 +48,14 @@ def _detect_free_threading() -> bool:
         if val is not None:
             return bool(int(val))
     except (ValueError, TypeError):
-        pass
+        pass  # Py_GIL_DISABLED config var not parseable; try fallback methods
 
     # Method 2: sys._is_gil_enabled() (3.13t+)
     if hasattr(sys, "_is_gil_enabled"):
         try:
             return not sys._is_gil_enabled()
         except Exception:
-            pass
+            pass  # _is_gil_enabled() call failed; assume GIL is enabled
 
     return False
 
@@ -93,7 +96,7 @@ def check_free_threading_support():
         )
 
     v = sys.version_info
-    print(f"{CHECK_MARK} TurboAPI: Python {v.major}.{v.minor}.{v.micro} free-threading active")
+    logger.info("TurboAPI: Python %d.%d.%d free-threading active", v.major, v.minor, v.micro)
 
 
 def get_python_threading_info() -> dict:

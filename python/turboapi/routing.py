@@ -4,13 +4,14 @@ FastAPI-compatible decorators with revolutionary performance
 """
 
 import inspect
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from .version_check import CHECK_MARK
+logger = logging.getLogger(__name__)
 
 
 class HTTPMethod(Enum):
@@ -66,7 +67,7 @@ class RouteRegistry:
         pattern = self._compile_path_pattern(route.path)
         self.path_patterns[route.path] = pattern
 
-        print(f"{CHECK_MARK} Registered route: {route.method.value} {route.path}")
+        logger.debug("Registered route: %s %s", route.method.value, route.path)
 
     def _compile_path_pattern(self, path: str) -> re.Pattern:
         """Compile path with parameters into regex pattern."""
