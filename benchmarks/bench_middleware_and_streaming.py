@@ -62,7 +62,7 @@ if __name__ == "__main__":
 
     if StreamingResponse:
         print("\n" + "="*50)
-        print(" TEST 2: Chunked Streaming Endpoint")
+        print(" TEST 2: Chunked  Streaming Endpoint")
         print("="*50)
         try:
             subprocess.run([
