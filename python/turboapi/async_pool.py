@@ -47,34 +47,6 @@ class EventLoopPool:
             cls._initialized = True
 
     @classmethod
-    def get_loop_for_thread(cls) -> asyncio.AbstractEventLoop:
-        """
-        Get or create an event loop for the current thread.
-
-        Returns:
-            The event loop for the current thread.
-        """
-        thread_id = threading.get_ident()
-
-        # Fast path: loop already exists
-        if thread_id in cls._loops:
-            return cls._loops[thread_id]
-
-        # Slow path: create new loop
-        with cls._lock:
-            # Double-check after acquiring lock
-            if thread_id in cls._loops:
-                return cls._loops[thread_id]
-
-            # Create new event loop for this thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            cls._loops[thread_id] = loop
-
-            print(f"✅ Created event loop for thread {thread_id}")
-            return loop
-
-    @classmethod
     def get_running_loop(cls) -> asyncio.AbstractEventLoop | None:
         """
         Get the running event loop for the current thread, if any.
@@ -86,45 +58,6 @@ class EventLoopPool:
             return asyncio.get_running_loop()
         except RuntimeError:
             return None
-
-    @classmethod
-    def cleanup(cls) -> None:
-        """Clean up all event loops (call on shutdown)."""
-        with cls._lock:
-            for thread_id, loop in cls._loops.items():
-                if loop.is_running():
-                    loop.stop()
-                loop.close()
-            cls._loops.clear()
-            cls._initialized = False
-
-    @classmethod
-    def stats(cls) -> dict[str, int]:
-        """Get statistics about the event loop pool."""
-        with cls._lock:
-            return {
-                "total_loops": len(cls._loops),
-                "active_threads": len([loop for loop in cls._loops.values() if loop.is_running()]),
-            }
-
-
-def ensure_event_loop() -> asyncio.AbstractEventLoop:
-    """
-    Ensure an event loop exists for the current thread.
-
-    This is the primary function to call from Zig to get an event loop.
-
-    Returns:
-        The event loop for the current thread.
-    """
-    # Try to get running loop first (fast path)
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        pass
-
-    # Get or create thread-local loop
-    return EventLoopPool.get_loop_for_thread()
 
 
 # Python 3.13+ free-threading detection

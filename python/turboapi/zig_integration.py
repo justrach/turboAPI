@@ -25,7 +25,6 @@ from .request_handler import (
 )
 from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
 
-
 def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
     """Classify a handler for fast dispatch (Phase 3 + Phase 4 async).
 
@@ -52,7 +51,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
                 has_depends = True
                 break
     except ImportError:
-        pass
+        pass  # security module not installed; no depends to check
 
     if has_depends:
         return "enhanced", {}, {}
@@ -75,7 +74,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
                     needs_body = True
                 continue  # Don't add to param_types
         except TypeError:
-            pass
+            pass  # annotation is not a class; skip BaseModel check
 
         if annotation in (dict, list, bytes):
             needs_body = True
@@ -133,6 +132,7 @@ def _extract_model_schema(model_class) -> str | None:
         schema = _build_schema(model_class)
         return json.dumps(schema) if schema else None
     except Exception:
+        pass  # failed to extract model schema; skip Zig-native validation
         return None
 
 

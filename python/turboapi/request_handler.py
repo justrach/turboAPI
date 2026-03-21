@@ -72,7 +72,7 @@ class DependencyResolver:
                             sub_dep.dependency, sub_dep.use_cache, context, cache, cleanups
                         )
             except (ValueError, TypeError):
-                pass
+                pass  # sub-dependency introspection failed; proceed without sub-deps
 
         # Check if it's a security scheme callable
         if isinstance(dep_fn, SecurityBase) and hasattr(dep_fn, "__call__"):
@@ -591,6 +591,7 @@ def _format_zig_tuple(content, status_code, content_type=None):
     try:
         return (status_code, ct, _json_dumps(content))
     except Exception:
+        pass  # JSON serialization failed; fall back to str()
         return (status_code, "application/json", _json_dumps({"error": str(content)}))
 
 
@@ -713,7 +714,7 @@ def create_enhanced_handler(original_handler, route_definition):
                     try:
                         next(gen)
                     except StopIteration:
-                        pass
+                        pass  # intentionally silent: generator finished normally
                     except Exception:
                         pass
 
@@ -775,7 +776,7 @@ def create_enhanced_handler(original_handler, route_definition):
                                     try:
                                         params[k] = converter(v)
                                     except (ValueError, TypeError):
-                                        pass
+                                        pass  # keep as string if type conversion fails
                             parsed_params.update(params)
 
                 # 3. Parse headers (only if handler needs them)
@@ -814,7 +815,7 @@ def create_enhanced_handler(original_handler, route_definition):
                         try:
                             next(gen)
                         except StopIteration:
-                            pass
+                            pass  # intentionally silent: generator finished normally
                         except Exception:
                             pass
 
@@ -882,7 +883,7 @@ def create_pos_handler(original_handler):
                 if isinstance(e, _HTTPException):
                     return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
-                pass
+                pass  # HTTPException not available; fall through to generic 500
             return (500, "application/json", _dumps({"error": str(e)}))
 
     return pos_handler
@@ -942,7 +943,7 @@ def create_fast_handler(original_handler, route_definition):
                     if isinstance(e, _HTTPException):
                         return (e.status_code, "application/json", _dumps({"detail": e.detail}))
                 except ImportError:
-                    pass
+                    pass  # HTTPException not available; fall through to generic 500
                 return (500, "application/json", _dumps({"error": str(e)}))
 
         return fast_handler_noargs
@@ -994,7 +995,7 @@ def create_fast_handler(original_handler, route_definition):
                 if isinstance(e, HTTPException):
                     return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
-                pass
+                pass  # HTTPException not available; fall through to generic 500
             return (500, "application/json", _dumps({"error": str(e)}))
 
     return fast_handler
@@ -1035,7 +1036,7 @@ def create_fast_model_handler(original_handler, model_class, param_name):
                 if isinstance(e, HTTPException):
                     return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
-                pass
+                pass  # HTTPException not available; fall through to generic 500
             return (500, "application/json", _dumps({"error": str(e)}))
 
     return fast_model_handler

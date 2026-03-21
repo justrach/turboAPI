@@ -45,14 +45,14 @@ def _detect_free_threading() -> bool:
         if val is not None:
             return bool(int(val))
     except (ValueError, TypeError):
-        pass
+        pass  # Py_GIL_DISABLED config var not parseable; try fallback methods
 
     # Method 2: sys._is_gil_enabled() (3.13t+)
     if hasattr(sys, "_is_gil_enabled"):
         try:
             return not sys._is_gil_enabled()
         except Exception:
-            pass
+            pass  # _is_gil_enabled() call failed; assume GIL is enabled
 
     return False
 
