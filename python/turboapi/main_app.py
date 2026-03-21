@@ -456,6 +456,16 @@ class TurboAPI(Router):
             except (_json.JSONDecodeError, Exception):
                 pass
 
+        # Resolve dependencies
+        from turboapi.request_handler import DependencyResolver
+        context = {
+            "headers": headers,
+            "query_string": query_string,
+            "body": body,
+        }
+        dependency_params = await DependencyResolver.resolve_dependencies(sig, context)
+        call_args.update(dependency_params)
+
         # Call handler
         try:
             if asyncio.iscoroutinefunction(route.handler):
