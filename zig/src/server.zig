@@ -134,6 +134,10 @@ const HandlerEntry = struct {
     // Vectorcall dispatch: ordered param metadata parsed at registration time
     param_meta: [MAX_PARAMS]ParamMeta = undefined,
     param_count: usize = 0,
+    // Snapshot of cors_headers taken at registration time.  Lets multiple
+    // TurboAPI instances coexist in the same process (each test app gets its
+    // own snapshot) without the global cors_headers variable being shared.
+    cors_header_block: []const u8 = "",
 };
 
 const HeaderPair = struct {
@@ -146,10 +150,16 @@ const PythonResponse = struct {
     content_type: []const u8,
     body: []const u8,
     ct_owned: bool = true,
+    extra_headers: []const HeaderPair = &.{},
 
     fn deinit(self: PythonResponse) void {
         if (self.ct_owned and self.content_type.len > 0) allocator.free(self.content_type);
         if (self.body.len > 0) allocator.free(self.body);
+        for (self.extra_headers) |h| {
+            allocator.free(h.name);
+            allocator.free(h.value);
+        }
+        if (self.extra_headers.len > 0) allocator.free(self.extra_headers);
     }
 };
 
@@ -305,6 +315,13 @@ pub fn server_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
     server_host = allocator.dupe(u8, std.mem.span(host)) catch "127.0.0.1";
     server_port = @intCast(port);
 
+    // Reset cors_enabled so that routes registered for this new app snapshot
+    // cors_header_block = "" (i.e. no CORS) unless configure_cors() is called
+    // after server_new().  We do NOT free or clear cors_headers here: existing
+    // running apps may have route entries whose cors_header_block slices point
+    // into the same allocation.  Those slices remain valid and independent.
+    cors_enabled = false;
+
     // Eagerly initialize all globals — workers must never hit the lazy-init
     // path, which has a check-then-act race condition.
     _ = getRoutes();
@@ -344,6 +361,7 @@ pub fn server_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.Py
         .original_handler = null,
         .model_param_name = null,
         .model_class = null,
+        .cors_header_block = if (cors_enabled) cors_headers else "",
     }) catch return null;
     getRouter().addRoute(method_s, path_s, key) catch return null;
 
@@ -389,6 +407,7 @@ pub fn server_add_route_fast(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?
         .original_handler = orig,
         .model_param_name = null,
         .model_class = null,
+        .cors_header_block = if (cors_enabled) cors_headers else "",
     };
 
     if (std.mem.eql(u8, ht_s, "simple_sync")) {
@@ -426,6 +445,7 @@ pub fn server_add_route_model(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) 
         .original_handler = orig,
         .model_param_name = std.mem.span(param_name),
         .model_class = model_class,
+        .cors_header_block = if (cors_enabled) cors_headers else "",
     }) catch return null;
     getRouter().addRoute(method_s, path_s, key) catch return null;
 
@@ -459,6 +479,7 @@ pub fn server_add_route_model_validated(_: ?*c.PyObject, args: ?*c.PyObject) cal
         .original_handler = orig,
         .model_param_name = std.mem.span(param_name),
         .model_class = model_class,
+        .cors_header_block = if (cors_enabled) cors_headers else "",
     }) catch return null;
     getRouter().addRoute(method_s, path_s, key) catch return null;
 
@@ -600,6 +621,10 @@ pub fn server_add_static_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c)
 var cors_headers: []const u8 = ""; // "" = disabled; otherwise pre-rendered CORS header block
 var cors_enabled: bool = false;
 
+/// Per-request CORS block driven from the matched route's cors_header_block.
+/// Thread-local so concurrent Zig worker threads don't interfere with each other.
+threadlocal var tl_cors_block: []const u8 = "";
+
 pub fn server_configure_cors(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var origins: [*c]const u8 = "*";
     var methods: [*c]const u8 = "GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD";
@@ -657,7 +682,7 @@ pub fn server_enable_response_cache(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.
 
 /// Pre-render a full HTTP response into a heap-allocated buffer.
 fn renderResponse(status: u16, content_type: []const u8, body: []const u8) ?[]const u8 {
-    const cors = cors_headers;
+    const cors = tl_cors_block;
     // Note: Date is static for cached responses. TFB just needs the header present.
     var date_buf: [40]u8 = undefined;
     const ts = std.time.timestamp();
@@ -784,7 +809,6 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     py.PyEval_RestoreThread(save);
     return py.pyNone();
 }
-
 
 const HeaderList = std.ArrayListUnmanaged(HeaderPair);
 
@@ -961,6 +985,10 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         return;
     };
 
+    // Load the per-route CORS snapshot into the thread-local so sendResponseExt
+    // picks it up without needing an extra parameter through the whole call chain.
+    tl_cors_block = entry.cors_header_block;
+
     // ── Ultra-fast path: simple handlers that don't need headers or body ──
     switch (entry.handler_tag) {
         .simple_sync_noargs => {
@@ -1101,7 +1129,7 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         .enhanced => {
             const resp = callPythonHandler(tstate, entry, method, path, query_string, body, headers.items, &match.params);
             defer resp.deinit();
-            sendResponse(stream, resp.status_code, resp.content_type, resp.body);
+            sendResponseExt(stream, resp.status_code, resp.content_type, resp.body, resp.extra_headers);
         },
     }
 }
@@ -1807,13 +1835,20 @@ fn callPythonHandler(tstate: ?*anyopaque, entry: HandlerEntry, method: []const u
         }
     }
 
-    // content — json.dumps() if not already a string
+    // content — raw bytes, json string, or json.dumps() of Python object
     var body_slice: []const u8 = "null";
     if (c.PyDict_GetItemString(result, "content")) |content_obj| {
         if (c.PyUnicode_Check(content_obj) != 0) {
             // Already a string, use directly
             if (c.PyUnicode_AsUTF8(content_obj)) |cs| {
                 body_slice = std.mem.span(cs);
+            }
+        } else if (c.PyBytes_Check(content_obj) != 0) {
+            // Raw bytes (e.g. gzip-compressed body) — read directly without JSON serialization
+            var size: c.Py_ssize_t = 0;
+            var buf: [*c]u8 = undefined;
+            if (c.PyBytes_AsStringAndSize(content_obj, @ptrCast(&buf), &size) == 0) {
+                body_slice = buf[0..@intCast(size)];
             }
         } else {
             // Serialize via json.dumps()
@@ -1839,6 +1874,36 @@ fn callPythonHandler(tstate: ?*anyopaque, entry: HandlerEntry, method: []const u
         }
     }
 
+    // extra_headers — dict[str, str] set by Python middleware (e.g. Content-Encoding: gzip)
+    // Content-Length is skipped: Zig computes it from actual body.len.
+    var extra_headers_list: std.ArrayListUnmanaged(HeaderPair) = .empty;
+    if (c.PyDict_GetItemString(result, "extra_headers")) |eh_dict| {
+        if (c.PyDict_Check(eh_dict) != 0) {
+            var eh_pos: isize = 0;
+            var ek: ?*c.PyObject = null;
+            var ev: ?*c.PyObject = null;
+            while (c.PyDict_Next(eh_dict, &eh_pos, @ptrCast(&ek), @ptrCast(&ev)) != 0) {
+                if (ek == null or ev == null) continue;
+                const k_cs = c.PyUnicode_AsUTF8(ek.?) orelse continue;
+                const v_cs = c.PyUnicode_AsUTF8(ev.?) orelse continue;
+                const k_str = std.mem.span(k_cs);
+                const v_str = std.mem.span(v_cs);
+                // Skip Content-Length — computed from actual body length
+                if (std.ascii.eqlIgnoreCase(k_str, "content-length")) continue;
+                const owned_k = allocator.dupe(u8, k_str) catch continue;
+                const owned_v = allocator.dupe(u8, v_str) catch {
+                    allocator.free(owned_k);
+                    continue;
+                };
+                extra_headers_list.append(allocator, .{ .name = owned_k, .value = owned_v }) catch {
+                    allocator.free(owned_k);
+                    allocator.free(owned_v);
+                };
+            }
+        }
+    }
+    const extra_headers = extra_headers_list.toOwnedSlice(allocator) catch &.{};
+
     // ── Return PythonResponse with owned copies ──
     const owned_ct = allocator.dupe(u8, ct_slice) catch return errorResponse(err_ct, err_body);
     const owned_body = allocator.dupe(u8, body_slice) catch {
@@ -1850,6 +1915,7 @@ fn callPythonHandler(tstate: ?*anyopaque, entry: HandlerEntry, method: []const u
         .status_code = status_code,
         .content_type = owned_ct,
         .body = owned_body,
+        .extra_headers = extra_headers,
     };
 }
 
@@ -1902,6 +1968,11 @@ fn statusText(status: u16) []const u8 {
 /// buffer for a single write syscall (most API responses are <4KB).
 /// Falls back to two writes only for large responses.
 pub fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
+    sendResponseExt(stream, status, content_type, body, &.{});
+}
+
+/// Like sendResponse but also writes middleware-injected headers (e.g. Content-Encoding: gzip).
+fn sendResponseExt(stream: std.net.Stream, status: u16, content_type: []const u8, body: []const u8, extra_headers: []const HeaderPair) void {
     // TFB requires Server + Date headers
     var date_buf: [40]u8 = undefined;
     const timestamp = std.time.timestamp();
@@ -1927,15 +1998,32 @@ pub fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u
         .{ status, statusText(status), date_str, content_type, body.len },
     ) catch return;
 
-    // Assemble: header + cors_headers (pre-rendered, "" if disabled) + \r\n\r\n + body
-    const cors = cors_headers; // "" when disabled — zero overhead
+    // Build extra header bytes (middleware-injected, e.g. "Content-Encoding: gzip")
+    // Fast path: skip buffer setup entirely when no middleware headers are present.
+    // This keeps non-middleware routes at zero overhead vs the original sendResponse.
+    const extra_slice: []const u8 = if (extra_headers.len == 0) "" else blk: {
+        var extra_buf: [2048]u8 = undefined;
+        var extra_pos: usize = 0;
+        for (extra_headers) |h| {
+            const piece = std.fmt.bufPrint(extra_buf[extra_pos..], "\r\n{s}: {s}", .{ h.name, h.value }) catch break;
+            extra_pos += piece.len;
+        }
+        break :blk extra_buf[0..extra_pos];
+    };
+
+    // Assemble: header + extra_slice + per-route CORS block + \r\n\r\n + body
+    const cors = tl_cors_block; // per-route snapshot — "" for non-CORS routes
     const trailer = "\r\n\r\n";
-    const total = header.len + cors.len + trailer.len + body.len;
+    const total = header.len + extra_slice.len + cors.len + trailer.len + body.len;
     if (total <= 4096) {
         var resp_buf: [4096]u8 = undefined;
         var pos: usize = 0;
         @memcpy(resp_buf[pos..pos + header.len], header);
         pos += header.len;
+        if (extra_slice.len > 0) {
+            @memcpy(resp_buf[pos..pos + extra_slice.len], extra_slice);
+            pos += extra_slice.len;
+        }
         if (cors.len > 0) {
             @memcpy(resp_buf[pos..pos + cors.len], cors);
             pos += cors.len;
@@ -1947,6 +2035,7 @@ pub fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u
         stream.writeAll(resp_buf[0..pos]) catch return;
     } else {
         stream.writeAll(header) catch return;
+        if (extra_slice.len > 0) stream.writeAll(extra_slice) catch return;
         if (cors.len > 0) stream.writeAll(cors) catch return;
         stream.writeAll(trailer) catch return;
         if (body.len > 0) stream.writeAll(body) catch return;
@@ -1959,7 +2048,6 @@ pub fn configure_rate_limiting(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*
     // No-op for now – will implement later
     return py.pyNone();
 }
-
 
 // ── Fuzz tests ───────────────────────────────────────────────────────────────
 // Run: zig build fuzz-http  (then execute the binary with --fuzz)

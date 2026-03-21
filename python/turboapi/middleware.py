@@ -204,7 +204,6 @@ class GZipMiddleware(Middleware):
 
         return response
 
-
 class HTTPSRedirectMiddleware(Middleware):
     """
     HTTPS redirect middleware - redirects HTTP to HTTPS.

@@ -28,6 +28,49 @@ def _start(app, port):
     t.start()
     time.sleep(1.5)
 
+@pytest.fixture(scope="module")
+def gzip_app():
+    app = TurboAPI()
+    app.add_middleware(GZipMiddleware, minimum_size=10)
+
+    @app.get("/large")
+    def large_response():
+        return {"data": "A" * 1000}
+
+    port = _free_port()
+    _start(app, port)
+    return f"http://127.0.0.1:{port}"
+def test_gzip_middleware_compat(gzip_app):
+    """GZip middleware must correctly compress and return 200."""
+    headers = {"Accept-Encoding": "gzip"}
+    r = requests.get(f"{gzip_app}/large", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.headers.get("Content-Encoding") == "gzip"
+
+@pytest.fixture(scope="module")
+def stacked_app():
+    app = TurboAPI()
+    # Stacking Auth (simulated via logging) and CORS
+    app.add_middleware(LoggingMiddleware)
+    app.add_middleware(
+        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    )
+
+    @app.get("/stacked")
+    def stacked_route():
+        return {"status": "ok", "latency": "stable"}
+
+    port = _free_port()
+    _start(app, port)
+    return f"http://127.0.0.1:{port}"
+
+def test_stacked_middleware_compat(stacked_app):
+    """Stacked middlewares must process the request and return 200 successfully."""
+    r = requests.get(f"{stacked_app}/stacked")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["status"] == "ok"
+    assert "Access-Control-Allow-Origin" in r.headers
 
 @pytest.fixture(scope="module")
 def cors_app():
@@ -117,31 +160,43 @@ def test_cors_response_ok(cors_app):
         assert r.status_code == 200, f"{url} returned {r.status_code}: {r.text}"
 
 
-# ---- Stricter middleware compat tests ----
-
-
 @pytest.fixture(scope="module")
-def gzip_app():
-    app = TurboAPI()
-    app.add_middleware(GZipMiddleware, minimum_size=10)
+def https_redirect_app():
+    from turboapi.middleware import HTTPSRedirectMiddleware
 
-    @app.get("/large")
-    def large_response():
-        return {"data": "A" * 1000}
+    app = TurboAPI()
+    app.add_middleware(HTTPSRedirectMiddleware)
+
+    @app.get("/secure")
+    def secure_route():
+        return {"secured": True}
 
     port = _free_port()
     _start(app, port)
     return f"http://127.0.0.1:{port}"
 
 
-@pytest.mark.xfail(reason="Requires middleware header/body passthrough (PR #55)")
-def test_gzip_middleware_compat(gzip_app):
-    """GZip middleware must correctly compress and return 200."""
-    r = requests.get(f"{gzip_app}/large", headers={"Accept-Encoding": "gzip"})
+def test_https_redirect_passthrough(https_redirect_app):
+    """HTTPSRedirectMiddleware must pass through requests that already carry
+    x-forwarded-proto: https (simulates a TLS-terminating proxy)."""
+    r = requests.get(
+        f"{https_redirect_app}/secure",
+        headers={"x-forwarded-proto": "https"},
+    )
     assert r.status_code == 200, r.text
-    assert r.headers.get("Content-Encoding") == "gzip"
+    assert r.json() == {"secured": True}
 
-@pytest.mark.xfail(reason="Requires middleware header/body passthrough (PR #55)")
+
+def test_https_redirect_blocked(https_redirect_app):
+    """HTTPSRedirectMiddleware must block plain HTTP requests (no x-forwarded-proto)
+    and return a 4xx/5xx — not a 200. In TurboAPI's middleware path BeforeRequest
+    exceptions map to a 429 error response rather than a 301 redirect because the
+    Zig transport cannot issue a redirect directly from a Python exception."""
+    r = requests.get(f"{https_redirect_app}/secure")
+    # Must NOT be 200 – the middleware raised before the handler ran.
+    assert r.status_code != 200, (
+        f"Expected non-200 for plain HTTP request, got {r.status_code}: {r.text}"
+    )
 def test_gzip_body_is_actually_compressed(gzip_app):
     """The body must actually be gzip-compressed bytes, not original JSON.
     Decompress and verify the data survived the round trip."""
@@ -200,8 +255,8 @@ def test_async_handler_under_middleware():
 
 def test_non_middleware_route_no_extra_headers():
     """Routes without middleware must NOT have middleware-injected headers
-    like Content-Encoding leaking into the response. CORS headers are
-    excluded from this check because cors_enabled is global Zig state."""
+    leaking into the response. Guards against CORS/Content-Encoding
+    being inherited from a previous TurboAPI app in the same process."""
     app = TurboAPI()
 
     @app.get("/clean")
@@ -213,6 +268,7 @@ def test_non_middleware_route_no_extra_headers():
     r = requests.get(f"http://127.0.0.1:{port}/clean")
     assert r.status_code == 200
     # No middleware-injected headers should appear
+    assert "Access-Control-Allow-Origin" not in r.headers
     assert "Content-Encoding" not in r.headers
     assert r.json() == {"clean": True}
 

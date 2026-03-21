@@ -136,6 +136,61 @@ zig build -Dpython=3.14t \
 - Standard builds: uses `linker_allow_shlib_undefined` (symbols resolve at import time)
 - dhi modules imported: `validator`, `json_validator`, `validators_comprehensive`, `model`
 
+## Middleware Compatibility Guide
+
+When any middleware is added to a TurboAPI application the affected routes are
+downgraded from the Zig fast path to the **enhanced Python path**
+(`create_enhanced_handler`).  This is intentional — middleware needs a full
+Python `Request`/`Response` object to inspect and mutate the request lifecycle.
+
+### Safe patterns (work correctly under middleware)
+
+| Middleware | Status | Notes |
+|---|---|---|
+| `CORSMiddleware` | ✅ Safe | Zig-native CORS runs zero-overhead; Python CORS also works on enhanced path |
+| `GZipMiddleware` | ✅ Safe | Compresses body in `after_request`; `Content-Encoding: gzip` header emitted by Zig |
+| `LoggingMiddleware` | ✅ Safe | Before/after hooks only; no response mutation |
+| `RateLimitMiddleware` | ✅ Safe | Raises in `before_request`; maps to 429 response |
+| `HTTPSRedirectMiddleware` | ⚠️ Partial | `before_request` exception blocks the handler (returns 4xx). True 301 redirect requires ASGI mode |
+| `CSRFMiddleware` | ✅ Safe | Double-submit cookie pattern works on enhanced path |
+| `SessionMiddleware` | ✅ Safe | Cookie read/write in before/after hooks |
+| `TrustedHostMiddleware` | ✅ Safe | Raises in `before_request`; maps to 4xx response |
+| Custom sync middleware | ✅ Safe | Any class subclassing `Middleware` with sync hooks |
+
+### Unsafe patterns (avoid or use ASGI mode)
+
+| Pattern | Status | Reason |
+|---|---|---|
+| `async def` handler + middleware | ⚠️ Caution | `asyncio.run()` called per-request from Zig worker thread. Safe for **low concurrency**; under high load (>50 concurrent) can cause async-state corruption in free-threaded Python 3.14t. Use sync handlers under middleware, or switch to ASGI mode (`uvicorn`) |
+| `StreamingResponse` + middleware | ⚠️ Partial | Chunks are **buffered** into a single response body; true HTTP chunked transfer requires ASGI mode |
+| Middleware that mutates `request.body` | ✅ Safe | Body bytes are passed through to the handler after `before_request` |
+| Middleware storing per-request state on `request` | ✅ Safe | `request` object is created fresh per request in `_wrap_with_middleware` |
+
+### Performance impact
+
+When middleware is present, all routes run through the enhanced Python wrapper.
+Actual measured overhead (from `bench_middleware_and_streaming.py`):
+
+```
+No middleware (Zig fast path):  ~140k req/s,  p99 <0.5ms
+CORS only (Zig-native):         ~140k req/s,  p99 <0.5ms   ← zero overhead
+Logging + CORS (Python path):   ~33k req/s,   p99 1.8ms    ← 4x overhead
+```
+
+The Python enhanced path is still **8–10x faster than FastAPI** at equivalent
+middleware configurations.
+
+### ASGI fallback for full middleware compatibility
+
+For features requiring true streaming or 301 redirects, run TurboAPI as an
+ASGI app:
+
+```bash
+uvicorn myapp:app --host 0.0.0.0 --port 8000
+```
+
+The `TurboAPI.__call__` ASGI handler is always available as a fallback.
+
 ## Request Flow
 
 ### Sync Handler Flow
