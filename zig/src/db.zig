@@ -1026,10 +1026,8 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
                 if (val_str.len == 0) {
                     py_val = py.pyNone();
                 } else if (val_str[0] == '"' and val_str[val_str.len - 1] == '"') {
-                    py_val = c.PyUnicode_FromStringAndSize(
-                        @ptrCast(val_str.ptr + 1),
-                        @intCast(val_str.len - 2),
-                    ) orelse {
+                    const inner = val_str[1 .. val_str.len - 1];
+                    py_val = c.PyUnicode_DecodeUTF8(@ptrCast(inner.ptr), @intCast(inner.len), "replace") orelse {
                         c.Py_DecRef(py_key);
                         c.Py_DecRef(py_dict);
                         c.Py_DecRef(py_list);
@@ -1042,9 +1040,10 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
                 } else {
                     const int_val = std.fmt.parseInt(i64, val_str, 10) catch {
                         const float_val = std.fmt.parseFloat(f64, val_str) catch {
-                            py_val = c.PyUnicode_FromStringAndSize(
+                            py_val = c.PyUnicode_DecodeUTF8(
                                 @ptrCast(val_str.ptr),
                                 @intCast(val_str.len),
+                                "replace",
                             ) orelse {
                                 c.Py_DecRef(py_key);
                                 c.Py_DecRef(py_dict);
