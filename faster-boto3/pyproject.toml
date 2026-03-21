@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "turboboto"
+name = "faster-boto3"
 version = "0.1.0"
 description = "Drop-in boto3 replacement powered by Zig — 1.2x faster S3/DynamoDB, 115x with TurboAPI"
 readme = "README.md"
