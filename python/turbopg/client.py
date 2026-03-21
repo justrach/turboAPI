@@ -34,17 +34,19 @@ class Database:
         self._connect()
 
     def _connect(self):
-        """Initialize connection — tries Zig native, falls back to psycopg2/psycopg."""
+        """Initialize connection. Checks for Zig native raw query path first."""
         self._native = None
+        self._native_raw = False
         self._fallback_engine = None
 
-        # Try Zig native pool
+        # Try Zig native pool + raw query path
         try:
             from turboapi import turbonet
 
             if hasattr(turbonet, "_db_configure"):
                 turbonet._db_configure(self.conn_string, self.pool_size)
                 self._native = turbonet
+                self._native_raw = hasattr(turbonet, "_db_query_raw")
         except (ImportError, Exception):
             pass
 
@@ -110,7 +112,12 @@ class Database:
         return self._execute_fallback(sql, params or [])
 
     def _query_native(self, sql: str, params: list) -> list[dict]:
-        """Query via Zig-native pg.zig or Python fallback."""
+        """Query via Zig-native pg.zig directly (no HTTP)."""
+        if self._native_raw:
+            import json
+            params_json = json.dumps([str(p) for p in params])
+            result_json = self._native._db_query_raw(sql, params_json)
+            return json.loads(result_json)
         if self._fallback_engine:
             return self._query_fallback(sql, params)
         raise NotImplementedError(

@@ -7,8 +7,8 @@
             .hash = "dhi-0.1.0-Fz3bn0-FAwAv-biejuK3wnjN1A9D3F-NYLFa7fIVu7Ei",
         },
         .pg = .{
-            .url = "git+https://github.com/justrach/pg.zig?ref=master#ce026efad4a24569c473763f80aed71c868973d7",
-            .hash = "pg-0.0.0-Wp_7gd6yBgDtZMrVDmn77u5l0Wi5J39JJ-VgAuoXR0Dy",
+            .url = "git+https://github.com/justrach/pg.zig?ref=master#f243c5c7f3e12d485cf4fccd0eba60a19e50310c",
+            .hash = "pg-0.0.0-Wp_7gbDFBgBYPU_h28EuQi8hgVZLw5AWH6YNuIdY3LP0",
         },
     },
     .paths = .{""},
