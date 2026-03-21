@@ -112,12 +112,9 @@ class Database:
         return self._execute_fallback(sql, params or [])
 
     def _query_native(self, sql: str, params: list) -> list[dict]:
-        """Query via Zig-native pg.zig directly (no HTTP)."""
+        """Query via Zig-native pg.zig directly (no JSON, returns Python dicts)."""
         if self._native_raw:
-            import json
-            params_json = json.dumps([str(p) for p in params])
-            result_json = self._native._db_query_raw(sql, params_json)
-            return json.loads(result_json)
+            return self._native._db_query_raw(sql, params)
         if self._fallback_engine:
             return self._query_fallback(sql, params)
         raise NotImplementedError(

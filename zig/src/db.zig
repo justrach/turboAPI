@@ -49,7 +49,20 @@ var db_cache_ttl: i64 = 30; // default 30 second TTL
 var db_cache: ?std.StringHashMap(CacheEntry) = null;
 var db_cache_count: usize = 0;
 var db_cache_mutex: std.Thread.Mutex = .{};
+var db_cache_checked_env: bool = false;
 
+fn isDbCacheEnabled() bool {
+    if (!db_cache_checked_env) {
+        db_cache_checked_env = true;
+        if (std.posix.getenv("TURBO_DISABLE_DB_CACHE")) |val| {
+            if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
+                db_cache_enabled = false;
+                std.debug.print("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE\n", .{});
+            }
+        }
+    }
+    return db_cache_enabled;
+}
 // Per-thread connections
 const MAX_WORKERS: usize = 24;
 var thread_conns: [MAX_WORKERS]?*pg.Conn = [_]?*pg.Conn{null} ** MAX_WORKERS;
@@ -78,7 +91,7 @@ fn now() i64 {
 
 /// Thread-safe cache lookup. Returns cached body or null if miss/expired.
 fn cacheGet(key: []const u8) ?[]const u8 {
-    if (!db_cache_enabled) return null;
+    if (!isDbCacheEnabled()) return null;
     db_cache_mutex.lock();
     defer db_cache_mutex.unlock();
 
@@ -101,7 +114,7 @@ fn cacheGet(key: []const u8) ?[]const u8 {
 
 /// Thread-safe cache put. Evicts oldest entries if full.
 fn cachePut(key: []const u8, body: []const u8, table: []const u8) void {
-    if (!db_cache_enabled) return;
+    if (!isDbCacheEnabled()) return;
     db_cache_mutex.lock();
     defer db_cache_mutex.unlock();
 
@@ -584,7 +597,7 @@ pub fn handleDbRoute(
             }
             const cache_key = cache_key_buf[0..ck_pos];
 
-            if (db_cache_enabled) {
+            if (isDbCacheEnabled()) {
                 if (cacheGet(cache_key)) |cached_body| {
                     sendResponseFn(stream, 200, "application/json", cached_body);
                     return;
@@ -860,39 +873,32 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
 
 pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var sql_ptr: [*c]const u8 = null;
-    var params_ptr: [*c]const u8 = null;
-    if (c.PyArg_ParseTuple(args, "ss", &sql_ptr, &params_ptr) == 0) return null;
+    var params_obj: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "sO", &sql_ptr, &params_obj) == 0) return null;
 
     const sql = std.mem.span(sql_ptr);
-    const params_json = std.mem.span(params_ptr);
 
     if (db_pool == null) {
         py.setError("Database not configured. Call configure_db() first.", .{});
         return null;
     }
 
-    // Parse params JSON array: ["val1", "val2", ...]
+    // Extract params directly from Python list
     var param_values: [16][]const u8 = undefined;
     var param_count: usize = 0;
 
-    if (params_json.len > 2) {
-        var i: usize = 1; // skip opening [
-        while (i < params_json.len and param_count < 16) {
-            while (i < params_json.len and (params_json[i] == ' ' or params_json[i] == ',' or params_json[i] == '\n')) : (i += 1) {}
-            if (i >= params_json.len or params_json[i] == ']') break;
-
-            if (params_json[i] == '"') {
-                i += 1;
-                const start = i;
-                while (i < params_json.len and params_json[i] != '"') : (i += 1) {}
-                param_values[param_count] = params_json[start..i];
-                param_count += 1;
-                i += 1;
-            } else {
-                const start = i;
-                while (i < params_json.len and params_json[i] != ',' and params_json[i] != ']' and params_json[i] != ' ') : (i += 1) {}
-                param_values[param_count] = params_json[start..i];
-                param_count += 1;
+    if (params_obj) |plist| {
+        if (c.PyList_Check(plist) != 0) {
+            const n: usize = @intCast(c.PyList_Size(plist));
+            for (0..@min(n, 16)) |i| {
+                const item = c.PyList_GetItem(plist, @intCast(i));
+                if (item == null) continue;
+                const str_obj = c.PyObject_Str(item) orelse continue;
+                defer c.Py_DecRef(str_obj);
+                if (c.PyUnicode_AsUTF8(str_obj)) |cs| {
+                    param_values[param_count] = std.mem.span(cs);
+                    param_count += 1;
+                }
             }
         }
     }
@@ -911,25 +917,78 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
 
     const col_names = result.column_names;
 
-    // Serialize all rows as JSON array
-    var json_buf: [1024 * 1024]u8 = undefined;
-    var pos: usize = 0;
-    json_buf[pos] = '[';
-    pos += 1;
+    // Build Python list of dicts directly (no JSON)
+    const py_list = c.PyList_New(0) orelse return null;
 
-    var row_count: usize = 0;
     while (result.next() catch null) |row| {
-        if (row_count > 0) {
-            json_buf[pos] = ',';
-            pos += 1;
+        const py_dict = c.PyDict_New() orelse {
+            c.Py_DecRef(py_list);
+            return null;
+        };
+
+        for (col_names, 0..) |col_name, i| {
+            const value = row.values[i];
+            var py_val: *c.PyObject = undefined;
+
+            const py_key = c.PyUnicode_FromStringAndSize(@ptrCast(col_name.ptr), @intCast(col_name.len)) orelse {
+                c.Py_DecRef(py_dict);
+                c.Py_DecRef(py_list);
+                return null;
+            };
+
+            if (value.is_null) {
+                py_val = py.pyNone();
+            } else {
+                var val_buf: [8192]u8 = undefined;
+                const val_len = row.writeJsonValue(i, &val_buf);
+                if (val_len == 0) {
+                    py_val = py.pyNone();
+                } else {
+                    const val_str = val_buf[0..val_len];
+                    if (val_str[0] == '"' and val_str[val_str.len - 1] == '"') {
+                        py_val = c.PyUnicode_FromStringAndSize(@ptrCast(val_str.ptr + 1), @intCast(val_str.len - 2)) orelse {
+                            c.Py_DecRef(py_key);
+                            c.Py_DecRef(py_dict);
+                            c.Py_DecRef(py_list);
+                            return null;
+                        };
+                    } else if (val_str.len == 4 and std.mem.eql(u8, val_str, "true")) {
+                        py_val = py.pyTrue();
+                    } else if (val_str.len == 5 and std.mem.eql(u8, val_str, "false")) {
+                        py_val = py.pyFalse();
+                    } else {
+                        const int_val = std.fmt.parseInt(i64, val_str, 10) catch {
+                            const float_val = std.fmt.parseFloat(f64, val_str) catch {
+                                py_val = c.PyUnicode_FromStringAndSize(@ptrCast(val_str.ptr), @intCast(val_str.len)) orelse {
+                                    c.Py_DecRef(py_key);
+                                    c.Py_DecRef(py_dict);
+                                    c.Py_DecRef(py_list);
+                                    return null;
+                                };
+                                _ = c.PyDict_SetItem(py_dict, py_key, py_val);
+                                c.Py_DecRef(py_val);
+                                c.Py_DecRef(py_key);
+                                continue;
+                            };
+                            py_val = c.PyFloat_FromDouble(float_val);
+                            _ = c.PyDict_SetItem(py_dict, py_key, py_val);
+                            c.Py_DecRef(py_val);
+                            c.Py_DecRef(py_key);
+                            continue;
+                        };
+                        py_val = c.PyLong_FromLongLong(int_val);
+                    }
+                }
+            }
+
+            _ = c.PyDict_SetItem(py_dict, py_key, py_val);
+            c.Py_DecRef(py_val);
+            c.Py_DecRef(py_key);
         }
-        const row_json = serializeRow(row, col_names, json_buf[pos..]) catch break;
-        pos += row_json.len;
-        row_count += 1;
+
+        _ = c.PyList_Append(py_list, py_dict);
+        c.Py_DecRef(py_dict);
     }
 
-    json_buf[pos] = ']';
-    pos += 1;
-
-    return c.PyUnicode_FromStringAndSize(@ptrCast(&json_buf), @intCast(pos));
+    return py_list;
 }

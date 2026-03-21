@@ -119,20 +119,24 @@ def bench_asyncpg():
 # ---------------------------------------------------------------------------
 # 2-4. TurboAPI+pg.zig
 # ---------------------------------------------------------------------------
-def start_turbo_app(routes_fn):
+def start_turbo_app(routes_fn, disable_db_cache=False):
     from turboapi import TurboAPI
+
+    if disable_db_cache:
+        os.environ["TURBO_DISABLE_DB_CACHE"] = "1"
+        os.environ["TURBO_DISABLE_CACHE"] = "1"
+
     app = TurboAPI()
     app.configure_db(CONN, pool_size=16)
     routes_fn(app)
     port = free_port()
-    # Store server thread so we can reference it
     server_thread = threading.Thread(target=lambda: app.run(host="127.0.0.1", port=port), daemon=True)
     server_thread.start()
     time.sleep(3)
-    # warmup: hit enough unique IDs to prime all 16 pool connections
+    # warmup: only prime pool connections (3 requests), NOT the full working set
     import requests
-    for i in range(200):
-        requests.get(f"http://127.0.0.1:{port}/users/{(i % 1000) + 1}", timeout=5)
+    for i in range(3):
+        requests.get(f"http://127.0.0.1:{port}/users/{i + 1}", timeout=5)
     time.sleep(1)
     return port
 def routes_cached(app):
@@ -196,13 +200,14 @@ def main():
         os._exit(0)
 
     elif mode == "turbo_nocache":
-        port = start_turbo_app(routes_nocache)
-        print("\n=== 3. TurboAPI+pg.zig NO CACHE (varying IDs) ===", flush=True)
+        # TRULY uncached: both HTTP and DB caches disabled via env vars
+        port = start_turbo_app(routes_nocache, disable_db_cache=True)
+        print("\n=== 3. TurboAPI+pg.zig NO CACHE (DB cache OFF, varying IDs) ===", flush=True)
         rps_id = run_wrk_lua(
             f"http://127.0.0.1:{port}/users/1", "/app/varying_ids.lua",
-            "SELECT by ID (varying)",
+            "SELECT by ID (uncached, 1000 IDs)",
         )
-        rps_list = run_wrk(f"http://127.0.0.1:{port}/users", "SELECT list (random)")
+        rps_list = run_wrk(f"http://127.0.0.1:{port}/users", "SELECT list (uncached)")
         with open(results_file, "w") as f:
             json_mod.dump({"rps_id": rps_id, "rps_list": rps_list}, f)
         os._exit(0)
