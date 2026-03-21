@@ -69,9 +69,38 @@ class DependencyResolver:
                 for p_name, p in sig.parameters.items():
                     sub_dep = get_depends(p)
                     if sub_dep is not None and sub_dep.dependency is not None:
+                        # This parameter has a Depends dependency
                         sub_kwargs[p_name] = await DependencyResolver._resolve_single(
                             sub_dep.dependency, sub_dep.use_cache, context, cache, cleanups
                         )
+                    else:
+                        # Check for Cookie, Header, Query markers in metadata
+                        ann = p.annotation
+                        if ann is not inspect.Parameter.empty:
+                            from typing import get_args
+                            from turboapi.datastructures import Cookie, Header, Query
+                            for metadata in getattr(ann, "__metadata__", ()):
+                                if isinstance(metadata, Cookie):
+                                    # Extract cookie value from context
+                                    cookies = context.get("cookies", {})
+                                    alias = getattr(metadata, "alias", p_name)
+                                    sub_kwargs[p_name] = cookies.get(alias)
+                                    break
+                                elif isinstance(metadata, Header):
+                                    # Extract header value from context
+                                    headers = context.get("headers", {})
+                                    alias = getattr(metadata, "alias", p_name)
+                                    sub_kwargs[p_name] = headers.get(alias.lower())
+                                    break
+                                elif isinstance(metadata, Query):
+                                    # Extract query param from context
+                                    query_string = context.get("query_string", "")
+                                    from urllib.parse import parse_qs
+                                    qs = parse_qs(query_string)
+                                    alias = getattr(metadata, "alias", p_name)
+                                    values = qs.get(alias, [None])
+                                    sub_kwargs[p_name] = values[0] if values else None
+                                    break
             except (ValueError, TypeError):
                 pass
 
