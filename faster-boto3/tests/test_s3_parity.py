@@ -448,7 +448,7 @@ class TestKnownLimitations:
         from faster_boto3 import _http_accel as http
         http.request("GET", "https://s3.amazonaws.com/", [], None)
 
-    def test_patching_is_idempotent(self):
+    def test_patching_is_idempotent(self, localstack):
         """Calling patch() multiple times must not break anything."""
         import faster_boto3
         faster_boto3.patch()
