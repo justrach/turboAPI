@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from .security import get_depends
 from .version_check import CHECK_MARK
 
 
@@ -137,6 +138,10 @@ class Router:
                 request_model = None
 
                 for param_name, param in sig.parameters.items():
+                    # Skip dependencies - they're handled by DependencyResolver
+                    if get_depends(param) is not None:
+                        continue
+
                     if param_name in path:
                         # Path parameter
                         path_param = PathParameter(

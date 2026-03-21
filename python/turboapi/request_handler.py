@@ -16,7 +16,7 @@ class DependencyResolver:
     """Resolve Depends() dependencies recursively with caching and cleanup."""
 
     @staticmethod
-    def resolve_dependencies(
+    async def resolve_dependencies(
         handler_signature: inspect.Signature, context: dict[str, Any]
     ) -> dict[str, Any]:
         """
@@ -42,7 +42,7 @@ class DependencyResolver:
                 if dep_fn is None:
                     continue
 
-                value = DependencyResolver._resolve_single(
+                value = await DependencyResolver._resolve_single(
                     dep_fn, depends.use_cache, context, cache, cleanups
                 )
                 resolved[param_name] = value
@@ -52,8 +52,9 @@ class DependencyResolver:
         return resolved
 
     @staticmethod
-    def _resolve_single(dep_fn, use_cache, context, cache, cleanups):
+    async def _resolve_single(dep_fn, use_cache, context, cache, cleanups):
         """Resolve a single dependency, handling sub-deps, caching, generators."""
+        import asyncio
         from turboapi.security import SecurityBase, get_depends
 
         cache_key = id(dep_fn)
@@ -68,9 +69,38 @@ class DependencyResolver:
                 for p_name, p in sig.parameters.items():
                     sub_dep = get_depends(p)
                     if sub_dep is not None and sub_dep.dependency is not None:
-                        sub_kwargs[p_name] = DependencyResolver._resolve_single(
+                        # This parameter has a Depends dependency
+                        sub_kwargs[p_name] = await DependencyResolver._resolve_single(
                             sub_dep.dependency, sub_dep.use_cache, context, cache, cleanups
                         )
+                    else:
+                        # Check for Cookie, Header, Query markers in metadata
+                        ann = p.annotation
+                        if ann is not inspect.Parameter.empty:
+                            from typing import get_args
+                            from turboapi.datastructures import Cookie, Header, Query
+                            for metadata in getattr(ann, "__metadata__", ()):
+                                if isinstance(metadata, Cookie):
+                                    # Extract cookie value from context
+                                    cookies = context.get("cookies", {})
+                                    alias = getattr(metadata, "alias", p_name)
+                                    sub_kwargs[p_name] = cookies.get(alias)
+                                    break
+                                elif isinstance(metadata, Header):
+                                    # Extract header value from context
+                                    headers = context.get("headers", {})
+                                    alias = getattr(metadata, "alias", p_name)
+                                    sub_kwargs[p_name] = headers.get(alias.lower())
+                                    break
+                                elif isinstance(metadata, Query):
+                                    # Extract query param from context
+                                    query_string = context.get("query_string", "")
+                                    from urllib.parse import parse_qs
+                                    qs = parse_qs(query_string)
+                                    alias = getattr(metadata, "alias", p_name)
+                                    values = qs.get(alias, [None])
+                                    sub_kwargs[p_name] = values[0] if values else None
+                                    break
             except (ValueError, TypeError):
                 pass
 
@@ -78,53 +108,41 @@ class DependencyResolver:
         if isinstance(dep_fn, SecurityBase) and hasattr(dep_fn, "__call__"):
             # Inspect __call__ signature to pass the right context
             try:
-                call_sig = inspect.signature(dep_fn.__call__)
-                call_params = list(call_sig.parameters.keys())
+                sig = inspect.signature(dep_fn.__call__)
+                if "cookies" in sig.parameters:
+                    result = dep_fn(cookies=context.get("cookies", {}))
+                elif "auth_header" in sig.parameters:
+                    # OAuth2/HTTPBearer/HTTPBasic — pass authorization header
+                    headers = context.get("headers", {})
+                    auth_header = None
+                    for k, v in headers.items():
+                        if k.lower() == "authorization":
+                            auth_header = v
+                            break
+                    result = dep_fn(auth_header)
+                else:
+                    # OAuth2PasswordBearer — pass both
+                    result = dep_fn(
+                        cookies=context.get("cookies", {}),
+                        auth_header=next(
+                            (v for k, v in context.get("headers", {}).items() if k.lower() == "authorization"),
+                            None,
+                        ),
+                    )
             except (ValueError, TypeError):
-                call_params = []
-
-            if "headers" in call_params:
-                # APIKeyHeader — pass full headers dict
-                result = dep_fn(headers=context.get("headers", {}))
-            elif "query_params" in call_params:
-                # APIKeyQuery — parse query string into dict
-                from urllib.parse import parse_qs
-
-                qs = context.get("query_string", "")
-                qp = (
-                    {k: v[0] for k, v in parse_qs(qs, keep_blank_values=True).items()} if qs else {}
-                )
-                result = dep_fn(query_params=qp)
-            elif "cookies" in call_params:
-                # APIKeyCookie — pass cookies dict
-                result = dep_fn(cookies=context.get("cookies", {}))
-            else:
-                # OAuth2/HTTPBearer/HTTPBasic — pass authorization header
-                headers = context.get("headers", {})
-                auth_header = None
-                for k, v in headers.items():
-                    if k.lower() == "authorization":
-                        auth_header = v
-                        break
-                result = dep_fn(auth_header)
+                # If we can't inspect, just call it
+                result = dep_fn()
         elif inspect.isgeneratorfunction(dep_fn):
             gen = dep_fn(**sub_kwargs)
             result = next(gen)
             cleanups.append(gen)
         elif inspect.isasyncgenfunction(dep_fn):
-            import asyncio
-
-            async def _resolve_async_gen():
-                agen = dep_fn(**sub_kwargs)
-                val = await agen.__anext__()
-                cleanups.append(agen)
-                return val
-
-            result = asyncio.run(_resolve_async_gen())
+            agen = dep_fn(**sub_kwargs)
+            val = await agen.__anext__()
+            cleanups.append(agen)
+            result = val
         elif inspect.iscoroutinefunction(dep_fn):
-            import asyncio
-
-            result = asyncio.run(dep_fn(**sub_kwargs))
+            result = await dep_fn(**sub_kwargs)
         else:
             result = dep_fn(**sub_kwargs)
 
@@ -698,7 +716,7 @@ def create_enhanced_handler(original_handler, route_definition):
                     "query_string": kwargs.get("query_string", ""),
                     "body": kwargs.get("body", b""),
                 }
-                dependency_params = DependencyResolver.resolve_dependencies(sig, context)
+                dependency_params = await DependencyResolver.resolve_dependencies(sig, context)
                 parsed_params.update(dependency_params)
 
                 # Filter to only pass expected parameters
@@ -750,8 +768,8 @@ def create_enhanced_handler(original_handler, route_definition):
         return enhanced_handler
 
     else:
-        # Create sync enhanced handler for sync original handlers
-        def enhanced_handler(**kwargs):
+        # Create async enhanced handler for sync original handlers (dependencies may be async)
+        async def enhanced_handler(**kwargs):
             """Enhanced handler with automatic parsing of body, query params, path params, and headers."""
             try:
                 parsed_params = {}
@@ -798,7 +816,7 @@ def create_enhanced_handler(original_handler, route_definition):
                         "query_string": query_string,
                         "body": body_data,
                     }
-                    dependency_params = DependencyResolver.resolve_dependencies(sig, context)
+                    dependency_params = await DependencyResolver.resolve_dependencies(sig, context)
                     parsed_params.update(dependency_params)
 
                 # Filter to only pass expected parameters

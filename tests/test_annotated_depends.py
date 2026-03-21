@@ -118,3 +118,62 @@ def test_classic_depends_still_works():
     resp = client.get("/classic")
     assert resp.status_code == 200
     assert resp.json()["db"] == {"connection": "fake_db"}
+
+
+# ── Route registration: Annotated Depends should NOT be classified as query params ──
+
+
+def test_annotated_depends_not_in_query_params():
+    """Annotated[Type, Depends(...)] should NOT appear in route's query_params."""
+    app = TurboAPI(title="test")
+    router = app  # TurboAPI is also a Router
+
+    @router.get("/items")
+    def read_items(db: DB):
+        return {"db": db}
+
+    # Find the registered route
+    routes = app.routes
+    assert len(routes) == 1
+    route = routes[0]
+
+    # db should NOT be in query_params
+    assert "db" not in route.query_params, (
+        f"Expected 'db' not in query_params, but got: {route.query_params}"
+    )
+
+
+def test_classic_depends_not_in_query_params():
+    """Classic Depends() should also NOT appear in route's query_params."""
+    app = TurboAPI(title="test")
+    router = app
+
+    @router.get("/items")
+    def read_items(db: dict = Depends(get_db)):
+        return {"db": db}
+
+    routes = app.routes
+    assert len(routes) == 1
+    route = routes[0]
+
+    assert "db" not in route.query_params
+
+
+def test_router_with_prefix_and_annotated_depends():
+    """Router prefix + Annotated Depends should work together."""
+    from turboapi import Router
+
+    app = TurboAPI(title="test")
+    router = Router(prefix="/api")
+
+    @router.get("/items")
+    def read_items(db: DB):
+        return {"db": db}
+
+    app.include_router(router)
+
+    routes = app.routes
+    assert len(routes) == 1
+    route = routes[0]
+    assert route.path == "/api/items"
+    assert "db" not in route.query_params
