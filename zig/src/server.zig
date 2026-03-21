@@ -650,6 +650,14 @@ pub fn server_add_middleware(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.
 // Subsequent calls serve from cache — zero Python, zero GIL, single writeAll.
 
 pub fn server_enable_response_cache(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    // Check if response cache is disabled via env var
+    if (std.posix.getenv("TURBO_DISABLE_RESPONSE_CACHE")) |val| {
+        if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
+            cache_noargs_responses = false;
+            std.debug.print("[CACHE] Response caching DISABLED via TURBO_DISABLE_RESPONSE_CACHE\n", .{});
+            return py.pyNone();
+        }
+    }
     cache_noargs_responses = true;
     std.debug.print("[CACHE] Response caching enabled for noargs handlers\n", .{});
     return py.pyNone();

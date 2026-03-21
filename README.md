@@ -130,41 +130,42 @@ The app also exposes an ASGI `__call__` fallback — you can use `uvicorn main:a
 
 All numbers verified with correct, identical JSON responses. `wrk -t4 -c100 -d10s`, Python 3.14t free-threaded, Apple Silicon M3 Pro.
 
-```
-  Throughput (req/s) — no middleware
-  ─────────────────────────────────────────────────────────────
+### HTTP Throughput (no database)
 
-  GET /health (static)  ██████████████████████████████████████████████████  149,340  <- pre-rendered, zero Python
-  GET /ping             ████████████████████████████████████████████████    150,000  <- cached after 1st call
-  (simple_sync_noargs)  ██  6,847                                                   <- FastAPI
+| Endpoint | TurboAPI | FastAPI | Speedup |
+|---|---|---|---|
+| GET /health (static) | 179,113/s | 11,168/s | **16.0x** |
+| GET / | 175,549/s | 11,252/s | **15.6x** |
+| GET /json | 171,971/s | 10,721/s | **16.0x** |
+| GET /users/123 | 175,332/s | 9,775/s | **17.9x** |
+| POST /items | 155,687/s | 8,667/s | **18.0x** |
+| GET /status201 | 173,475/s | 11,991/s | **14.5x** |
+| **Average** | | | **16.3x** |
 
-  GET /items/{id}       ████████████████████████████████████████████████   ~143,000  <- vectorcall (Zig arg assembly)
-                        ███  8,666
+Avg latency: TurboAPI 0.13ms / FastAPI 9.3ms
 
-  POST /users (dhi)     ████████████████████████████████████████  ~124,000           <- model_sync + pre-GIL validation
-                        ███  8,200
+### Caching
 
-  ─────────────────────────────────────────────────────────────
-  With CORSMiddleware stacked (all routes, all methods):
-  ─────────────────────────────────────────────────────────────
+TurboAPI has two optional caching layers. Both can be disabled via environment variables:
 
-  GET /ping + CORS      ████████████████████████████████████████████████  ~139,000   <- Zig-native CORS, ~0% overhead
-  GET /json + CORS      ███████████████████████████████████████████████   ~138,000
-  POST /items + CORS    ████████████████████████████████████████  ~124,000
+| Cache | What it does | Env var to disable |
+|---|---|---|
+| **Response cache** | Caches handler return values after first call. Subsequent requests for the same route skip Python entirely. | `TURBO_DISABLE_RESPONSE_CACHE=1` |
+| **DB result cache** | Caches SELECT query results with 30s TTL, 10K max entries, per-table invalidation on writes. | `TURBO_DISABLE_DB_CACHE=1` |
+| **DB cache TTL** | Override the default 30-second TTL. | `TURBO_DB_CACHE_TTL=5` |
 
-  ─────────────────────────────────────────────────────────────
-  Avg latency (no middleware): 0.15ms    FastAPI: 14.6ms (~22x)
-  Avg latency (with CORS):     0.16ms    FastAPI: 14.6ms (~21x)
-```
+**The numbers above are measured with response cache disabled** (`TURBO_DISABLE_RESPONSE_CACHE=1`). The speedup comes from the Zig HTTP server and radix router, not from caching. With response cache enabled, throughput is ~1-3% higher (cache hit avoids the Python→Zig→Python round-trip for repeated calls).
 
-- **Static routes**: `app.static_route("GET", "/health", '{"status":"ok"}')` -- response pre-rendered at startup, single `writeAll`
-- **Response caching**: noargs handlers cached after first Python call -- subsequent requests skip Python entirely
-- **Zero-arg GET**: `PyObject_CallNoArgs` -- no tuple/kwargs allocation
-- **Parameterized GET**: `PyObject_Vectorcall` with Zig-assembled positional args -- no `parse_qs`, no kwargs dict
-- **POST (dhi model)**: Zig validates JSON schema **before** acquiring the GIL -- invalid bodies return `422` without touching Python
-- **CORS**: Zig-native -- headers pre-rendered once at startup, injected via `memcpy`. **0% overhead** (was 24% with Python middleware). OPTIONS preflight handled in Zig.
+For database benchmarks, `TURBO_DISABLE_DB_CACHE=1` will measure true per-request Postgres performance. With DB caching on, cached reads hit a Zig HashMap instead of Postgres — useful in production but not a fair framework comparison.
 
----
+### How it works
+
+- **Static routes**: `app.static_route("GET", "/health", '{"status":"ok"}')` — response pre-rendered at startup, single `writeAll`
+- **Response caching**: noargs handlers cached after first Python call — subsequent requests skip Python entirely
+- **Zero-arg GET**: `PyObject_CallNoArgs` — no tuple/kwargs allocation
+- **Parameterized GET**: `PyObject_Vectorcall` with Zig-assembled positional args — no `parse_qs`, no kwargs dict
+- **POST (dhi model)**: Zig validates JSON schema **before** acquiring the GIL — invalid bodies return `422` without touching Python
+- **CORS**: Zig-native — headers pre-rendered once at startup, injected via `memcpy`. **0% overhead** (was 24% with Python middleware). OPTIONS preflight handled in Zig.
 
 
 ## ⚙️ Architecture

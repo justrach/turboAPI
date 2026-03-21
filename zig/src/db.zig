@@ -709,6 +709,34 @@ pub fn db_configure(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     };
 
     std.debug.print("[DB] Pool initialized: {d} connections to {s}\n", .{ size, uri_str });
+
+    // Auto-check env vars for cache control
+    if (std.posix.getenv("TURBO_DISABLE_DB_CACHE")) |val| {
+        if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
+            db_cache_enabled = false;
+            std.debug.print("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE\n", .{});
+        }
+    }
+    if (std.posix.getenv("TURBO_DB_CACHE_TTL")) |val| {
+        db_cache_ttl = std.fmt.parseInt(i64, val, 10) catch 30;
+        std.debug.print("[DB] Cache TTL set to {d}s\n", .{db_cache_ttl});
+    }
+
+    return py.pyNone();
+}
+
+/// Check env vars for cache control — called at startup or from Python.
+pub fn db_check_cache_env(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    if (std.posix.getenv("TURBO_DISABLE_DB_CACHE")) |val| {
+        if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
+            db_cache_enabled = false;
+            std.debug.print("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE\n", .{});
+        }
+    }
+    if (std.posix.getenv("TURBO_DB_CACHE_TTL")) |val| {
+        db_cache_ttl = std.fmt.parseInt(i64, val, 10) catch 30;
+        std.debug.print("[DB] Cache TTL set to {d}s\n", .{db_cache_ttl});
+    }
     return py.pyNone();
 }
 

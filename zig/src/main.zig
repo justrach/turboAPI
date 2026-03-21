@@ -46,6 +46,7 @@ var methods = [_]py.PyMethodDef{
     .{ .ml_name = "_db_configure", .ml_meth = @ptrCast(&db.db_configure), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_db_add_route", .ml_meth = @ptrCast(&db.db_add_route), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_db_query_raw", .ml_meth = @ptrCast(&db.db_query_raw), .ml_flags = c.METH_VARARGS, .ml_doc = null },
+    .{ .ml_name = "_db_check_cache_env", .ml_meth = @ptrCast(&db.db_check_cache_env), .ml_flags = c.METH_NOARGS, .ml_doc = null },
     .{ .ml_name = null, .ml_meth = null, .ml_flags = 0, .ml_doc = null },
 };
 
