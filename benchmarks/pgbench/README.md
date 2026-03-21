@@ -11,7 +11,7 @@ docker compose up --build
 
 ## What it tests
 
-MagicStack's pgbench measures raw driver throughput (queries/sec, latency percentiles) using the Postgres wire protocol directly. Three drivers are compared on the same queries:
+MagicStack's pgbench measures raw driver throughput (queries/sec, latency percentiles) using the Postgres wire protocol. Three drivers compared on the same queries:
 
 | Driver | Runtime | Protocol |
 |--------|---------|----------|
@@ -19,35 +19,38 @@ MagicStack's pgbench measures raw driver throughput (queries/sec, latency percen
 | psycopg3-async | Python 3.11 + asyncio | Binary |
 | turbopg (pg.zig) | Python 3.14t + Zig | Binary (via HTTP*) |
 
-*turbopg runs through TurboAPI's HTTP server, so includes HTTP overhead that the other drivers don't have. This is NOT an apples-to-apples comparison. See `benchmarks/postgres/BENCHMARKS.md` for our own benchmark that accounts for this.
+*turbopg runs through TurboAPI's HTTP server, so includes HTTP overhead that the other drivers don't have.
 
-## Queries
-
-From MagicStack's suite:
-- `7-oneplusone.json`: `SELECT 1+1` (minimal query, measures driver overhead)
-- `1-pg_type.json`: `SELECT ... FROM pg_type WHERE ...` (619 rows, boolean params)
-- `2-generate_series.json`: `SELECT i FROM generate_series(1, $1)` (1000 rows)
-
-## Results (Postgres 18, Docker, concurrency=10, 30s)
+## Results (Postgres 18, Docker, concurrency=10, 30s each)
 
 | Query | asyncpg | psycopg3-async | turbopg (pg.zig)* |
 |-------|---------|----------------|-------------------|
-| SELECT 1+1 | 95,341 q/s | 34,995 q/s | 20,019 q/s |
-| pg_type (619 rows) | 5,932 q/s | 2,274 q/s | needs bool fix |
-| generate_series (1000) | 8,273 q/s | 4,236 q/s | needs bool fix |
+| SELECT 1+1 | 93,613 q/s (0.106ms) | 34,888 q/s (0.286ms) | 19,659 q/s (0.508ms) |
+| pg_type (619 rows) | 5,844 q/s (1.711ms) | 2,275 q/s (4.394ms) | 19,599 q/s (0.509ms) |
+| generate_series (1000) | 8,239 q/s (1.213ms) | 4,180 q/s (2.391ms) | 217 q/s (46ms) |
 
-*turbopg numbers include full HTTP round-trip overhead
+*turbopg numbers include full HTTP round-trip + JSON serialization overhead.
+
+### Notes
+
+- asyncpg and psycopg3 talk to Postgres directly (no HTTP). turbopg goes HTTP request -> Zig parse -> pg.zig query -> JSON serialize -> HTTP response. Not apples-to-apples.
+- On SELECT 1+1, turbopg is slower because the HTTP overhead dominates for tiny results.
+- On pg_type (619 rows), turbopg shows high q/s because the result caches after the first call.
+- On generate_series (1000 rows), turbopg is slow because serializing 1000 rows to JSON through HTTP is expensive.
+- For a fairer comparison, see `benchmarks/postgres/BENCHMARKS.md` which benchmarks the full HTTP stack (wrk) where TurboAPI is 4-20x faster than asyncpg-backed frameworks.
 
 ## Architecture
 
 ```
 Docker Compose:
   postgres:18        -- Postgres server (trust auth)
-  pgbench:           -- Python 3.11 (asyncpg/psycopg3) + Python 3.14t (TurboAPI)
-    run.sh           -- orchestrates all drivers
+  pgbench:           -- Two-stage build:
+    Stage 1: Python 3.14t + Zig (builds TurboAPI)
+    Stage 2: Python 3.11 + uvloop (runs asyncpg/psycopg3)
+    run.sh           -- orchestrates all drivers sequentially
     pgbench_zig      -- custom runner for TurboAPI+pg.zig
 ```
 
 ## Requirements
 
-Docker + Docker Compose. Everything runs inside containers.
+Docker + Docker Compose. Everything runs inside containers (~5 min build, ~5 min benchmark).
