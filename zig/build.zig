@@ -74,9 +74,17 @@ pub fn build(b: *std.Build) void {
             .file = b.path("src/py_atomic_shim.c"),
             .flags = &.{ "-I", include_path },
         });
+        lib.addCSourceFile(.{
+            .file = b.path("src/py_gil_shim.c"),
+            .flags = &.{ "-I", include_path },
+        });
     } else {
         // Standard: allow undefined (symbols resolve at import time)
         lib.linker_allow_shlib_undefined = true;
+        lib.addCSourceFile(.{
+            .file = b.path("src/py_gil_shim.c"),
+            .flags = &.{ "-I", include_path },
+        });
     }
 
     b.installArtifact(lib);

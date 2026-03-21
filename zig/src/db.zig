@@ -9,8 +9,11 @@ const c = py.c;
 const router_mod = @import("router.zig");
 const dhi = @import("dhi_validator.zig");
 
-const allocator = std.heap.c_allocator;
+// GIL release shim (C functions to avoid opaque PyThreadState in Zig cimport)
+extern fn py_gil_save() ?*anyopaque;
+extern fn py_gil_restore(?*anyopaque) void;
 
+const allocator = std.heap.c_allocator;
 // ── Types ────────────────────────────────────────────────────────────────────
 
 pub const DbOp = enum(u8) { select_one, select_list, insert, delete, custom_query, custom_query_single };
@@ -908,18 +911,18 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         }
     }
 
-    // Phase 2: Release GIL, do Postgres I/O
-    // Phase 2: Release GIL for I/O (TODO: fix opaque PyThreadState type)
-    // const tstate: ?*anyopaque = @ptrCast(c.PyEval_SaveThread());
+    // Phase 2: Release GIL, do Postgres I/O (true parallel threading)
+    const gil_state = py_gil_save();
 
     const conn = acquireConn() orelse {
+        py_gil_restore(gil_state);
         py.setError("Failed to acquire database connection", .{});
         return null;
     };
 
     const result = execWithParams(conn, sql, param_values[0..param_count], null) orelse {
         releaseConn(conn);
-        // c.PyEval_RestoreThread(@ptrCast(tstate));
+        py_gil_restore(gil_state);
         py.setError("Query failed: {s}", .{sql});
         return null;
     };
@@ -966,8 +969,7 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     releaseConn(conn);
 
     // Phase 3: Reacquire GIL, build Python objects
-    // Phase 3: Build Python objects (GIL still held)
-    // TODO: Release GIL around phases 2 (PyEval_SaveThread/RestoreThread)
+    py_gil_restore(gil_state);
     const py_list = c.PyList_New(@intCast(num_rows)) orelse return null;
 
     for (0..num_rows) |ri| {
