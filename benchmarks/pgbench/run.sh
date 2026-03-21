@@ -48,6 +48,7 @@ run_driver() {
     echo "--- ${LABEL} (concurrency=10, duration=30s) ---"
 
     TMPOUT=$(mktemp)
+    TMPERR=$(mktemp)
     ${PYTHON} ${RUNNER} \
         --pghost="$PGHOST" \
         --pgport="$PGPORT" \
@@ -56,14 +57,15 @@ run_driver() {
         --duration=30 \
         --warmup-time=5 \
         --output-format=json \
-        "$DRIVER" "$QUERY" >"$TMPOUT" 2>/dev/null || true
+        "$DRIVER" "$QUERY" >"$TMPOUT" 2>"$TMPERR" || true
 
     if head -c1 "$TMPOUT" | grep -q '{'; then
         parse_result "$TMPOUT"
     else
         echo "  FAILED"
+        tail -5 "$TMPERR" 2>/dev/null
     fi
-    rm -f "$TMPOUT"
+    rm -f "$TMPOUT" "$TMPERR"
 }
 
 cd /pgbench/_python
