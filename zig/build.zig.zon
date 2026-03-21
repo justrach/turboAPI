@@ -7,8 +7,8 @@
             .hash = "dhi-0.1.0-Fz3bn0-FAwAv-biejuK3wnjN1A9D3F-NYLFa7fIVu7Ei",
         },
         .pg = .{
-            .url = "git+https://github.com/justrach/pg.zig?ref=master#d4507e4f3b87f49b4f3a0f24181d53fc859c99ed",
-            .hash = "pg-0.0.0-Wp_7gSi0BgBWYviCZkqPrsCXixiHoTOTuQQp33gV5rSO",
+            .url = "git+https://github.com/justrach/pg.zig?ref=perf/zero-copy-and-lru-cache#bcf5b69eef25a8a48079cd9c1a7debfb7cba057a",
+            .hash = "pg-0.0.0-Wp_7gbDFBgBYPU_h28EuQi8hgVZLw5AWH6YNuIdY3LP0",
         },
     },
     .paths = .{""},
