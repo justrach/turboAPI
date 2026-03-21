@@ -873,7 +873,7 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
 // ── Raw query API (no HTTP, direct pg.zig from Python) ──────────────────────
 
 const RawCell = struct { start: u32, len: u16, is_null: bool };
-const MAX_RAW_CELLS = 4096;
+const MAX_RAW_CELLS = 32768; // supports up to ~1000 rows * 32 cols
 pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var sql_ptr: [*c]const u8 = null;
     var params_obj: ?*c.PyObject = null;
@@ -941,7 +941,7 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     };
     // Buffer row values as strings while GIL is released
     // Use a flat buffer with offsets to avoid huge struct arrays
-    var flat_buf: [256 * 1024]u8 = undefined; // 256KB for all row data
+    var flat_buf: [2 * 1024 * 1024]u8 = undefined; // 2MB for all row data
     var flat_pos: usize = 0;
 
     var cells: [MAX_RAW_CELLS]RawCell = undefined;
