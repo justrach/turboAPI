@@ -941,13 +941,26 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     };
     // Buffer row values as strings while GIL is released
     // Use a flat buffer with offsets to avoid huge struct arrays
-    var flat_buf: [2 * 1024 * 1024]u8 = undefined; // 2MB for all row data
+    // Buffer row values while GIL is released (heap allocated for large results)
+    const flat_buf = allocator.alloc(u8, 2 * 1024 * 1024) catch {
+        releaseConn(conn);
+        py_gil_restore(gil_state);
+        py.setError("Out of memory for query result buffer", .{});
+        return null;
+    };
+    defer allocator.free(flat_buf);
     var flat_pos: usize = 0;
 
-    var cells: [MAX_RAW_CELLS]RawCell = undefined;
-    var cell_count: usize = 0;
+    const cells = allocator.alloc(RawCell, MAX_RAW_CELLS) catch {
+        releaseConn(conn);
+        py_gil_restore(gil_state);
+        py.setError("Out of memory for cell buffer", .{});
+        return null;
+    };
+    defer allocator.free(cells);
 
     var col_name_ptrs: [32][]const u8 = undefined;
+    var cell_count: usize = 0;
     var num_cols: usize = 0;
     var num_rows: usize = 0;
 
