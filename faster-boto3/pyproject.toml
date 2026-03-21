@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "faster-boto3"
+version = "0.1.0"
+description = "Drop-in boto3 acceleration layer powered by Zig"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    {name = "Rach Pradhan", email = "rach@turboapi.dev"}
+]
+keywords = ["aws", "boto3", "zig", "performance", "s3", "dynamodb"]
+dependencies = [
+    "boto3>=1.35.0",
+    "botocore>=1.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "moto[s3,dynamodb]>=5.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/justrach/turboAPI"
+Repository = "https://github.com/justrach/turboAPI"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["faster_boto3*"]
