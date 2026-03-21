@@ -1,0 +1,29 @@
+# docker-compose.test.yml — run faster-boto3 test suite against LocalStack
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up --build --abort-on-container-exit
+#   make test-docker
+
+services:
+  localstack:
+    image: localstack/localstack:latest
+    environment:
+      - SERVICES=s3,dynamodb
+      - DEFAULT_REGION=us-east-1
+      - EAGER_SERVICE_LOADING=1
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4566/_localstack/health"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    # Share LocalStack's network namespace so localhost:4566 works
+    # (no code changes needed — tests hardcode localhost:4566)
+    network_mode: "service:localstack"
+    depends_on:
+      localstack:
+        condition: service_healthy

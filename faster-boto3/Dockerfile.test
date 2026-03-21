@@ -1,0 +1,44 @@
+# ── Build & test image for faster-boto3 ──────────────────────────────────────
+# Uses Python 3.13 + Zig 0.15.x to build the Zig accelerator extensions,
+# then runs the parity test suite and benchmarks against LocalStack.
+
+FROM python:3.13-slim
+
+# System deps for Zig download + build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl xz-utils ca-certificates python3-dev gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Zig 0.15.2
+ARG ZIG_VERSION=0.15.2
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+        amd64) ZIG_ARCH=x86_64 ;; \
+        arm64) ZIG_ARCH=aarch64 ;; \
+        *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" \
+        | tar -xJ -C /opt && \
+    ln -s /opt/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}/zig /usr/local/bin/zig
+
+WORKDIR /app
+
+# Copy project files
+COPY pyproject.toml build_accel.py ./
+COPY faster_boto3/ faster_boto3/
+COPY zig/ zig/
+
+# Install Python deps
+RUN pip install --no-cache-dir -e ".[dev]" && \
+    pip install --no-cache-dir pytest-xdist
+
+# Build Zig accelerators
+RUN python build_accel.py
+
+# Copy test + benchmark code
+COPY tests/ tests/
+COPY benchmarks/ benchmarks/
+COPY scripts/run-tests.sh /app/scripts/run-tests.sh
+RUN chmod +x /app/scripts/run-tests.sh
+
+ENTRYPOINT ["/app/scripts/run-tests.sh"]
