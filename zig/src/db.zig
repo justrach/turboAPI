@@ -898,6 +898,19 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
             for (0..@min(n, 16)) |i| {
                 const item = c.PyList_GetItem(plist, @intCast(i));
                 if (item == null) continue;
+                // Handle bools specially (Python str(True) = "True", pg.zig needs "true")
+                if (c.Py_IsTrue(item) != 0) {
+                    @memcpy(param_bufs[param_count][0..4], "true");
+                    param_values[param_count] = param_bufs[param_count][0..4];
+                    param_count += 1;
+                    continue;
+                }
+                if (c.Py_IsFalse(item) != 0) {
+                    @memcpy(param_bufs[param_count][0..5], "false");
+                    param_values[param_count] = param_bufs[param_count][0..5];
+                    param_count += 1;
+                    continue;
+                }
                 const str_obj = c.PyObject_Str(item) orelse continue;
                 defer c.Py_DecRef(str_obj);
                 if (c.PyUnicode_AsUTF8(str_obj)) |cs| {
