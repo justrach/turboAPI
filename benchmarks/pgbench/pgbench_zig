@@ -32,7 +32,11 @@ def worker(db, query, query_args, start, duration, timeout_ms):
                 rows += len(result)
             else:
                 rows += 1
-        except Exception:
+        except Exception as e:
+            if queries == 0 and rows == 0:
+                # Log first error to help debug
+                import sys
+                sys.stderr.write(f"[turbopg worker error] {e}\n")
             continue
         req_time = round((time.monotonic() - req_start) * 1000 * 100)
         req_time = min(req_time, len(latency_stats) - 1)
