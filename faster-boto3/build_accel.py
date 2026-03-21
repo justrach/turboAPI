@@ -1,4 +1,4 @@
-"""Build the Zig SigV4 accelerator extension."""
+"""Build the Zig accelerator extensions (SigV4 + HTTP)."""
 
 import shutil
 import subprocess
@@ -7,19 +7,24 @@ import sysconfig
 from pathlib import Path
 
 
+LIBS = {
+    "sigv4_accel": "_sigv4_accel",
+    "http_accel": "_http_accel",
+    "parser_accel": "_parser_accel",
+}
+
+
 def build():
     py_include = sysconfig.get_path("include")
     py_libdir = sysconfig.get_config_var("LIBDIR")
-
     ext_suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
-    target_name = f"_sigv4_accel{ext_suffix}"
 
     zig_dir = Path(__file__).parent / "zig"
     out_dir = Path(__file__).parent / "faster_boto3"
 
-    print("Building SigV4 accelerator...")
+    print("Building Zig accelerators...")
     print(f"  Python include: {py_include}")
-    print(f"  Python libdir: {py_libdir}")
+    print(f"  Python libdir:  {py_libdir}")
 
     cmd = [
         "zig", "build",
@@ -33,17 +38,20 @@ def build():
         print("Build failed!")
         sys.exit(1)
 
-    # Find the built .so/.dylib
     lib_dir = zig_dir / "zig-out" / "lib"
+    installed = 0
     for f in lib_dir.iterdir():
-        if "sigv4_accel" in f.name and (f.suffix == ".so" or f.suffix == ".dylib"):
-            dest = out_dir / target_name
-            shutil.copy2(f, dest)
-            print(f"  Installed: {dest}")
-            return
+        for zig_name, py_name in LIBS.items():
+            if zig_name in f.name and (f.suffix == ".so" or f.suffix == ".dylib"):
+                dest = out_dir / f"{py_name}{ext_suffix}"
+                shutil.copy2(f, dest)
+                print(f"  Installed: {dest}")
+                installed += 1
 
-    print("Could not find built library!")
-    sys.exit(1)
+    if installed < len(LIBS):
+        print(f"Warning: only {installed}/{len(LIBS)} libraries built")
+    else:
+        print(f"  All {installed} accelerators built successfully")
 
 
 if __name__ == "__main__":

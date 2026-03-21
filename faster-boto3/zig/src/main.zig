@@ -89,18 +89,23 @@ var methods = [_]c.PyMethodDef{
     .{ .ml_name = null, .ml_meth = null, .ml_flags = 0, .ml_doc = null },
 };
 
+var module_slots = [_]c.PyModuleDef_Slot{
+    .{ .slot = c.Py_mod_gil, .value = c.Py_MOD_GIL_NOT_USED },
+    .{ .slot = 0, .value = null },
+};
+
 var module_def = c.PyModuleDef{
     .m_base = std.mem.zeroes(c.PyModuleDef_Base),
     .m_name = "_sigv4_accel",
     .m_doc = "Zig-accelerated SigV4 signing for faster-boto3",
-    .m_size = -1,
+    .m_size = 0,
     .m_methods = &methods,
-    .m_slots = null,
+    .m_slots = &module_slots,
     .m_traverse = null,
     .m_clear = null,
     .m_free = null,
 };
 
 pub export fn PyInit__sigv4_accel() ?*c.PyObject {
-    return c.PyModule_Create(&module_def);
+    return c.PyModuleDef_Init(&module_def);
 }

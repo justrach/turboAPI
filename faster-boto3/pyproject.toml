@@ -3,30 +3,48 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "faster-boto3"
+name = "turboboto"
 version = "0.1.0"
-description = "Drop-in boto3 acceleration layer powered by Zig"
+description = "Drop-in boto3 replacement powered by Zig — 1.2x faster S3/DynamoDB, 115x with TurboAPI"
+readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
+license = {text = "MIT"}
 authors = [
     {name = "Rach Pradhan", email = "rach@turboapi.dev"}
 ]
-keywords = ["aws", "boto3", "zig", "performance", "s3", "dynamodb"]
+keywords = ["aws", "boto3", "zig", "performance", "s3", "dynamodb", "faster", "turboapi", "no-gil", "free-threading"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Internet :: WWW/HTTP",
+]
 dependencies = [
     "boto3>=1.35.0",
     "botocore>=1.35.0",
 ]
 
+[project.urls]
+Homepage = "https://turboapi.dev/turboboto"
+Repository = "https://github.com/justrach/turboAPI"
+Documentation = "https://github.com/justrach/turboAPI/tree/faster-boto3"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "moto[s3,dynamodb]>=5.0.0",
+    "python-dateutil>=2.8.0",
 ]
-
-[project.urls]
-Homepage = "https://github.com/justrach/turboAPI"
-Repository = "https://github.com/justrach/turboAPI"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["faster_boto3*"]
+
+[tool.setuptools.package-data]
+faster_boto3 = ["*.so", "*.dylib", "*.pyd"]
