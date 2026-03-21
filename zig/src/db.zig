@@ -868,9 +868,9 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
 
 
 // ── Raw query API (no HTTP, direct pg.zig from Python) ──────────────────────
-// Called as: turbonet._db_query_raw(sql, params_json) -> json_string
-// This bypasses the HTTP server entirely for standalone TurboPG usage.
 
+const RawCell = struct { start: u32, len: u16, is_null: bool };
+const MAX_RAW_CELLS = 4096;
 pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var sql_ptr: [*c]const u8 = null;
     var params_obj: ?*c.PyObject = null;
@@ -883,9 +883,11 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         return null;
     }
 
-    // Extract params directly from Python list
+    // Phase 1: Extract params from Python (GIL held)
     var param_values: [16][]const u8 = undefined;
     var param_count: usize = 0;
+    // We need owned copies since we'll release the GIL
+    var param_bufs: [16][256]u8 = undefined;
 
     if (params_obj) |plist| {
         if (c.PyList_Check(plist) != 0) {
@@ -896,88 +898,143 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
                 const str_obj = c.PyObject_Str(item) orelse continue;
                 defer c.Py_DecRef(str_obj);
                 if (c.PyUnicode_AsUTF8(str_obj)) |cs| {
-                    param_values[param_count] = std.mem.span(cs);
+                    const s = std.mem.span(cs);
+                    const copy_len = @min(s.len, 255);
+                    @memcpy(param_bufs[param_count][0..copy_len], s[0..copy_len]);
+                    param_values[param_count] = param_bufs[param_count][0..copy_len];
                     param_count += 1;
                 }
             }
         }
     }
 
+    // Phase 2: Release GIL, do Postgres I/O
+    // Phase 2: Release GIL for I/O (TODO: fix opaque PyThreadState type)
+    // const tstate: ?*anyopaque = @ptrCast(c.PyEval_SaveThread());
+
     const conn = acquireConn() orelse {
         py.setError("Failed to acquire database connection", .{});
         return null;
     };
-    defer releaseConn(conn);
 
     const result = execWithParams(conn, sql, param_values[0..param_count], null) orelse {
+        releaseConn(conn);
+        // c.PyEval_RestoreThread(@ptrCast(tstate));
         py.setError("Query failed: {s}", .{sql});
         return null;
     };
-    defer result.deinit();
+    // Buffer row values as strings while GIL is released
+    // Use a flat buffer with offsets to avoid huge struct arrays
+    var flat_buf: [256 * 1024]u8 = undefined; // 256KB for all row data
+    var flat_pos: usize = 0;
+
+    var cells: [MAX_RAW_CELLS]RawCell = undefined;
+    var cell_count: usize = 0;
+
+    var col_name_ptrs: [32][]const u8 = undefined;
+    var num_cols: usize = 0;
+    var num_rows: usize = 0;
 
     const col_names = result.column_names;
-
-    // Build Python list of dicts directly (no JSON)
-    const py_list = c.PyList_New(0) orelse return null;
+    num_cols = @min(col_names.len, 32);
+    for (0..num_cols) |ci| {
+        col_name_ptrs[ci] = col_names[ci];
+    }
 
     while (result.next() catch null) |row| {
+        if (cell_count + num_cols > MAX_RAW_CELLS) break;
+        for (0..num_cols) |ci| {
+            const value = row.values[ci];
+            if (value.is_null) {
+                cells[cell_count] = .{ .start = 0, .len = 0, .is_null = true };
+            } else {
+                const remaining = flat_buf[flat_pos..];
+                if (remaining.len < 8192) break;
+                const val_len = row.writeJsonValue(ci, remaining[0..8192]);
+                cells[cell_count] = .{
+                    .start = @intCast(flat_pos),
+                    .len = @intCast(val_len),
+                    .is_null = false,
+                };
+                flat_pos += val_len;
+            }
+            cell_count += 1;
+        }
+        num_rows += 1;
+    }
+    result.deinit();
+    releaseConn(conn);
+
+    // Phase 3: Reacquire GIL, build Python objects
+    // Phase 3: Build Python objects (GIL still held)
+    // TODO: Release GIL around phases 2 (PyEval_SaveThread/RestoreThread)
+    const py_list = c.PyList_New(@intCast(num_rows)) orelse return null;
+
+    for (0..num_rows) |ri| {
         const py_dict = c.PyDict_New() orelse {
             c.Py_DecRef(py_list);
             return null;
         };
 
-        for (col_names, 0..) |col_name, i| {
-            const value = row.values[i];
-            var py_val: *c.PyObject = undefined;
-
-            const py_key = c.PyUnicode_FromStringAndSize(@ptrCast(col_name.ptr), @intCast(col_name.len)) orelse {
+        for (0..num_cols) |ci| {
+            const py_key = c.PyUnicode_FromStringAndSize(
+                @ptrCast(col_name_ptrs[ci].ptr),
+                @intCast(col_name_ptrs[ci].len),
+            ) orelse {
                 c.Py_DecRef(py_dict);
                 c.Py_DecRef(py_list);
                 return null;
             };
 
-            if (value.is_null) {
+            var py_val: *c.PyObject = undefined;
+
+            const cell_idx = ri * num_cols + ci;
+            const cell = cells[cell_idx];
+
+            if (cell.is_null) {
                 py_val = py.pyNone();
             } else {
-                var val_buf: [8192]u8 = undefined;
-                const val_len = row.writeJsonValue(i, &val_buf);
-                if (val_len == 0) {
+                const val_str = flat_buf[cell.start..][0..cell.len];
+                if (val_str.len == 0) {
                     py_val = py.pyNone();
+                } else if (val_str[0] == '"' and val_str[val_str.len - 1] == '"') {
+                    py_val = c.PyUnicode_FromStringAndSize(
+                        @ptrCast(val_str.ptr + 1),
+                        @intCast(val_str.len - 2),
+                    ) orelse {
+                        c.Py_DecRef(py_key);
+                        c.Py_DecRef(py_dict);
+                        c.Py_DecRef(py_list);
+                        return null;
+                    };
+                } else if (val_str.len == 4 and std.mem.eql(u8, val_str, "true")) {
+                    py_val = py.pyTrue();
+                } else if (val_str.len == 5 and std.mem.eql(u8, val_str, "false")) {
+                    py_val = py.pyFalse();
                 } else {
-                    const val_str = val_buf[0..val_len];
-                    if (val_str[0] == '"' and val_str[val_str.len - 1] == '"') {
-                        py_val = c.PyUnicode_FromStringAndSize(@ptrCast(val_str.ptr + 1), @intCast(val_str.len - 2)) orelse {
-                            c.Py_DecRef(py_key);
-                            c.Py_DecRef(py_dict);
-                            c.Py_DecRef(py_list);
-                            return null;
-                        };
-                    } else if (val_str.len == 4 and std.mem.eql(u8, val_str, "true")) {
-                        py_val = py.pyTrue();
-                    } else if (val_str.len == 5 and std.mem.eql(u8, val_str, "false")) {
-                        py_val = py.pyFalse();
-                    } else {
-                        const int_val = std.fmt.parseInt(i64, val_str, 10) catch {
-                            const float_val = std.fmt.parseFloat(f64, val_str) catch {
-                                py_val = c.PyUnicode_FromStringAndSize(@ptrCast(val_str.ptr), @intCast(val_str.len)) orelse {
-                                    c.Py_DecRef(py_key);
-                                    c.Py_DecRef(py_dict);
-                                    c.Py_DecRef(py_list);
-                                    return null;
-                                };
-                                _ = c.PyDict_SetItem(py_dict, py_key, py_val);
-                                c.Py_DecRef(py_val);
+                    const int_val = std.fmt.parseInt(i64, val_str, 10) catch {
+                        const float_val = std.fmt.parseFloat(f64, val_str) catch {
+                            py_val = c.PyUnicode_FromStringAndSize(
+                                @ptrCast(val_str.ptr),
+                                @intCast(val_str.len),
+                            ) orelse {
                                 c.Py_DecRef(py_key);
-                                continue;
+                                c.Py_DecRef(py_dict);
+                                c.Py_DecRef(py_list);
+                                return null;
                             };
-                            py_val = c.PyFloat_FromDouble(float_val);
                             _ = c.PyDict_SetItem(py_dict, py_key, py_val);
                             c.Py_DecRef(py_val);
                             c.Py_DecRef(py_key);
                             continue;
                         };
-                        py_val = c.PyLong_FromLongLong(int_val);
-                    }
+                        py_val = c.PyFloat_FromDouble(float_val);
+                        _ = c.PyDict_SetItem(py_dict, py_key, py_val);
+                        c.Py_DecRef(py_val);
+                        c.Py_DecRef(py_key);
+                        continue;
+                    };
+                    py_val = c.PyLong_FromLongLong(int_val);
                 }
             }
 
@@ -986,8 +1043,8 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
             c.Py_DecRef(py_key);
         }
 
-        _ = c.PyList_Append(py_list, py_dict);
-        c.Py_DecRef(py_dict);
+        // Use SET_ITEM (steals ref) since we pre-allocated the list
+        c.PyList_SET_ITEM(py_list, @intCast(ri), py_dict);
     }
 
     return py_list;
