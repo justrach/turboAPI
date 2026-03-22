@@ -261,7 +261,7 @@ def bench_e2e_async(n=50_000):
 
     asyncio.run(run())
     return results
-
+    all_results.extend(bench_cache_honesty(n_parse))
 
 # ── 5. memtier_benchmark ─────────────────────────────────────────────────────
 
@@ -343,3 +343,53 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ── 6. Cache Honesty Test ────────────────────────────────────────────────────
+
+def bench_cache_honesty(n=200_000):
+    heading("Cache Honesty (unique vs repeated data)")
+    results = []
+    import random, string
+
+    # Generate unique payloads
+    random_bulks = [f'${len(s)}\r\n{s}\r\n'.encode()
+        for s in (''.join(random.choices(string.ascii_letters, k=random.randint(5, 50))) for _ in range(n))]
+    random_args = [['SET', f'k_{random.randint(0,999999)}', f'v_{random.randint(0,999999)}'] for _ in range(n)]
+    static_bulk = b'$11\r\nhello world\r\n'
+    static_args = ['SET', 'mykey', 'myvalue']
+
+    try:
+        from faster_redis._redis_accel import parse_resp, pack_command
+
+        # Parse: repeated vs unique
+        _, us_static = bench(lambda: parse_resp(static_bulk), n)
+        t = time.perf_counter()
+        for i in range(n):
+            parse_resp(random_bulks[i])
+        us_random = (time.perf_counter() - t) / n * 1e6
+        ratio_parse = us_random / us_static
+        print(f"  Zig parse repeated: {us_static:.3f}us")
+        print(f"  Zig parse UNIQUE:   {us_random:.3f}us  (ratio: {ratio_parse:.2f}x)")
+        results.append(Result("cache_test parse", 0, us_random, f"ratio={ratio_parse:.2f}"))
+
+        # Pack: repeated vs unique
+        _, us_static = bench(lambda: pack_command(static_args), n)
+        t = time.perf_counter()
+        for i in range(n):
+            pack_command(random_args[i])
+        us_random = (time.perf_counter() - t) / n * 1e6
+        ratio_pack = us_random / us_static
+        print(f"  Zig pack repeated:  {us_static:.3f}us")
+        print(f"  Zig pack UNIQUE:    {us_random:.3f}us  (ratio: {ratio_pack:.2f}x)")
+        results.append(Result("cache_test pack", 0, us_random, f"ratio={ratio_pack:.2f}"))
+
+        if ratio_parse < 1.5 and ratio_pack < 1.5:
+            print("  VERDICT: No application caching detected (CPU cache effects only)")
+        else:
+            print("  WARNING: Significant difference — investigate caching")
+
+    except ImportError:
+        print("  Zig parser not built")
+
+    return results
