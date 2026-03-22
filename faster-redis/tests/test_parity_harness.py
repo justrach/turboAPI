@@ -9,7 +9,13 @@ ROOT = os.path.dirname(os.path.dirname(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from faster_redis import ParityScenario, compare_scenario, core_parity_scenarios, run_parity_matrix
+from faster_redis import (
+    ParityScenario,
+    compare_scenario,
+    core_parity_scenarios,
+    non_core_parity_scenarios,
+    run_parity_matrix,
+)
 
 
 class ParityHarnessTests(unittest.TestCase):
@@ -88,6 +94,15 @@ class ParityHarnessTests(unittest.TestCase):
             shadow_db=self.shadow_db,
         )
         self.assertEqual(report["summary"]["total"], len(core_parity_scenarios()))
+        self.assertEqual(report["summary"]["mismatches"], 0)
+
+    def test_non_core_parity_scenarios_run_clean(self):
+        report = run_parity_matrix(
+            non_core_parity_scenarios(),
+            db=self.primary_db,
+            shadow_db=self.shadow_db,
+        )
+        self.assertEqual(report["summary"]["total"], len(non_core_parity_scenarios()))
         self.assertEqual(report["summary"]["mismatches"], 0)
 
 
