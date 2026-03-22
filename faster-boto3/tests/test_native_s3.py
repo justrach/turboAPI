@@ -109,6 +109,13 @@ def test_native_missing_key_errors(native_s3):
     assert exc.value.response["Error"]["Key"] == "does-not-exist"
 
 
+def test_native_large_get_object(native_s3):
+    data = os.urandom(8 * 1024 * 1024)
+    native_s3.put_object(Bucket=BUCKET, Key="large-get", Body=data)
+    body = native_s3.get_object(Bucket=BUCKET, Key="large-get")["Body"].read()
+    assert body == data
+
+
 def test_native_file_upload_uses_fd_path(native_s3):
     import faster_boto3.native_s3 as native_mod
 

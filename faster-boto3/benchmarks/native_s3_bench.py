@@ -38,6 +38,7 @@ MODES = ("legacy", "native_shadow", "native", "raw_native")
 OPERATIONS = (
     "head_object",
     "get_object_1k",
+    "get_object_8m",
     "put_object_1k",
     "put_object_file_1m",
     "put_object_file_8m",
@@ -59,6 +60,7 @@ def setup_bucket():
 
     s3.put_object(Bucket=BUCKET, Key="bench/head.txt", Body=b"head-body")
     s3.put_object(Bucket=BUCKET, Key="bench/get-1k.bin", Body=os.urandom(1024))
+    s3.put_object(Bucket=BUCKET, Key="bench/get-8m.bin", Body=os.urandom(8 * 1024 * 1024))
     s3.put_object(Bucket=BUCKET, Key="bench/copy-source.bin", Body=os.urandom(4096))
 
     for i in range(50):
@@ -121,6 +123,7 @@ def _raw_phase_payload(s3) -> dict:
     timings = {
         "head_object": {"prep": [], "transport": [], "parse": [], "total": []},
         "get_object_1k": {"prep": [], "transport": [], "parse": [], "total": []},
+        "get_object_8m": {"prep": [], "transport": [], "parse": [], "total": []},
         "put_object_1k": {"prep": [], "transport": [], "parse": [], "total": []},
         "put_object_file_1m": {"prep": [], "transport": [], "parse": [], "total": []},
         "put_object_file_8m": {"prep": [], "transport": [], "parse": [], "total": []},
@@ -129,9 +132,6 @@ def _raw_phase_payload(s3) -> dict:
     }
 
     tmp_path = None
-    tmp_path_large = None
-    tmp_path_large = None
-    tmp_path_large = None
     tmp_path_large = None
 
     def measure(name: str, prepare, transport, parse):
@@ -171,6 +171,12 @@ def _raw_phase_payload(s3) -> dict:
 
     def get_prepare():
         path, query, url = s3._build_url(BUCKET, "bench/get-1k.bin")
+        payload_hash = native_mod._sigv4_accel_module().sha256_hex(b"")
+        headers = s3._signed_headers("GET", path, query, payload_hash, body=None)
+        return {"path": path, "query": query, "url": url, "headers": headers}
+
+    def get_large_prepare():
+        path, query, url = s3._build_url(BUCKET, "bench/get-8m.bin")
         payload_hash = native_mod._sigv4_accel_module().sha256_hex(b"")
         headers = s3._signed_headers("GET", path, query, payload_hash, body=None)
         return {"path": path, "query": query, "url": url, "headers": headers}
@@ -299,6 +305,7 @@ def _raw_phase_payload(s3) -> dict:
     scenarios = {
         "head_object": (head_prepare, head_transport, head_parse),
         "get_object_1k": (get_prepare, get_transport, get_parse),
+        "get_object_8m": (get_large_prepare, get_transport, get_parse),
         "put_object_1k": (put_bytes_prepare, put_transport, put_parse),
         "put_object_file_1m": (put_file_prepare, put_transport, put_parse),
         "put_object_file_8m": (put_file_large_prepare, multipart_transport, multipart_parse),
@@ -370,6 +377,9 @@ def _worker_payload(mode: str, iterations: int, warmup: int) -> dict:
     def op_get_object_1k():
         invoke("get_object", "_native_get_object", Bucket=BUCKET, Key="bench/get-1k.bin")["Body"].read()
 
+    def op_get_object_8m():
+        invoke("get_object", "_native_get_object", Bucket=BUCKET, Key="bench/get-8m.bin")["Body"].read()
+
     def op_put_object_1k():
         invoke("put_object", "_native_put_object", Bucket=BUCKET, Key="bench/put-1k.bin", Body=b"x" * 1024)
 
@@ -408,6 +418,7 @@ def _worker_payload(mode: str, iterations: int, warmup: int) -> dict:
     ops = {
         "head_object": op_head_object,
         "get_object_1k": op_get_object_1k,
+        "get_object_8m": op_get_object_8m,
         "put_object_1k": op_put_object_1k,
         "put_object_file_1m": op_put_object_file_1m,
         "put_object_file_8m": op_put_object_file_8m,

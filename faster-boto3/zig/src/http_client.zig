@@ -26,6 +26,22 @@ pub const HttpError = error{
     ReadFailed,
 };
 
+fn readResponseBody(
+    allocator: Allocator,
+    response: anytype,
+) HttpError![]u8 {
+    const maybe_len = response.head.content_length;
+    var out = if (maybe_len) |len|
+        std.Io.Writer.Allocating.initCapacity(allocator, @intCast(len)) catch return HttpError.OutOfMemory
+    else
+        std.Io.Writer.Allocating.init(allocator);
+    errdefer if (out.toOwnedSlice()) |s| allocator.free(s) else |_| {};
+
+    var reader = response.reader(&.{});
+    _ = reader.streamRemaining(&out.writer) catch return HttpError.RequestFailed;
+    return out.toOwnedSlice() catch return HttpError.OutOfMemory;
+}
+
 /// Single HTTP request using nanobrew's pattern:
 ///   client.request() → sendBody/sendBodiless → receiveHead → reader.streamRemaining
 pub fn doRequest(
@@ -76,16 +92,9 @@ pub fn doRequest(
     const status_int: u16 = @intFromEnum(response.head.status);
 
     // Stream response body into allocated buffer
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    var reader = response.reader(&.{});
-    _ = reader.streamRemaining(&out.writer) catch {
-        if (out.toOwnedSlice()) |s| allocator.free(s) else |_| {}
+    const resp_body = readResponseBody(allocator, &response) catch |err| {
         req.deinit();
-        return HttpError.RequestFailed;
-    };
-    const resp_body = out.toOwnedSlice() catch {
-        req.deinit();
-        return HttpError.OutOfMemory;
+        return err;
     };
 
     // Extract response headers
@@ -184,16 +193,9 @@ pub fn doRequestFromFd(
 
     const status_int: u16 = @intFromEnum(response.head.status);
 
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    var reader = response.reader(&.{});
-    _ = reader.streamRemaining(&out.writer) catch {
-        if (out.toOwnedSlice()) |s| allocator.free(s) else |_| {}
+    const resp_body = readResponseBody(allocator, &response) catch |err| {
         req.deinit();
-        return HttpError.RequestFailed;
-    };
-    const resp_body = out.toOwnedSlice() catch {
-        req.deinit();
-        return HttpError.OutOfMemory;
+        return err;
     };
 
     var hdr_out: std.ArrayList(u8) = .empty;
