@@ -132,6 +132,18 @@ def core_parity_scenarios():
             tags=("stream", "group"),
             normalize=normalize_stream_entries,
         ),
+        ParityScenario(
+            "xgroup-manage",
+            lambda c: (
+                c.flushdb(),
+                c.xadd("stream", {"field": "value"}),
+                c.xgroup_create("stream", "g1", id="0", mkstream=True),
+                c.xgroup_createconsumer("stream", "g1", "c1"),
+                c.xgroup_delconsumer("stream", "g1", "c1"),
+                c.xgroup_destroy("stream", "g1"),
+            )[-3:],
+            tags=("stream", "group"),
+        ),
     ]
 
 

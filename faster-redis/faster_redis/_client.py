@@ -142,6 +142,8 @@ class Redis:
             return _parse_client_list(result)
         if key == "XGROUP CREATE":
             return True if result == "OK" else result
+        if key == "XGROUP DESTROY":
+            return bool(result) if result is not None else None
         if key in {"EXPIRE", "HEXISTS", "SISMEMBER", "SETNX"}:
             return bool(result) if result is not None else None
         if key == "ZRANGE" and any(str(part).upper() == "WITHSCORES" for part in args[1:]):
@@ -301,6 +303,11 @@ class Redis:
         if entriesread is not None:
             args.extend(['ENTRIESREAD', entriesread])
         return self._exec(*args)
+    def xgroup_destroy(self, name, groupname): return self._exec('XGROUP', 'DESTROY', name, groupname)
+    def xgroup_createconsumer(self, name, groupname, consumername):
+        return self._exec('XGROUP', 'CREATECONSUMER', name, groupname, consumername)
+    def xgroup_delconsumer(self, name, groupname, consumername):
+        return self._exec('XGROUP', 'DELCONSUMER', name, groupname, consumername)
 
     def xreadgroup(self, groupname, consumername, streams, count=None, block=None, noack=False):
         args = ['XREADGROUP', 'GROUP', groupname, consumername]
