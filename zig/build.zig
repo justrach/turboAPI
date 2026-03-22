@@ -106,6 +106,10 @@ pub fn build(b: *std.Build) void {
     tests.addIncludePath(.{ .cwd_relative = include_path });
     tests.addLibraryPath(.{ .cwd_relative = lib_path });
     tests.linkSystemLibrary(py_lib_name);
+    tests.addCSourceFile(.{
+        .file = b.path("src/py_gil_shim.c"),
+        .flags = &.{ "-I", include_path },
+    });
 
     if (is_free_threaded) {
         tests.addCSourceFile(.{
