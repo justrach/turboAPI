@@ -41,7 +41,7 @@ class ClientFallbackTests(unittest.TestCase):
             pipe.set("k", "v")
             pipe.object_refcount("k")
             results = pipe.execute()
-        self.assertEqual(results[0], "OK")
+        self.assertEqual(results[0], True)
         self.assertIsInstance(results[1], int)
 
     def test_fallback_rejects_kwargs(self):
@@ -55,6 +55,17 @@ class ClientFallbackTests(unittest.TestCase):
     def test_execute_command_matches_raw_multiword_command(self):
         actual = self.faster.execute_command("CLIENT", "ID")
         self.assertIsInstance(actual, int)
+
+    def test_set_and_mset_match_redis_py_semantics(self):
+        self.assertIs(self.faster.set("set-key", "1"), True)
+        self.assertIs(self.faster.mset({"a": "1", "b": "2"}), True)
+
+    def test_pipeline_normalizes_ok_responses(self):
+        with self.faster.pipeline() as pipe:
+            pipe.set("p", "1")
+            pipe.get("p")
+            results = pipe.execute()
+        self.assertEqual(results, [True, "1"])
 
 
 if __name__ == "__main__":

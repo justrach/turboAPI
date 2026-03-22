@@ -58,7 +58,7 @@ class NativeShadowTests(unittest.TestCase):
         finally:
             client.close()
 
-        self.assertTrue(any(item["operation"] == "set" for item in mismatches))
+        self.assertEqual(mismatches, [])
 
     def test_pipeline_compares_results(self):
         mismatches = []
@@ -76,7 +76,7 @@ class NativeShadowTests(unittest.TestCase):
             client.close()
 
         self.assertEqual(results, [True, "1"])
-        self.assertTrue(any(item["operation"] == "pipeline.execute" for item in mismatches))
+        self.assertEqual(mismatches, [])
 
     def test_strict_mode_raises_on_mismatch(self):
         client = native_shadow(
@@ -85,8 +85,7 @@ class NativeShadowTests(unittest.TestCase):
             strict=True,
         )
         try:
-            with self.assertRaises(NativeShadowMismatch):
-                client.set("strict-key", "1")
+            self.assertIs(client.set("strict-key", "1"), True)
         finally:
             client.close()
 
@@ -100,16 +99,28 @@ class NativeShadowTests(unittest.TestCase):
         self.assertIsNone(report["primary_result"])
         self.assertIsNone(report["native_result"])
 
-    def test_native_compare_reports_result_mismatch(self):
+    def test_native_compare_matches_set_after_response_normalization(self):
         report = native_compare(
             lambda client: client.set("cmp-key", "1"),
             db=self.primary_db,
             shadow_db=self.shadow_db,
         )
-        self.assertFalse(report["match"])
-        self.assertEqual(report["kind"], "result")
+        self.assertTrue(report["match"])
+        self.assertIsNone(report["kind"])
         self.assertEqual(report["primary_result"], True)
-        self.assertEqual(report["native_result"], "OK")
+        self.assertEqual(report["native_result"], True)
+
+    def test_strict_mode_still_raises_on_real_mismatch(self):
+        client = native_shadow(
+            db=self.primary_db,
+            shadow_db=self.shadow_db,
+            strict=True,
+        )
+        try:
+            with self.assertRaises(NativeShadowMismatch):
+                client.client_list(_type="normal")
+        finally:
+            client.close()
 
 
 if __name__ == "__main__":
