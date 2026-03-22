@@ -319,6 +319,18 @@ That model points at the same practical conclusion as the benchmarks:
 - if we halve the current list-specific parse cost, `ListObjectsV2` projects to
   about `1088 RPS`
 
+There is also an explicit path map in
+[benchmarks/native_s3_path_map.py](benchmarks/native_s3_path_map.py). That file
+lists the exact request stages for:
+
+- `FastAPI + boto3`
+- `TurboAPI + faster-boto3`
+- `TurboAPI + native-ffi` for `get`, `head`, and `list`
+
+The point is to make optimization targets concrete. The fastest-path question is
+no longer “where is overhead in general?” but “which named stage do we remove or
+shrink next?”
+
 ## What Gets Checked
 
 For each migrated operation, store:
