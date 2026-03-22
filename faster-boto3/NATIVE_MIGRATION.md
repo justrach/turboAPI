@@ -331,6 +331,22 @@ The point is to make optimization targets concrete. The fastest-path question is
 no longer “where is overhead in general?” but “which named stage do we remove or
 shrink next?”
 
+There is also a small optimizer in
+[benchmarks/native_s3_linear_opt.py](benchmarks/native_s3_linear_opt.py). It
+uses ridge-regularized least squares on the trusted benchmark snapshots to fit a
+small stage-cost model and then chooses the cheapest currently-measured path per
+operation.
+
+Current recommendation:
+
+- `HeadObject` -> `turbo_native_ffi`
+- `GetObject` -> `turbo_faster_boto3`
+- `ListObjectsV2` -> `turbo_faster_boto3`
+
+That recommendation is also checked in as
+[benchmarks/native_s3_best_path_policy.json](benchmarks/native_s3_best_path_policy.json)
+so the current “best path” is explicit.
+
 ## What Gets Checked
 
 For each migrated operation, store:

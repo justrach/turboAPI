@@ -1,0 +1,13 @@
+{
+  "source": "benchmarks/native_s3_linear_opt.py",
+  "notes": [
+    "Policy is derived from current trusted benchmark snapshots, not from hypothetical fits alone.",
+    "This is a planning artifact for the benchmark path, not a production router."
+  ],
+  "best_mode_per_op": {
+    "get_1k": "turbo_faster_boto3",
+    "get_10k": "turbo_faster_boto3",
+    "head": "turbo_native_ffi",
+    "list_20": "turbo_faster_boto3"
+  }
+}
