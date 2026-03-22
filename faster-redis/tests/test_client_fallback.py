@@ -78,6 +78,21 @@ class ClientFallbackTests(unittest.TestCase):
         self.assertIsInstance(rows[0], dict)
         self.assertIn("id", rows[0])
 
+    def test_geoadd_and_geopos_match_expected_shapes(self):
+        self.assertEqual(self.faster.geoadd("geo", [-122.27652, 37.805186, "station:1"]), 1)
+        pos = self.faster.geopos("geo", "station:1")
+        self.assertEqual(len(pos), 1)
+        self.assertIsInstance(pos[0], tuple)
+        self.assertEqual(len(pos[0]), 2)
+
+    def test_zrange_supports_desc_and_byscore(self):
+        self.faster.zadd("z", {"a": 1, "b": 2, "c": 3})
+        self.assertEqual(self.faster.zrange("z", 0, 1, desc=True), ["c", "b"])
+        self.assertEqual(
+            self.faster.zrange("z", 1, 3, byscore=True, withscores=True),
+            [("a", 1.0), ("b", 2.0), ("c", 3.0)],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
