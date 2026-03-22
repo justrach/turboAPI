@@ -108,6 +108,12 @@ class ClientFallbackTests(unittest.TestCase):
             [["stream", [(entry_id, {"field": "value"})]]],
         )
 
+    def test_object_explicit_api_covers_more_subcommands(self):
+        self.faster.set("obj", "v")
+        self.assertEqual(self.faster.object("ENCODING", "obj"), "embstr")
+        self.assertEqual(self.faster.object("REFCOUNT", "obj"), 1)
+        self.assertIsInstance(self.faster.object("IDLETIME", "obj"), int)
+
 
 if __name__ == "__main__":
     unittest.main()

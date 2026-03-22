@@ -300,6 +300,11 @@ class Redis:
     def echo(self, msg): return self._exec('ECHO', msg)
     def time(self): return self._exec('TIME')
     def config_get(self, pattern="*"): return self._exec('CONFIG', 'GET', pattern)
+    def object(self, infotype, key):
+        return self._exec('OBJECT', infotype, key)
+    def object_encoding(self, key): return self.object('ENCODING', key)
+    def object_refcount(self, key): return self.object('REFCOUNT', key)
+    def object_idletime(self, key): return self.object('IDLETIME', key)
 
     # -- Pipeline ----------------------------------------------------------
     def pipeline(self, transaction=False):
