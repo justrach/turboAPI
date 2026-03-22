@@ -124,12 +124,11 @@ def main():
 
     query = querydata["query"]
     query_args = querydata.get("args", [])
+    setup = querydata.get("setup")
+    teardown = querydata.get("teardown")
 
     if query.startswith("COPY ") or (query_args and isinstance(query_args[0], dict)):
         sys.exit(3)
-
-    # Convert $1, $2 params to match pg.zig format (already uses $1 style)
-    # query_args are the actual values to pass
 
     conn_str = f"postgresql://{args.pguser}@{args.pghost}:{args.pgport}/postgres"
 
@@ -139,6 +138,13 @@ def main():
 
     from turbopg import Database
     db = Database(conn_str, pool_size=16)
+
+    # Run setup query if present (create tables etc)
+    if setup:
+        try:
+            db.query(setup, [])
+        except Exception as e:
+            sys.stderr.write(f"[setup] {e}\n")
 
     # Warmup pool
     for _ in range(3):
@@ -153,6 +159,15 @@ def main():
     timeout_ms = args.timeout * 1000
     data = run_bench(db, query, query_args, args.concurrency, args.duration, args.warmup_time, timeout_ms)
 
+    # Run teardown if present
+    if teardown:
+        old_stdout = sys.stdout
+        sys.stdout = sys.stderr
+        try:
+            db.query(teardown, [])
+        except Exception:
+            pass
+        sys.stdout = old_stdout
     print(json.dumps(data))
 
 
