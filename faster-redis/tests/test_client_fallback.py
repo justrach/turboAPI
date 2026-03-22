@@ -93,6 +93,21 @@ class ClientFallbackTests(unittest.TestCase):
             [("a", 1.0), ("b", 2.0), ("c", 3.0)],
         )
 
+    def test_config_get_returns_dict(self):
+        result = self.faster.config_get("timeout")
+        self.assertIsInstance(result, dict)
+        self.assertIn("timeout", result)
+
+    def test_stream_commands_match_expected_shapes(self):
+        entry_id = self.faster.xadd("stream", {"field": "value"})
+        self.assertIsInstance(entry_id, str)
+        self.assertEqual(self.faster.xrange("stream"), [(entry_id, {"field": "value"})])
+        self.assertIs(self.faster.xgroup_create("stream", "g1", id="0", mkstream=True), True)
+        self.assertEqual(
+            self.faster.xreadgroup("g1", "c1", {"stream": ">"}, count=1),
+            [["stream", [(entry_id, {"field": "value"})]]],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

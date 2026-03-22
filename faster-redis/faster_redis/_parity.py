@@ -59,6 +59,7 @@ def core_parity_scenarios():
         ParityScenario("exists", lambda c: (c.set("e", "1"), c.exists("e"))[-1], tags=("write", "read")),
         ParityScenario("hgetall", lambda c: (c.hset("h", mapping={"x": "1", "y": "2"}), c.hgetall("h"))[-1], tags=("hash",)),
         ParityScenario("client-id", lambda c: isinstance(c.client_id(), int), tags=("server",)),
+        ParityScenario("config-get", lambda c: c.config_get("timeout"), tags=("server",)),
         ParityScenario(
             "zrange-withscores",
             lambda c: (c.flushdb(), c.zadd("z", {"a": 1.5, "b": 2.0}), c.zrange("z", 0, -1, withscores=True))[-1],
@@ -88,5 +89,20 @@ def core_parity_scenarios():
             "pipeline-transaction",
             lambda c: (lambda p: [p.set("tx", "1"), p.get("tx"), p.execute()][-1])(c.pipeline(transaction=True)),
             tags=("pipeline", "transaction"),
+        ),
+        ParityScenario(
+            "xrange",
+            lambda c: (c.flushdb(), c.xadd("stream", {"field": "value"}), c.xrange("stream"))[-1],
+            tags=("stream",),
+        ),
+        ParityScenario(
+            "xgroup-read",
+            lambda c: (
+                c.flushdb(),
+                c.xadd("stream", {"field": "value"}),
+                c.xgroup_create("stream", "g1", id="0", mkstream=True),
+                c.xreadgroup("g1", "c1", {"stream": ">"}, count=1),
+            )[-1],
+            tags=("stream", "group"),
         ),
     ]
