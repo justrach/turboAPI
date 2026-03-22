@@ -163,14 +163,16 @@ than the older read-and-hash approach.
 - The current native path is materially faster than legacy on the implemented
   S3 operations, but LocalStack transport latency still dominates total wall
   time.
-- Public native S3 coverage is now 26 operations: `CreateBucket`,
+- Public native S3 coverage is now 29 operations: `CreateBucket`,
   `DeleteBucket`, `HeadBucket`, `ListBuckets`, `GetBucketLocation`,
   `GetBucketTagging`, `PutBucketTagging`, `DeleteBucketTagging`,
-  `ListObjects`, `HeadObject`, `GetObject`, `GetObjectTagging`,
-  `PutObject`, `PutObjectTagging`, `DeleteObject`, `DeleteObjectTagging`,
-  `DeleteObjects`, `CopyObject`, `CreateMultipartUpload`, `UploadPart`,
-  `UploadPartCopy`, `CompleteMultipartUpload`, `AbortMultipartUpload`,
-  `ListParts`, and `ListMultipartUploads`.
+  `GetBucketVersioning`, `PutBucketVersioning`, `ListObjects`,
+  `ListObjectsV2`, `ListObjectVersions`, `HeadObject`, `GetObject`,
+  `GetObjectTagging`, `PutObject`, `PutObjectTagging`, `DeleteObject`,
+  `DeleteObjectTagging`, `DeleteObjects`, `CopyObject`,
+  `CreateMultipartUpload`, `UploadPart`, `UploadPartCopy`,
+  `CompleteMultipartUpload`, `AbortMultipartUpload`, `ListParts`, and
+  `ListMultipartUploads`.
 - `AbortMultipartUpload` now returns cleanly on the native transport after the
   no-body response handling fix in the Zig HTTP client.
 - The larger upload win is now coming from the native request path plus the

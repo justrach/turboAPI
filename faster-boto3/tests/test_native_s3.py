@@ -88,6 +88,24 @@ def test_native_bucket_location_and_tagging(native_s3):
     assert deleted["ResponseMetadata"]["HTTPStatusCode"] == 204
 
 
+def test_native_bucket_versioning_and_list_object_versions(native_s3):
+    put = native_s3.put_bucket_versioning(
+        Bucket=BUCKET,
+        VersioningConfiguration={"Status": "Enabled"},
+    )
+    assert put["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+    versioning = native_s3.get_bucket_versioning(Bucket=BUCKET)
+    assert versioning["Status"] == "Enabled"
+
+    native_s3.put_object(Bucket=BUCKET, Key="versioned-object", Body=b"v1")
+    native_s3.put_object(Bucket=BUCKET, Key="versioned-object", Body=b"v2")
+
+    versions = native_s3.list_object_versions(Bucket=BUCKET, Prefix="versioned-object")
+    version_keys = [item["Key"] for item in versions["Versions"]]
+    assert "versioned-object" in version_keys
+
+
 def test_native_head_and_get(native_s3):
     head = native_s3.head_object(Bucket=BUCKET, Key="hello.txt")
     body = native_s3.get_object(Bucket=BUCKET, Key="hello.txt")["Body"].read()

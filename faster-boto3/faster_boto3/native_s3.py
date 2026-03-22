@@ -243,6 +243,31 @@ class NativeS3Client:
             return self._fallback.delete_bucket_tagging(Bucket=Bucket)
         return self._run_mode("delete_bucket_tagging", native, fallback)
 
+    def get_bucket_versioning(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.get_bucket_versioning(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_get_bucket_versioning(Bucket=Bucket)
+        def fallback():
+            return self._fallback.get_bucket_versioning(Bucket=Bucket)
+        return self._run_mode("get_bucket_versioning", native, fallback)
+
+    def put_bucket_versioning(self, *, Bucket, VersioningConfiguration, **kwargs):
+        if kwargs:
+            return self._fallback.put_bucket_versioning(
+                Bucket=Bucket,
+                VersioningConfiguration=VersioningConfiguration,
+                **kwargs,
+            )
+        def native():
+            return self._native_put_bucket_versioning(Bucket=Bucket, VersioningConfiguration=VersioningConfiguration)
+        def fallback():
+            return self._fallback.put_bucket_versioning(
+                Bucket=Bucket,
+                VersioningConfiguration=VersioningConfiguration,
+            )
+        return self._run_mode("put_bucket_versioning", native, fallback)
+
     def list_objects(self, *, Bucket, Prefix=None, Marker=None, MaxKeys=None, Delimiter=None, **kwargs):
         if kwargs:
             return self._fallback.list_objects(
@@ -273,6 +298,41 @@ class NativeS3Client:
                 fallback_kwargs["Delimiter"] = Delimiter
             return self._fallback.list_objects(**fallback_kwargs)
         return self._run_mode("list_objects", native, fallback)
+
+    def list_object_versions(self, *, Bucket, Prefix=None, KeyMarker=None, VersionIdMarker=None, MaxKeys=None, Delimiter=None, **kwargs):
+        if kwargs:
+            return self._fallback.list_object_versions(
+                Bucket=Bucket,
+                Prefix=Prefix,
+                KeyMarker=KeyMarker,
+                VersionIdMarker=VersionIdMarker,
+                MaxKeys=MaxKeys,
+                Delimiter=Delimiter,
+                **kwargs,
+            )
+        def native():
+            return self._native_list_object_versions(
+                Bucket=Bucket,
+                Prefix=Prefix,
+                KeyMarker=KeyMarker,
+                VersionIdMarker=VersionIdMarker,
+                MaxKeys=MaxKeys,
+                Delimiter=Delimiter,
+            )
+        def fallback():
+            fallback_kwargs = {"Bucket": Bucket}
+            if Prefix is not None:
+                fallback_kwargs["Prefix"] = Prefix
+            if KeyMarker is not None:
+                fallback_kwargs["KeyMarker"] = KeyMarker
+            if VersionIdMarker is not None:
+                fallback_kwargs["VersionIdMarker"] = VersionIdMarker
+            if MaxKeys is not None:
+                fallback_kwargs["MaxKeys"] = MaxKeys
+            if Delimiter is not None:
+                fallback_kwargs["Delimiter"] = Delimiter
+            return self._fallback.list_object_versions(**fallback_kwargs)
+        return self._run_mode("list_object_versions", native, fallback)
 
     def get_object_tagging(self, *, Bucket, Key, **kwargs):
         if kwargs:
@@ -699,6 +759,27 @@ class NativeS3Client:
         self._raise_for_error("DeleteBucketTagging", status, parsed_headers, resp_body)
         return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
 
+    def _native_get_bucket_versioning(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None, params={"versioning": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("GetBucketVersioning", status, parsed_headers, resp_body)
+        out = self._parse_versioning(resp_body)
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
+
+    def _native_put_bucket_versioning(self, *, Bucket, VersioningConfiguration):
+        path, query, url = self._build_url(Bucket, None, params={"versioning": ""})
+        body = self._encode_versioning_xml(VersioningConfiguration)
+        payload_hash = _sigv4_accel_module().sha256_hex(body)
+        headers = self._signed_headers("PUT", path, query, payload_hash, body=body)
+        status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, body)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("PutBucketVersioning", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
     def _native_multipart_put_object(self, *, Bucket, Key, Body, Metadata, fd_request, multipart_cfg):
         chunk_size = multipart_cfg["chunk_size"]
         concurrency = multipart_cfg["concurrency"]
@@ -823,6 +904,28 @@ class NativeS3Client:
         parsed = self._parse_list_objects_v1(resp_body)
         parsed["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
         return parsed
+
+    def _native_list_object_versions(self, *, Bucket, Prefix=None, KeyMarker=None, VersionIdMarker=None, MaxKeys=None, Delimiter=None):
+        params = {"versions": ""}
+        if Prefix is not None:
+            params["prefix"] = Prefix
+        if KeyMarker is not None:
+            params["key-marker"] = KeyMarker
+        if VersionIdMarker is not None:
+            params["version-id-marker"] = VersionIdMarker
+        if MaxKeys is not None:
+            params["max-keys"] = MaxKeys
+        if Delimiter is not None:
+            params["delimiter"] = Delimiter
+        path, query, url = self._build_url(Bucket, None, params=params)
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("ListObjectVersions", status, parsed_headers, resp_body)
+        out = self._parse_list_object_versions(resp_body)
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
 
     def _native_get_object_tagging(self, *, Bucket, Key):
         path, query, url = self._build_url(Bucket, Key, params={"tagging": ""})
@@ -1301,6 +1404,67 @@ class NativeS3Client:
                 out["TagSet"].append(item)
         return out
 
+    def _parse_versioning(self, body: bytes):
+        if not body:
+            return {}
+        root = ET.fromstring(body)
+        out = {}
+        for child in root:
+            text = child.text
+            if text is not None:
+                out[_strip_ns(child.tag)] = text
+        return out
+
+    def _parse_list_object_versions(self, body: bytes):
+        if not body:
+            return {"Versions": [], "DeleteMarkers": []}
+        root = ET.fromstring(body)
+        out = {"Versions": [], "DeleteMarkers": []}
+        for child in root:
+            tag = _strip_ns(child.tag)
+            text = child.text
+            if tag in {
+                "Name",
+                "Prefix",
+                "Delimiter",
+                "KeyMarker",
+                "VersionIdMarker",
+                "NextKeyMarker",
+                "NextVersionIdMarker",
+                "EncodingType",
+            } and text is not None:
+                out[tag] = text
+            elif tag == "MaxKeys" and text:
+                out[tag] = int(text)
+            elif tag == "IsTruncated" and text is not None:
+                out[tag] = text.lower() == "true"
+            elif tag == "Version":
+                out["Versions"].append(self._parse_version_entry(child))
+            elif tag == "DeleteMarker":
+                out["DeleteMarkers"].append(self._parse_version_entry(child))
+            elif tag == "CommonPrefixes":
+                prefix = self._parse_text_xml_field(ET.tostring(child, encoding="utf-8"), "Prefix")
+                if prefix is not None:
+                    out.setdefault("CommonPrefixes", []).append({"Prefix": prefix})
+        return out
+
+    def _parse_version_entry(self, node):
+        out = {}
+        for child in node:
+            tag = _strip_ns(child.tag)
+            text = child.text
+            if tag in {"Owner", "Initiator"}:
+                out[tag] = self._parse_person(child)
+            elif tag in {"IsLatest", "IsDeleteMarker"} and text is not None:
+                out[tag] = text.lower() == "true"
+            elif tag == "Size" and text:
+                out[tag] = int(text)
+            elif tag == "LastModified" and text:
+                out[tag] = _parse_fast_timestamp(text)
+            elif text is not None:
+                out[tag] = text
+        return out
+
     def _parse_copy_object(self, body: bytes):
         if not body:
             return {}
@@ -1379,6 +1543,14 @@ class NativeS3Client:
             tag = ET.SubElement(tag_set, "Tag")
             ET.SubElement(tag, "Key").text = str(item["Key"])
             ET.SubElement(tag, "Value").text = str(item["Value"])
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    def _encode_versioning_xml(self, config):
+        root = ET.Element("VersioningConfiguration")
+        for key in ("Status", "MFADelete"):
+            value = config.get(key)
+            if value is not None:
+                ET.SubElement(root, key).text = str(value)
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     def _encode_delete_objects_xml(self, delete):
@@ -1566,10 +1738,16 @@ def _results_equal(operation_name: str, native_result, fallback_result) -> bool:
         native_buckets = [item.get("Name") for item in native_result.get("Buckets", [])]
         fallback_buckets = [item.get("Name") for item in fallback_result.get("Buckets", [])]
         return native_buckets == fallback_buckets
+    if operation_name == "list_object_versions":
+        native_versions = [(item.get("Key"), item.get("VersionId")) for item in native_result.get("Versions", [])]
+        fallback_versions = [(item.get("Key"), item.get("VersionId")) for item in fallback_result.get("Versions", [])]
+        return native_versions == fallback_versions
     if operation_name in {"get_bucket_tagging", "get_object_tagging"}:
         return native_result.get("TagSet") == fallback_result.get("TagSet")
     if operation_name == "get_bucket_location":
         return native_result.get("LocationConstraint") == fallback_result.get("LocationConstraint")
+    if operation_name == "get_bucket_versioning":
+        return native_result.get("Status") == fallback_result.get("Status")
     if operation_name == "delete_objects":
         native_deleted = [item.get("Key") for item in native_result.get("Deleted", [])]
         fallback_deleted = [item.get("Key") for item in fallback_result.get("Deleted", [])]
@@ -1589,6 +1767,7 @@ def _results_equal(operation_name: str, native_result, fallback_result) -> bool:
         "delete_bucket",
         "put_bucket_tagging",
         "delete_bucket_tagging",
+        "put_bucket_versioning",
         "put_object_tagging",
         "delete_object_tagging",
         "put_object",
