@@ -21,6 +21,13 @@ def _reject_unsupported_kwargs(name, kwargs):
         )
 
 
+def _response_key(args):
+    parts = [str(part).upper() for part in args[:2]]
+    if len(parts) >= 2 and parts[0] in {"CLIENT", "OBJECT"}:
+        return f"{parts[0]} {parts[1]}"
+    return parts[0] if parts else ""
+
+
 class Redis:
     """Zig-native Redis client. Every command is one Zig call."""
 
@@ -34,14 +41,22 @@ class Redis:
             self._exec('SELECT', str(db))
 
     def _exec(self, *args):
-        result = _execute([str(a) for a in args])
-        return self._dec(result)
+        result = self._dec(_execute([str(a) for a in args]))
+        return self._apply_response_callback(args, result)
 
     def _dec(self, result):
         if result is None:
             return None
         if isinstance(result, list):
             return [self._dec(x) for x in result]
+        return result
+
+    def _apply_response_callback(self, args, result):
+        key = _response_key(args)
+        if key in {"AUTH", "FLUSHALL", "FLUSHDB", "MSET", "PING", "SELECT", "SET"}:
+            return True if result == "OK" or result == "PONG" else result
+        if key in {"EXPIRE", "HEXISTS", "SISMEMBER", "SETNX"}:
+            return bool(result) if result is not None else None
         return result
 
     def close(self):
@@ -189,10 +204,15 @@ class Pipeline:
         # One Zig call: pack all, send all, recv all
         cmd_lists = [[str(a) for a in cmd] for cmd in cmds]
         results = _execute_pipeline(cmd_lists)
-        results = [self._client._dec(r) for r in results]
+        results = [self._client._apply_response_callback(cmd, self._client._dec(r)) for cmd, r in zip(cmds, results)]
 
         if self._transaction and results:
-            return results[-1] if isinstance(results[-1], list) else results[1:-1]
+            if isinstance(results[-1], list):
+                return [
+                    self._client._apply_response_callback(cmd, self._client._dec(result))
+                    for cmd, result in zip(self._commands, results[-1])
+                ]
+            return results[1:-1]
 
         self._commands = []
         return results

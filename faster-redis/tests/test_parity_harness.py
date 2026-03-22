@@ -62,7 +62,7 @@ class ParityHarnessTests(unittest.TestCase):
                 tags=("read",),
             ),
             ParityScenario(
-                name="set-semantic-drift",
+                name="set-basic",
                 run=lambda client: client.set("key", "1"),
                 tags=("write",),
             ),
@@ -73,13 +73,12 @@ class ParityHarnessTests(unittest.TestCase):
             shadow_db=self.shadow_db,
         )
         self.assertEqual(report["summary"]["total"], 2)
-        self.assertEqual(report["summary"]["matches"], 1)
-        self.assertEqual(report["summary"]["mismatches"], 1)
-        self.assertEqual(report["summary"]["by_kind"]["match"], 1)
-        self.assertEqual(report["summary"]["by_kind"]["result"], 1)
+        self.assertEqual(report["summary"]["matches"], 2)
+        self.assertEqual(report["summary"]["mismatches"], 0)
+        self.assertEqual(report["summary"]["by_kind"]["match"], 2)
         self.assertEqual(
             [item["name"] for item in report["results"]],
-            ["missing-get", "set-semantic-drift"],
+            ["missing-get", "set-basic"],
         )
 
 
