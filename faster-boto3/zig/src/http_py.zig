@@ -43,16 +43,24 @@ const ParsedArgs = struct {
     url: []const u8,
     headers: std.ArrayList(http.Header),
     body: ?[]const u8,
+    body_buffer: ?c.Py_buffer = null, // held open until request completes
+
+    fn releaseBody(self: *ParsedArgs) void {
+        if (self.body_buffer) |*buf| {
+            c.PyBuffer_Release(buf);
+            self.body_buffer = null;
+        }
+    }
 };
 
 fn parseArgs(args: ?*c.PyObject) ?ParsedArgs {
     var method_ptr: [*c]const u8 = null;
     var url_ptr: [*c]const u8 = null;
     var headers_obj: ?*c.PyObject = null;
-    var body_ptr: [*c]const u8 = null;
-    var body_len: c.Py_ssize_t = 0;
+    var body_obj: ?*c.PyObject = null;
 
-    if (c.PyArg_ParseTuple(args, "ssOz#", &method_ptr, &url_ptr, &headers_obj, &body_ptr, &body_len) == 0)
+    // Accept method, url, headers_list, body (any bytes-like or None)
+    if (c.PyArg_ParseTuple(args, "ssOO", &method_ptr, &url_ptr, &headers_obj, &body_obj) == 0)
         return null;
 
     const method_str = std.mem.span(method_ptr);
@@ -88,16 +96,41 @@ fn parseArgs(args: ?*c.PyObject) ?ParsedArgs {
         }
     }
 
-    const body: ?[]const u8 = if (body_ptr != null and body_len > 0)
-        body_ptr[0..@intCast(body_len)]
-    else
-        null;
+    // Zero-copy body via buffer protocol (bytes, bytearray, memoryview, mmap)
+    var body: ?[]const u8 = null;
+    var body_buffer: ?c.Py_buffer = null;
+    if (body_obj) |obj| {
+        // Check for None using Py_IsNone
+        if (c.Py_IsNone(obj) == 0) {
+            var buf: c.Py_buffer = std.mem.zeroes(c.Py_buffer);
+            if (c.PyObject_GetBuffer(obj, &buf, c.PyBUF_SIMPLE) == 0) {
+                if (buf.len > 0 and buf.buf != null) {
+                    body = @as([*]const u8, @ptrCast(buf.buf))[0..@intCast(buf.len)];
+                }
+                // Keep buffer open — caller releases via releaseBody() after request
+                body_buffer = buf;
+            } else {
+                // Not a buffer object — try PyBytes_AsStringAndSize fallback
+                c.PyErr_Clear();
+                var fallback_ptr: [*c]const u8 = null;
+                var fallback_len: c.Py_ssize_t = 0;
+                if (c.PyBytes_AsStringAndSize(obj, @ptrCast(&fallback_ptr), &fallback_len) == 0) {
+                    if (fallback_len > 0 and fallback_ptr != null) {
+                        body = fallback_ptr[0..@intCast(fallback_len)];
+                    }
+                } else {
+                    c.PyErr_Clear();
+                }
+            }
+        }
+    }
 
     return .{
         .method = method,
         .url = std.mem.span(url_ptr),
         .headers = headers,
         .body = body,
+        .body_buffer = body_buffer,
     };
 }
 
@@ -106,6 +139,7 @@ fn parseArgs(args: ?*c.PyObject) ?ParsedArgs {
 fn py_http_request(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var parsed = parseArgs(args) orelse return null;
     defer parsed.headers.deinit(std.heap.c_allocator);
+    defer parsed.releaseBody();
 
     const client_ptr = getClient();
 
@@ -143,6 +177,7 @@ fn py_http_request(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObjec
 fn py_http_request_oneshot(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var parsed = parseArgs(args) orelse return null;
     defer parsed.headers.deinit(std.heap.c_allocator);
+    defer parsed.releaseBody();
 
     const allocator = std.heap.c_allocator;
     var headers_pairs: std.ArrayList([2][]const u8) = .empty;
@@ -304,15 +339,113 @@ fn py_http_request_batch(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.P
 
     return py_result;
 }
+// ── request_fd() — upload body from file descriptor (zero Python copy) ───────
+
+fn py_http_request_fd(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var method_ptr: [*c]const u8 = null;
+    var url_ptr: [*c]const u8 = null;
+    var headers_obj: ?*c.PyObject = null;
+    var fd: c_int = -1;
+    var offset: c_longlong = 0;
+    var length: c_longlong = 0;
+
+    if (c.PyArg_ParseTuple(args, "ssOiLL", &method_ptr, &url_ptr, &headers_obj, &fd, &offset, &length) == 0)
+        return null;
+
+    if (fd < 0 or length <= 0) {
+        c.PyErr_SetString(c.PyExc_ValueError, "invalid fd or length");
+        return null;
+    }
+
+    const allocator = std.heap.c_allocator;
+
+    // Parse method
+    const method_str = std.mem.span(method_ptr);
+    const method: http.Method = if (std.mem.eql(u8, method_str, "PUT"))
+        .PUT
+    else if (std.mem.eql(u8, method_str, "POST"))
+        .POST
+    else
+        .PUT;
+
+    // Parse headers
+    var headers: std.ArrayList(http.Header) = .empty;
+    defer headers.deinit(allocator);
+    if (headers_obj) |hdr_list| {
+        const n = c.PyList_Size(hdr_list);
+        if (n < 0) return null;
+        var i: c.Py_ssize_t = 0;
+        while (i < n) : (i += 1) {
+            const item = c.PyList_GetItem(hdr_list, i) orelse return null;
+            var k_ptr: [*c]const u8 = null;
+            var v_ptr: [*c]const u8 = null;
+            if (c.PyArg_ParseTuple(item, "ss", &k_ptr, &v_ptr) == 0) return null;
+            headers.append(allocator, .{ .name = std.mem.span(k_ptr), .value = std.mem.span(v_ptr) }) catch {
+                c.PyErr_SetString(c.PyExc_MemoryError, "header alloc failed");
+                return null;
+            };
+        }
+    }
+
+    // Read file region into buffer via pread (no Python copy)
+    const len: usize = @intCast(length);
+    const body = allocator.alloc(u8, len) catch {
+        c.PyErr_SetString(c.PyExc_MemoryError, "body alloc failed");
+        return null;
+    };
+    defer allocator.free(body);
+
+    const file_fd: std.posix.fd_t = @intCast(fd);
+    const off: u64 = @intCast(offset);
+    var total_read: usize = 0;
+    while (total_read < len) {
+        const n = std.posix.pread(file_fd, body[total_read..], off + total_read) catch {
+            c.PyErr_SetString(c.PyExc_OSError, "pread failed");
+            return null;
+        };
+        if (n == 0) break; // EOF
+        total_read += n;
+    }
+
+    const client_ptr = getClient();
+
+    var resp = http_client.doRequest(
+        allocator,
+        client_ptr,
+        method,
+        std.mem.span(url_ptr),
+        headers.items,
+        body[0..total_read],
+    ) catch |err| {
+        const msg = switch (err) {
+            http_client.HttpError.ConnectionFailed => "connection failed",
+            http_client.HttpError.RequestFailed => "request failed",
+            http_client.HttpError.InvalidUrl => "invalid URL",
+            http_client.HttpError.OutOfMemory => "out of memory",
+        };
+        c.PyErr_SetString(c.PyExc_ConnectionError, msg);
+        return null;
+    };
+    defer resp.deinit();
+
+    return c.Py_BuildValue(
+        "(iy#y#)",
+        @as(c_int, @intCast(resp.status)),
+        resp.headers_buf.ptr,
+        @as(c.Py_ssize_t, @intCast(resp.headers_buf.len)),
+        resp.body.ptr,
+        @as(c.Py_ssize_t, @intCast(resp.body.len)),
+    );
+}
 
 var methods = [_]c.PyMethodDef{
     .{ .ml_name = "request", .ml_meth = @ptrCast(&py_http_request), .ml_flags = c.METH_VARARGS, .ml_doc = "HTTP request with connection pooling" },
     .{ .ml_name = "request_oneshot", .ml_meth = @ptrCast(&py_http_request_oneshot), .ml_flags = c.METH_VARARGS, .ml_doc = "HTTP request without connection reuse" },
     .{ .ml_name = "request_batch", .ml_meth = @ptrCast(&py_http_request_batch), .ml_flags = c.METH_VARARGS, .ml_doc = "Parallel batch HTTP requests via Zig threads" },
+    .{ .ml_name = "request_fd", .ml_meth = @ptrCast(&py_http_request_fd), .ml_flags = c.METH_VARARGS, .ml_doc = "HTTP request with body from file descriptor (fd, offset, length)" },
     .{ .ml_name = "reset", .ml_meth = @ptrCast(&py_reset_client), .ml_flags = c.METH_NOARGS, .ml_doc = "Reset persistent HTTP client" },
     .{ .ml_name = null, .ml_meth = null, .ml_flags = 0, .ml_doc = null },
 };
-
 var module_slots = [_]c.PyModuleDef_Slot{
     .{ .slot = c.Py_mod_gil, .value = c.Py_MOD_GIL_NOT_USED },
     .{ .slot = 0, .value = null },
