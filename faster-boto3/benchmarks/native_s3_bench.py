@@ -40,6 +40,7 @@ OPERATIONS = (
     "get_object_1k",
     "put_object_1k",
     "put_object_file_1m",
+    "put_object_file_8m",
     "list_objects_v2",
     "copy_object",
 )
@@ -122,11 +123,16 @@ def _raw_phase_payload(s3) -> dict:
         "get_object_1k": {"prep": [], "transport": [], "parse": [], "total": []},
         "put_object_1k": {"prep": [], "transport": [], "parse": [], "total": []},
         "put_object_file_1m": {"prep": [], "transport": [], "parse": [], "total": []},
+        "put_object_file_8m": {"prep": [], "transport": [], "parse": [], "total": []},
         "list_objects_v2": {"prep": [], "transport": [], "parse": [], "total": []},
         "copy_object": {"prep": [], "transport": [], "parse": [], "total": []},
     }
 
     tmp_path = None
+    tmp_path_large = None
+    tmp_path_large = None
+    tmp_path_large = None
+    tmp_path_large = None
 
     def measure(name: str, prepare, transport, parse):
         total_start = time.perf_counter()
@@ -214,6 +220,17 @@ def _raw_phase_payload(s3) -> dict:
             "body_handle": body_handle,
         }
 
+    def put_file_large_prepare():
+        nonlocal tmp_path_large
+        if tmp_path_large is None:
+            fd, tmp_path_large = tempfile.mkstemp(prefix="native-s3-phase-large-", suffix=".bin")
+            os.close(fd)
+            with open(tmp_path_large, "wb") as handle:
+                handle.write(os.urandom(8 * 1024 * 1024))
+        return {
+            "body_handle": open(tmp_path_large, "rb"),
+        }
+
     def put_transport(prepared):
         if prepared["fd_request"] is not None:
             return native_mod._http_accel_module().request_fd(
@@ -233,6 +250,14 @@ def _raw_phase_payload(s3) -> dict:
             body_handle = _prepared.get("body_handle")
             if body_handle is not None:
                 body_handle.close()
+
+    def multipart_transport(prepared):
+        return s3._native_put_object(Bucket=BUCKET, Key="bench/put-file-8m.bin", Body=prepared["body_handle"])
+
+    def multipart_parse(prepared, _response):
+        body_handle = prepared.get("body_handle")
+        if body_handle is not None:
+            body_handle.close()
 
     def list_prepare():
         path, query, url = s3._build_url(BUCKET, None, params={"list-type": 2, "prefix": "bench/list/"})
@@ -276,6 +301,7 @@ def _raw_phase_payload(s3) -> dict:
         "get_object_1k": (get_prepare, get_transport, get_parse),
         "put_object_1k": (put_bytes_prepare, put_transport, put_parse),
         "put_object_file_1m": (put_file_prepare, put_transport, put_parse),
+        "put_object_file_8m": (put_file_large_prepare, multipart_transport, multipart_parse),
         "list_objects_v2": (list_prepare, list_transport, list_parse),
         "copy_object": (copy_prepare, copy_transport, copy_parse),
     }
@@ -291,6 +317,11 @@ def _raw_phase_payload(s3) -> dict:
         if tmp_path is not None:
             try:
                 os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+        if tmp_path_large is not None:
+            try:
+                os.unlink(tmp_path_large)
             except FileNotFoundError:
                 pass
 
@@ -325,6 +356,7 @@ def _worker_payload(mode: str, iterations: int, warmup: int) -> dict:
         )
         client_type = type(s3).__name__
     tmp_path = None
+    tmp_path_large = None
     timings = {name: [] for name in OPERATIONS}
 
     def invoke(public_name: str, native_name: str, /, **kwargs):
@@ -351,6 +383,16 @@ def _worker_payload(mode: str, iterations: int, warmup: int) -> dict:
         with open(tmp_path, "rb") as body:
             invoke("put_object", "_native_put_object", Bucket=BUCKET, Key="bench/put-file-1m.bin", Body=body)
 
+    def op_put_object_file_8m():
+        nonlocal tmp_path_large
+        if tmp_path_large is None:
+            fd, tmp_path_large = tempfile.mkstemp(prefix="native-s3-bench-large-", suffix=".bin")
+            os.close(fd)
+            with open(tmp_path_large, "wb") as handle:
+                handle.write(os.urandom(8 * 1024 * 1024))
+        with open(tmp_path_large, "rb") as body:
+            invoke("put_object", "_native_put_object", Bucket=BUCKET, Key="bench/put-file-8m.bin", Body=body)
+
     def op_list_objects_v2():
         invoke("list_objects_v2", "_native_list_objects_v2", Bucket=BUCKET, Prefix="bench/list/")
 
@@ -368,6 +410,7 @@ def _worker_payload(mode: str, iterations: int, warmup: int) -> dict:
         "get_object_1k": op_get_object_1k,
         "put_object_1k": op_put_object_1k,
         "put_object_file_1m": op_put_object_file_1m,
+        "put_object_file_8m": op_put_object_file_8m,
         "list_objects_v2": op_list_objects_v2,
         "copy_object": op_copy_object,
     }
@@ -386,6 +429,11 @@ def _worker_payload(mode: str, iterations: int, warmup: int) -> dict:
         if tmp_path is not None:
             try:
                 os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+        if tmp_path_large is not None:
+            try:
+                os.unlink(tmp_path_large)
             except FileNotFoundError:
                 pass
 
@@ -409,6 +457,9 @@ def _run_worker(mode: str, iterations: int, warmup: int) -> dict:
     project_root = script_path.parent.parent
     env = os.environ.copy()
     env["FASTER_BOTO3_NATIVE"] = mode
+    env["FASTER_BOTO3_MULTIPART_THRESHOLD"] = str(5 * 1024 * 1024)
+    env["FASTER_BOTO3_MULTIPART_CHUNKSIZE"] = str(5 * 1024 * 1024)
+    env["FASTER_BOTO3_MULTIPART_CONCURRENCY"] = "4"
     env["PYTHONPATH"] = os.pathsep.join(
         [str(project_root), env.get("PYTHONPATH", "")]
     ).strip(os.pathsep)

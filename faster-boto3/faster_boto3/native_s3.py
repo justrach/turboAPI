@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import base64
 import datetime
-import email.utils
 import hashlib
 import importlib
 import io
 import logging
+import math
 import os
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -18,6 +18,7 @@ from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
 
 logger = logging.getLogger("faster_boto3.native_s3")
+_MIN_MULTIPART_CHUNK = 5 * 1024 * 1024
 
 
 def _http_accel_module():
@@ -26,6 +27,10 @@ def _http_accel_module():
 
 def _sigv4_accel_module():
     return importlib.import_module("faster_boto3._sigv4_accel")
+
+
+def _parser_accel_module():
+    return importlib.import_module("faster_boto3._parser_accel")
 
 
 def _utcnow():
@@ -69,6 +74,21 @@ def _strip_ns(tag: str) -> str:
     if "}" in tag:
         return tag.rsplit("}", 1)[1]
     return tag
+
+
+def _parse_fast_timestamp(value: str):
+    year, month, day, hour, minute, second = _parser_accel_module().parse_timestamp(value)
+    return datetime.datetime(year, month, day, hour, minute, second, tzinfo=datetime.UTC)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 class NativeS3Client:
@@ -224,6 +244,17 @@ class NativeS3Client:
         return out
 
     def _native_put_object(self, *, Bucket, Key, Body=b"", Metadata=None):
+        file_request = self._file_request(Body)
+        multipart_cfg = self._multipart_config()
+        if file_request is not None and self._should_use_multipart(file_request[2], multipart_cfg):
+            return self._native_multipart_put_object(
+                Bucket=Bucket,
+                Key=Key,
+                Body=Body,
+                Metadata=Metadata,
+                fd_request=file_request,
+                multipart_cfg=multipart_cfg,
+            )
         path, query, url = self._build_url(Bucket, Key)
         body_bytes, fd_request = self._prepare_body(Body)
         payload_hash = _sigv4_accel_module().sha256_hex(body_bytes)
@@ -244,6 +275,90 @@ class NativeS3Client:
         if "etag" in parsed_headers:
             out["ETag"] = parsed_headers["etag"]
         return out
+
+    def _native_multipart_put_object(self, *, Bucket, Key, Body, Metadata, fd_request, multipart_cfg):
+        chunk_size = multipart_cfg["chunk_size"]
+        concurrency = multipart_cfg["concurrency"]
+        upload_kwargs = {"Bucket": Bucket, "Key": Key}
+        if Metadata:
+            upload_kwargs["Metadata"] = Metadata
+        created = self._fallback.create_multipart_upload(**upload_kwargs)
+        upload_id = created["UploadId"]
+        parts = []
+        try:
+            total_size = fd_request[2]
+            total_parts = math.ceil(total_size / chunk_size)
+            for part_start in range(0, total_parts, concurrency):
+                batch = []
+                for idx in range(part_start, min(part_start + concurrency, total_parts)):
+                    part_number = idx + 1
+                    offset = fd_request[1] + (idx * chunk_size)
+                    length = min(chunk_size, total_size - (idx * chunk_size))
+                    batch.append(self._multipart_part_request(Bucket, Key, upload_id, part_number, fd_request[0], offset, length))
+                parts.extend(self._execute_multipart_batch(batch))
+            parts.sort(key=lambda part: part["PartNumber"])
+            completed = self._fallback.complete_multipart_upload(
+                Bucket=Bucket,
+                Key=Key,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": parts},
+            )
+            return completed
+        except Exception:
+            try:
+                self._fallback.abort_multipart_upload(Bucket=Bucket, Key=Key, UploadId=upload_id)
+            except Exception:
+                pass
+            raise
+
+    def _multipart_part_request(self, bucket: str, key: str, upload_id: str, part_number: int, fd: int, offset: int, length: int):
+        body = os.pread(fd, length, offset)
+        path, query, url = self._build_url(
+            bucket,
+            key,
+            params={"partNumber": part_number, "uploadId": upload_id},
+        )
+        payload_hash = _sigv4_accel_module().sha256_hex(body)
+        headers = self._signed_headers("PUT", path, query, payload_hash, body=body)
+        return {
+            "part_number": part_number,
+            "method": "PUT",
+            "url": url,
+            "headers": headers,
+            "body": body,
+        }
+
+    def _execute_multipart_batch(self, batch):
+        if len(batch) == 1:
+            item = batch[0]
+            status, resp_headers, resp_body = _http_accel_module().request(
+                item["method"],
+                item["url"],
+                item["headers"],
+                item["body"],
+            )
+            return [self._parse_upload_part_result(item["part_number"], status, resp_headers, resp_body)]
+        requests = [(item["method"], item["url"], item["headers"], item["body"]) for item in batch]
+        results = _http_accel_module().request_batch(requests)
+        parts = []
+        for item, result in zip(batch, results, strict=True):
+            status, resp_headers, resp_body = result
+            parts.append(self._parse_upload_part_result(item["part_number"], status, resp_headers, resp_body))
+        return parts
+
+    def _parse_upload_part_result(self, part_number: int, status, resp_headers, resp_body):
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("UploadPart", status, parsed_headers, resp_body)
+        etag = parsed_headers.get("etag")
+        if not etag:
+            raise ClientError(
+                {
+                    "Error": {"Code": "MissingETag", "Message": "UploadPart response missing ETag"},
+                    "ResponseMetadata": self._response_metadata(status, parsed_headers),
+                },
+                "UploadPart",
+            )
+        return {"ETag": etag, "PartNumber": part_number}
 
     def _native_list_objects_v2(self, *, Bucket, Prefix=None, MaxKeys=None):
         params = {"list-type": 2}
@@ -306,6 +421,31 @@ class NativeS3Client:
                     return body_bytes, (fd, offset, size)
             return body.read(), None
         raise TypeError(f"unsupported Body type: {type(body)!r}")
+
+    def _file_request(self, body):
+        if body is None or not hasattr(body, "fileno") or not hasattr(body, "tell"):
+            return None
+        offset = body.tell()
+        try:
+            fd = body.fileno()
+        except (AttributeError, OSError, io.UnsupportedOperation):
+            return None
+        size = self._remaining_length(body, offset)
+        return fd, offset, size
+
+    def _multipart_config(self):
+        threshold = _env_int("FASTER_BOTO3_MULTIPART_THRESHOLD", 0)
+        chunk_size = max(_env_int("FASTER_BOTO3_MULTIPART_CHUNKSIZE", 8 * 1024 * 1024), _MIN_MULTIPART_CHUNK)
+        concurrency = max(1, _env_int("FASTER_BOTO3_MULTIPART_CONCURRENCY", 4))
+        return {
+            "threshold": threshold,
+            "chunk_size": chunk_size,
+            "concurrency": concurrency,
+        }
+
+    def _should_use_multipart(self, size: int, multipart_cfg) -> bool:
+        threshold = multipart_cfg["threshold"]
+        return threshold > 0 and size >= max(threshold, _MIN_MULTIPART_CHUNK)
 
     def _remaining_length(self, fileobj, offset: int) -> int:
         current = fileobj.tell()
@@ -413,7 +553,7 @@ class NativeS3Client:
         if "etag" in headers:
             out["ETag"] = headers["etag"]
         if "last-modified" in headers:
-            out["LastModified"] = email.utils.parsedate_to_datetime(headers["last-modified"])
+            out["LastModified"] = _parse_fast_timestamp(headers["last-modified"])
         metadata = {
             key.removeprefix("x-amz-meta-"): value
             for key, value in headers.items()
@@ -428,25 +568,29 @@ class NativeS3Client:
     def _parse_list_objects(self, body: bytes):
         if not body:
             return {"KeyCount": 0, "Contents": []}
-        root = ET.fromstring(body)
         out = {"Contents": []}
-        for child in root:
-            tag = _strip_ns(child.tag)
-            if tag == "KeyCount" and child.text is not None:
-                out["KeyCount"] = int(child.text)
-            elif tag == "Contents":
-                item = {}
-                for node in child:
-                    node_tag = _strip_ns(node.tag)
-                    if node_tag == "Key":
-                        item["Key"] = node.text or ""
-                    elif node_tag == "Size":
-                        item["Size"] = int(node.text or "0")
-                    elif node_tag == "ETag":
-                        item["ETag"] = node.text or ""
-                    elif node_tag == "LastModified" and node.text:
-                        item["LastModified"] = email.utils.parsedate_to_datetime(node.text) if "," in node.text else datetime.datetime.fromisoformat(node.text.replace("Z", "+00:00"))
-                out["Contents"].append(item)
+        current = None
+        for raw_key, raw_value in _parser_accel_module().parse_xml_tags(body):
+            tag = _strip_ns(raw_key.decode("utf-8"))
+            value = raw_value.decode("utf-8")
+            if tag == "KeyCount":
+                out["KeyCount"] = int(value)
+                continue
+            if tag == "Key":
+                if current is not None:
+                    out["Contents"].append(current)
+                current = {"Key": value}
+                continue
+            if current is None:
+                continue
+            if tag == "Size":
+                current["Size"] = int(value or "0")
+            elif tag == "ETag":
+                current["ETag"] = value
+            elif tag == "LastModified" and value:
+                current["LastModified"] = _parse_fast_timestamp(value)
+        if current is not None:
+            out["Contents"].append(current)
         out.setdefault("KeyCount", len(out["Contents"]))
         return out
 
@@ -504,7 +648,11 @@ class NativeS3Client:
 
 def _base64_crc32(data: bytes) -> str:
     crc = zlib.crc32(data) & 0xFFFFFFFF
-    return base64.b64encode(crc.to_bytes(4, "big")).decode("ascii")
+    return _base64_crc32_int(crc)
+
+
+def _base64_crc32_int(crc: int) -> str:
+    return base64.b64encode((crc & 0xFFFFFFFF).to_bytes(4, "big")).decode("ascii")
 
 
 def _results_equal(operation_name: str, native_result, fallback_result) -> bool:

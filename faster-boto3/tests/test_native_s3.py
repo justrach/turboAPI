@@ -135,3 +135,30 @@ def test_native_file_upload_uses_fd_path(native_s3):
 
     assert calls
     assert calls[0][2] == 2048
+
+
+def test_native_multipart_put_object(setup_bucket, monkeypatch):
+    monkeypatch.setenv("FASTER_BOTO3_NATIVE", "s3")
+    monkeypatch.setenv("FASTER_BOTO3_MULTIPART_THRESHOLD", str(5 * 1024 * 1024))
+    monkeypatch.setenv("FASTER_BOTO3_MULTIPART_CHUNKSIZE", str(5 * 1024 * 1024))
+    monkeypatch.setenv("FASTER_BOTO3_MULTIPART_CONCURRENCY", "2")
+
+    import faster_boto3
+
+    faster_boto3.patch()
+    s3 = faster_boto3.client("s3", endpoint_url=ENDPOINT, region_name=REGION, **CREDS)
+
+    data = os.urandom((6 * 1024 * 1024) + 123)
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        f.write(data)
+        path = f.name
+    try:
+        with open(path, "rb") as body:
+            resp = s3.put_object(Bucket=BUCKET, Key="multipart-native", Body=body)
+        assert resp["ResponseMetadata"]["HTTPStatusCode"] == 200
+        faster_boto3.unpatch()
+        vanilla = boto3.client("s3", endpoint_url=ENDPOINT, region_name=REGION, **CREDS)
+        downloaded = vanilla.get_object(Bucket=BUCKET, Key="multipart-native")["Body"].read()
+        assert downloaded == data
+    finally:
+        os.unlink(path)
