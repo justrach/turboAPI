@@ -136,6 +136,28 @@ class ClientFallbackTests(unittest.TestCase):
         self.assertEqual(self.faster.xgroup_delconsumer("stream", "g1", "c1"), 0)
         self.assertIs(self.faster.xgroup_destroy("stream", "g1"), True)
 
+    def test_pipeline_raises_response_error_on_command_failure(self):
+        self.faster.set("wrongtype", "value")
+        with self.assertRaises(redis.exceptions.ResponseError):
+            with self.faster.pipeline(transaction=True) as pipe:
+                pipe.incr("wrongtype")
+                pipe.execute()
+
+    def test_watch_raises_watcherror_on_conflict(self):
+        other = redis.Redis(host="127.0.0.1", port=6379, db=0, decode_responses=True)
+        self.faster.set("watched", "1")
+        pipe = self.faster.pipeline()
+        try:
+            self.assertIs(pipe.watch("watched"), True)
+            self.assertEqual(pipe.get("watched"), "1")
+            other.set("watched", "2")
+            pipe.multi()
+            pipe.set("watched", "3")
+            with self.assertRaises(redis.exceptions.WatchError):
+                pipe.execute()
+        finally:
+            other.close()
+
 
 if __name__ == "__main__":
     unittest.main()

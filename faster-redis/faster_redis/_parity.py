@@ -1,6 +1,7 @@
 """Parity harness built on top of native_compare."""
 
 from dataclasses import dataclass, field
+import redis as _redis_py
 
 from ._shadow import native_compare
 
@@ -14,12 +15,20 @@ class ParityScenario:
     tags: tuple[str, ...] = ()
     metadata: dict = field(default_factory=dict)
     normalize: object = None
+    error_normalize: object = None
 
 
 def compare_scenario(scenario, **kwargs):
     """Run one parity scenario and attach its identity to the compare report."""
 
     report = native_compare(scenario.run, **kwargs)
+    if scenario.error_normalize is not None:
+        if report["primary_error"] is not None:
+            report["primary_error"] = scenario.error_normalize(report["primary_error"])
+        if report["native_error"] is not None:
+            report["native_error"] = scenario.error_normalize(report["native_error"])
+        report["match"] = report["primary_error"] == report["native_error"] and report["primary_result"] == report["native_result"]
+        report["kind"] = None if report["match"] else "error_message"
     if scenario.normalize is not None:
         if report["primary_error"] is None:
             report["primary_result"] = scenario.normalize(report["primary_result"])
@@ -116,6 +125,18 @@ def core_parity_scenarios():
             tags=("pipeline", "transaction"),
         ),
         ParityScenario(
+            "pipeline-error",
+            lambda c: (lambda p: (
+                c.flushdb(),
+                c.set("wrongtype", "value"),
+                p.incr("wrongtype"),
+                p.execute(),
+            ))(c.pipeline(transaction=True)),
+            tags=("pipeline", "error"),
+            metadata={"expected_error": "ResponseError"},
+            error_normalize=lambda _: "ResponseError",
+        ),
+        ParityScenario(
             "xrange",
             lambda c: (c.flushdb(), c.xadd("stream", {"field": "value"}), c.xrange("stream"))[-1],
             tags=("stream",),
@@ -150,6 +171,31 @@ def core_parity_scenarios():
 def non_core_parity_scenarios():
     """Volatile or environment-sensitive parity scenarios kept outside the core score."""
 
+    def run_watch_conflict(client):
+        db = getattr(client, "_db", None)
+        if db is None and hasattr(client, "connection_pool"):
+            db = client.connection_pool.connection_kwargs.get("db", 0)
+        if db is None:
+            db = 0
+        other = _redis_py.Redis(
+            host="127.0.0.1",
+            port=6379,
+            db=db,
+            decode_responses=True,
+        )
+        pipe = client.pipeline()
+        try:
+            client.flushdb()
+            client.set("watched", "1")
+            pipe.watch("watched")
+            pipe.get("watched")
+            other.set("watched", "2")
+            pipe.multi()
+            pipe.set("watched", "3")
+            return pipe.execute()
+        finally:
+            other.close()
+
     def normalize_client_list(rows):
         if not isinstance(rows, list):
             return rows
@@ -172,5 +218,12 @@ def non_core_parity_scenarios():
             tags=("server", "non-core"),
             normalize=normalize_client_list,
             metadata={"reason": "volatile connection telemetry"},
+        ),
+        ParityScenario(
+            "watch-conflict",
+            run_watch_conflict,
+            tags=("pipeline", "watch", "non-core"),
+            metadata={"reason": "requires external concurrent writer"},
+            error_normalize=lambda _: "WatchError",
         ),
     ]
