@@ -102,6 +102,7 @@ class NativeS3Client:
         secret_key: str,
         session_token: str | None,
         mode: str,
+        operation_modes: dict[str, str] | None = None,
     ):
         self._fallback = fallback
         self._endpoint_url = endpoint_url.rstrip("/")
@@ -110,10 +111,11 @@ class NativeS3Client:
         self._secret_key = secret_key
         self._session_token = session_token
         self._mode = mode
+        self._operation_modes = operation_modes or {}
         self.meta = fallback.meta
 
     @classmethod
-    def from_botocore_client(cls, fallback, *, mode: str):
+    def from_botocore_client(cls, fallback, *, mode: str, operation_modes: dict[str, str] | None = None):
         creds = fallback._request_signer._credentials.get_frozen_credentials()
         return cls(
             fallback=fallback,
@@ -123,6 +125,7 @@ class NativeS3Client:
             secret_key=creds.secret_key,
             session_token=creds.token,
             mode=mode,
+            operation_modes=operation_modes,
         )
 
     def head_object(self, *, Bucket, Key, **kwargs):
@@ -192,9 +195,10 @@ class NativeS3Client:
         return self._run_mode("copy_object", native, fallback)
 
     def _run_mode(self, operation_name: str, native_call, fallback_call):
-        if self._mode == "native":
+        mode = self._operation_modes.get(operation_name, self._mode)
+        if mode == "native":
             return native_call()
-        if self._mode == "native_shadow":
+        if mode == "native_shadow":
             native_result = native_exc = None
             fallback_result = fallback_exc = None
             try:

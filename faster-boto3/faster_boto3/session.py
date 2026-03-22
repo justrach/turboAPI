@@ -25,6 +25,40 @@ def _native_mode(service_name: str) -> str:
     return "legacy"
 
 
+def _parse_mode_list(raw: str, *, default_mode: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for part in raw.split(","):
+        item = part.strip().lower()
+        if not item:
+            continue
+        if ":" in item:
+            name, mode = item.split(":", 1)
+            if mode in {"legacy", "native", "native_shadow", "shadow"}:
+                out[name] = "native_shadow" if mode == "shadow" else mode
+            continue
+        out[item] = default_mode
+    return out
+
+
+def _native_operation_modes(service_name: str) -> dict[str, str]:
+    prefix = f"FASTER_BOTO3_NATIVE_{service_name.upper()}_OPS"
+    ops = {}
+    ops.update(_parse_mode_list(os.getenv(prefix, ""), default_mode="native"))
+    ops.update(
+        _parse_mode_list(
+            os.getenv(f"{prefix}_SHADOW", ""),
+            default_mode="native_shadow",
+        )
+    )
+    ops.update(
+        _parse_mode_list(
+            os.getenv(f"{prefix}_LEGACY", ""),
+            default_mode="legacy",
+        )
+    )
+    return ops
+
+
 class Session:
     """Thin wrapper around boto3.Session that can return native clients."""
 
@@ -62,10 +96,15 @@ class Session:
 
         fallback = self._session.client(service_name, **create_client_kwargs)
         mode = _native_mode(service_name)
-        if service_name != "s3" or mode == "legacy":
+        operation_modes = _native_operation_modes(service_name)
+        if service_name != "s3" or (mode == "legacy" and not operation_modes):
             return fallback
 
-        return NativeS3Client.from_botocore_client(fallback, mode=mode)
+        return NativeS3Client.from_botocore_client(
+            fallback,
+            mode=mode,
+            operation_modes=operation_modes,
+        )
 
     def resource(self, *args, **kwargs):
         return self._session.resource(*args, **kwargs)

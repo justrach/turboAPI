@@ -162,3 +162,49 @@ def test_native_multipart_put_object(setup_bucket, monkeypatch):
         assert downloaded == data
     finally:
         os.unlink(path)
+
+
+def test_operation_override_put_object_only(setup_bucket, monkeypatch):
+    monkeypatch.setenv("FASTER_BOTO3_NATIVE", "legacy")
+    monkeypatch.setenv("FASTER_BOTO3_NATIVE_S3_OPS", "put_object")
+
+    import faster_boto3
+    import faster_boto3.native_s3 as native_mod
+
+    faster_boto3.patch()
+    s3 = faster_boto3.client("s3", endpoint_url=ENDPOINT, region_name=REGION, **CREDS)
+
+    native_calls = []
+    fallback_calls = []
+
+    orig_native_put = native_mod.NativeS3Client._native_put_object
+    orig_fallback_put = s3._fallback.put_object
+    orig_fallback_get = s3._fallback.get_object
+
+    def wrapped_native_put(*args, **kwargs):
+        native_calls.append("put")
+        return orig_native_put(*args, **kwargs)
+
+    def wrapped_fallback_put(*args, **kwargs):
+        fallback_calls.append("put")
+        return orig_fallback_put(*args, **kwargs)
+
+    def wrapped_fallback_get(*args, **kwargs):
+        fallback_calls.append("get")
+        return orig_fallback_get(*args, **kwargs)
+
+    native_mod.NativeS3Client._native_put_object = wrapped_native_put
+    s3._fallback.put_object = wrapped_fallback_put
+    s3._fallback.get_object = wrapped_fallback_get
+    try:
+        s3.put_object(Bucket=BUCKET, Key="override-put", Body=b"override")
+        assert native_calls == ["put"]
+        assert fallback_calls == []
+
+        body = s3.get_object(Bucket=BUCKET, Key="override-put")["Body"].read()
+        assert body == b"override"
+        assert fallback_calls == ["get"]
+    finally:
+        native_mod.NativeS3Client._native_put_object = orig_native_put
+        s3._fallback.put_object = orig_fallback_put
+        s3._fallback.get_object = orig_fallback_get
