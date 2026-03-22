@@ -139,10 +139,11 @@ def main():
     from turbopg import Database
     db = Database(conn_str, pool_size=16)
 
-    # Run setup query if present (create tables etc)
+    # Run setup query if present (DDL, multi-statement via simple protocol)
     if setup:
         try:
-            db.query(setup, [])
+            from turboapi import turbonet
+            turbonet._db_exec_raw(setup)
         except Exception as e:
             sys.stderr.write(f"[setup] {e}\n")
 
@@ -159,15 +160,12 @@ def main():
     timeout_ms = args.timeout * 1000
     data = run_bench(db, query, query_args, args.concurrency, args.duration, args.warmup_time, timeout_ms)
 
-    # Run teardown if present
     if teardown:
-        old_stdout = sys.stdout
-        sys.stdout = sys.stderr
         try:
-            db.query(teardown, [])
+            from turboapi import turbonet
+            turbonet._db_exec_raw(teardown)
         except Exception:
             pass
-        sys.stdout = old_stdout
     print(json.dumps(data))
 
 

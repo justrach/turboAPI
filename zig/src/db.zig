@@ -869,6 +869,42 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     return py.pyNone();
 }
 
+// Execute SQL without returning rows (DDL, setup/teardown, multi-statement)
+pub fn db_exec_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var sql_ptr: [*c]const u8 = null;
+    if (c.PyArg_ParseTuple(args, "s", &sql_ptr) == 0) return null;
+
+    const sql = std.mem.span(sql_ptr);
+
+    if (db_pool == null) {
+        py.setError("Database not configured. Call configure_db() first.", .{});
+        return null;
+    }
+
+    const gil_state = py_gil_save();
+
+    const conn = acquireConn() orelse {
+        py_gil_restore(gil_state);
+        py.setError("Failed to acquire database connection", .{});
+        return null;
+    };
+
+    const rows_affected = conn.exec(sql, .{}) catch {
+        releaseConn(conn);
+        py_gil_restore(gil_state);
+        py.setError("Exec failed: {s}", .{sql});
+        return null;
+    };
+
+    releaseConn(conn);
+    py_gil_restore(gil_state);
+
+    if (rows_affected) |n| {
+        return c.PyLong_FromLongLong(n);
+    }
+    return py.pyNone();
+}
+
 
 // ── Raw query API (no HTTP, direct pg.zig from Python) ──────────────────────
 
