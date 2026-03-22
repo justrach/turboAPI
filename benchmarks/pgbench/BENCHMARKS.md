@@ -1,25 +1,37 @@
-# MagicStack pgbench Results -- Native Driver Comparison
+# MagicStack pgbench Preliminary Results -- Native Driver Comparison
 
 **Date:** 2026-03-22
 **Setup:** Postgres 18, Docker, aarch64 (M3 Pro), concurrency=10, 30s per test
 **Method:** Each driver uses its native path (no HTTP). No result caching. Direct binary decode.
-**Validation:** Results below are from a clean rerun after `docker compose down -v --remove-orphans`. `COPY FROM` for `asyncpg` is marked unverified on this host because the rerun reproduced a Docker/Postgres `DiskFullError`.
+**Validation:** Primary results below are 3-run medians from clean reruns using `python3 benchmarks/pgbench/validate_runs.py --runs 3 --skip-build`. Raw logs and `summary.json` were written to `benchmarks/pgbench/artifacts/`. `COPY FROM` for `asyncpg` remains unverified on this host because all 3 validation runs reproduced a Docker/Postgres `DiskFullError`.
 
-## Results — All 7 MagicStack pgbench Queries
+## Replicated Results — 3-Run Medians
 
-### Clean rerun (source of truth)
+### Primary table: median of 3 clean reruns
 
 | Query | asyncpg | psycopg3-async | turbopg (pg.zig) | vs asyncpg |
 |-------|---------|----------------|------------------|-----------|
-| SELECT 1+1 | 94,790 q/s (0.105ms) | 34,638 q/s (0.288ms) | **130,837 q/s (0.076ms)** | **1.38x** |
-| pg_type (619 rows, 12 cols) | 5,803 q/s (1.723ms) | 2,264 q/s (4.415ms) | **7,090 q/s (1.409ms)** | **1.22x** |
-| generate_series (1000 rows) | 8,229 q/s (1.215ms) | 4,008 q/s (2.494ms) | **19,725 q/s (0.506ms)** | **2.40x** |
-| large_object (100 bytea rows) | 26,688 q/s (0.374ms) | 3,107 q/s (3.218ms) | **28,578 q/s (0.349ms)** | **1.07x** |
-| arrays (100 int[] rows) | 9,676 q/s (1.033ms) | 3,417 q/s (2.925ms) | **13,763 q/s (0.726ms)** | **1.42x** |
-| COPY FROM (10k rows/op) | FAILED (`DiskFullError`) | 114 q/s (87.483ms) | **366 q/s (27.326ms)** | unverified on this host |
-| batch INSERT (1k rows) | 1,089 q/s (9.181ms) | 32 q/s (308.693ms) | **31,004 q/s (0.321ms)** | **28.5x** |
+| SELECT 1+1 | 90,752 q/s (0.110ms) | 34,333 q/s (0.291ms) | **125,755 q/s (0.079ms)** | **1.39x** |
+| pg_type (619 rows, 12 cols) | 5,827 q/s (1.716ms) | 2,309 q/s (4.330ms) | **6,749 q/s (1.480ms)** | **1.16x** |
+| generate_series (1000 rows) | 8,265 q/s (1.209ms) | 4,222 q/s (2.368ms) | **21,212 q/s (0.470ms)** | **2.57x** |
+| large_object (100 bytea rows) | 29,750 q/s (0.336ms) | 3,309 q/s (3.021ms) | **31,575 q/s (0.316ms)** | **1.06x** |
+| arrays (100 int[] rows) | 9,780 q/s (1.022ms) | 3,392 q/s (2.947ms) | **13,538 q/s (0.738ms)** | **1.38x** |
+| COPY FROM (10k rows/op) | FAILED in 3/3 runs (`DiskFullError`) | 116 q/s (86.276ms) | **375 q/s (26.646ms)** | unverified on this host |
+| batch INSERT (1k rows) | 1,064 q/s (9.391ms) | 33 q/s (303.807ms) | **30,668 q/s (0.324ms)** | **28.8x** |
 
-**turbopg wins 6/6 queries it completed against asyncpg in the clean rerun.** `COPY FROM` remains inconclusive versus `asyncpg` on this machine because `asyncpg` failed twice with `DiskFullError`. Against `psycopg3-async`, turbopg also wins `COPY FROM` (`366 q/s` vs `114 q/s`, `3.21x`).
+**Current evidence:** across 3 clean reruns, turbopg wins 6/6 queries it completed against asyncpg. `COPY FROM` remains inconclusive versus `asyncpg` on this machine because `asyncpg` failed in all 3 validation runs with `DiskFullError`. Against `psycopg3-async`, turbopg also wins `COPY FROM` (`375 q/s` vs `116 q/s`, `3.23x`).
+
+### Validation summary
+
+| Query | asyncpg | psycopg3-async | turbopg (pg.zig) |
+|-------|---------|----------------|------------------|
+| SELECT 1+1 | 3/3 successful, 89,993..91,184 q/s | 3/3 successful, 33,950..34,955 q/s | 3/3 successful, 122,377..129,743 q/s |
+| pg_type | 3/3 successful, 5,825..5,828 q/s | 3/3 successful, 2,155..2,313 q/s | 3/3 successful, 5,796..7,156 q/s |
+| generate_series | 3/3 successful, 7,635..8,301 q/s | 3/3 successful, 4,167..4,271 q/s | 3/3 successful, 20,788..21,305 q/s |
+| large_object | 3/3 successful, 28,132..29,849 q/s | 3/3 successful, 3,280..3,328 q/s | 3/3 successful, 31,522..31,658 q/s |
+| arrays | 3/3 successful, 9,282..9,866 q/s | 3/3 successful, 3,341..3,405 q/s | 3/3 successful, 12,938..13,789 q/s |
+| COPY FROM | 0/3 successful, `DiskFullError` every run | 3/3 successful, 115..117 q/s | 3/3 successful, 374..379 q/s |
+| batch INSERT | 3/3 successful, 1,029..1,083 q/s | 3/3 successful, 33..33 q/s | 3/3 successful, 29,323..30,690 q/s |
 
 ### First full run captured earlier (reference only)
 
@@ -52,28 +64,30 @@
 
 | Query | asyncpg | turbopg | Ratio |
 |-------|---------|---------|-------|
-| SELECT 1+1 | 94,790 | 130,837 | 1.38x |
-| pg_type | 3,592,281 | 4,388,951 | 1.22x |
-| generate_series | 8,228,586 | 19,724,529 | 2.40x |
-| large_object | 2,668,752 | 2,857,808 | 1.07x |
-| arrays | 967,624 | 1,376,323 | 1.42x |
+| SELECT 1+1 | 90,752 | 125,755 | 1.39x |
+| pg_type | 3,606,968 | 4,177,662 | 1.16x |
+| generate_series | 8,264,817 | 21,211,858 | 2.57x |
+| large_object | 2,975,014 | 3,157,501 | 1.06x |
+| arrays | 978,039 | 1,353,787 | 1.38x |
 | COPY FROM | failed | 3,656,253 | unverified |
-| batch INSERT | 1,088,866 | -- | 28.5x (q/s) |
+| batch INSERT | 1,064,465 | -- | 28.8x (q/s) |
 
 ### COPY FROM verified comparison on this host
 
 | Driver | Queries/sec | Rows/sec | Mean latency |
 |--------|-------------|----------|--------------|
-| psycopg3-async | 114 | 1,141,376 | 87.483ms |
-| turbopg (pg.zig) | **366** | **3,656,253** | **27.326ms** |
-| asyncpg | FAILED | FAILED | `DiskFullError` |
+| psycopg3-async | 116 | 1,157,329 | 86.276ms |
+| turbopg (pg.zig) | **375** | **3,745,327** | **26.646ms** |
+| asyncpg | FAILED in 3/3 runs | FAILED | `DiskFullError` |
 
 ## Validation notes
 
 - The full suite was rerun from a clean Docker state using `docker compose -f benchmarks/pgbench/docker-compose.yml down -v --remove-orphans` followed by `docker compose -f benchmarks/pgbench/docker-compose.yml up --abort-on-container-exit pgbench`.
-- The second run reproduced the same ranking shape for all non-`COPY FROM` queries, with expected run-to-run drift of a few percent.
-- `asyncpg` `COPY FROM` failed again during the clean rerun with `asyncpg.exceptions.DiskFullError: could not extend file ... No space left on device`, so any direct `COPY FROM` comparison against `asyncpg` should be treated as unverified until the Docker storage limit is addressed.
-- On the clean rerun, `COPY FROM` was still valid for `psycopg3-async` and `turbopg`, where turbopg measured `366 q/s` vs `114 q/s`.
+- Three validation runs were completed from a clean Docker state, and the primary table in this file now reports medians rather than a hand-selected single run.
+- Non-`COPY FROM` queries reproduced the same ranking shape across all three validation runs.
+- `asyncpg` `COPY FROM` failed in all 3 validation runs with `asyncpg.exceptions.DiskFullError: could not extend file ... No space left on device`, so any direct `COPY FROM` comparison against `asyncpg` should be treated as unverified until the Docker storage limit is addressed.
+- Across the 3 validation runs, `COPY FROM` remained valid for `psycopg3-async` and `turbopg`, where turbopg's median was `375 q/s` vs `116 q/s`.
+- Raw artifacts are available under `benchmarks/pgbench/artifacts/`.
 
 ## Optimization history
 
@@ -123,4 +137,13 @@ docker compose down -v --remove-orphans
 docker compose up --build --abort-on-container-exit pgbench
 ```
 
-No local dependencies. Everything runs in Docker (~5 min build, ~15 min benchmark). For publication-quality numbers, run the suite at least 3 times and report the median.
+No local dependencies. Everything runs in Docker (~5 min build, ~15 min benchmark).
+
+## Publication workflow
+
+```bash
+cd benchmarks/pgbench
+python3 validate_runs.py --runs 3
+```
+
+This saves raw logs under `benchmarks/pgbench/artifacts/` and prints a median table suitable for copying into a paper or review doc.

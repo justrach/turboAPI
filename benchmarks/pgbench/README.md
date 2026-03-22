@@ -9,6 +9,17 @@ cd benchmarks/pgbench
 docker compose up --build
 ```
 
+## Validate
+
+For anything you plan to publish or defend, use clean reruns and medians instead of a single run:
+
+```bash
+cd benchmarks/pgbench
+python3 validate_runs.py --runs 3
+```
+
+This writes raw logs to `benchmarks/pgbench/artifacts/` and prints a median summary table.
+
 ## What it tests
 
 MagicStack's pgbench measures raw driver throughput (queries/sec, latency percentiles). All three drivers talk to Postgres directly using the binary wire protocol. No HTTP involved.
@@ -19,15 +30,15 @@ MagicStack's pgbench measures raw driver throughput (queries/sec, latency percen
 | psycopg3-async | Python 3.11 + asyncio | asyncio (single-threaded) |
 | turbopg (pg.zig) | Python 3.14t + Zig | ThreadPoolExecutor (GIL released) |
 
-## Results (Postgres 18, Docker, concurrency=10, 30s)
+## Replicated 3-run medians (Postgres 18, Docker, concurrency=10, 30s)
 
 | Query | asyncpg | psycopg3-async | turbopg (pg.zig) |
 |-------|---------|----------------|------------------|
-| SELECT 1+1 | 90,430 q/s | 34,981 q/s | **123,944 q/s (1.37x)** |
-| pg_type (619 rows) | 5,856 q/s | 2,211 q/s | **45,712 q/s (7.8x)** |
-| generate_series (1000) | 8,339 q/s | 4,238 q/s | **20,356 q/s (2.4x)** |
+| SELECT 1+1 | 90,752 q/s | 34,333 q/s | **125,755 q/s (1.39x)** |
+| pg_type (619 rows) | 5,827 q/s | 2,309 q/s | **6,749 q/s (1.16x)** |
+| generate_series (1000) | 8,265 q/s | 4,222 q/s | **21,212 q/s (2.57x)** |
 
-See [BENCHMARKS.md](BENCHMARKS.md) for detailed analysis.
+See [BENCHMARKS.md](BENCHMARKS.md) for the full 7-query median table, validation ranges, and raw-artifact workflow.
 
 ## Architecture
 
@@ -43,4 +54,4 @@ Docker Compose:
 
 ## Requirements
 
-Docker + Docker Compose. Everything runs inside containers (~5 min build, ~5 min benchmark).
+Docker + Docker Compose. Everything runs inside containers (~5 min build, ~15 min benchmark for one full suite).
