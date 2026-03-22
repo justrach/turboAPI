@@ -211,17 +211,12 @@ def _raw_phase_payload(s3) -> dict:
                 handle.write(os.urandom(1024 * 1024))
         path, query, url = s3._build_url(BUCKET, "bench/put-file-1m.bin")
         body_handle = open(tmp_path, "rb")
-        body_bytes, fd_request = s3._prepare_body(body_handle)
-        payload_hash = native_mod._sigv4_accel_module().sha256_hex(body_bytes)
-        extra_headers = [
-            ("x-amz-checksum-crc32", native_mod._base64_crc32(body_bytes)),
-            ("x-amz-sdk-checksum-algorithm", "CRC32"),
-        ]
-        headers = s3._signed_headers("PUT", path, query, payload_hash, body=body_bytes, extra_headers=extra_headers)
+        fd_request = s3._file_request(body_handle)
+        headers = s3._signed_headers("PUT", path, query, native_mod._UNSIGNED_PAYLOAD, body=None)
         return {
             "url": url,
             "headers": headers,
-            "body_bytes": body_bytes,
+            "body_bytes": b"",
             "fd_request": fd_request,
             "body_handle": body_handle,
         }

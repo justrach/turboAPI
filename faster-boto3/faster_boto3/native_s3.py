@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import datetime
 import hashlib
 import importlib
@@ -19,6 +20,7 @@ from botocore.response import StreamingBody
 
 logger = logging.getLogger("faster_boto3.native_s3")
 _MIN_MULTIPART_CHUNK = 5 * 1024 * 1024
+_UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD"
 
 
 def _http_accel_module():
@@ -260,14 +262,20 @@ class NativeS3Client:
                 multipart_cfg=multipart_cfg,
             )
         path, query, url = self._build_url(Bucket, Key)
-        body_bytes, fd_request = self._prepare_body(Body)
-        payload_hash = _sigv4_accel_module().sha256_hex(body_bytes)
-        checksum_crc32 = _base64_crc32(body_bytes)
+        body_bytes = b""
+        fd_request = file_request
+        if fd_request is not None:
+            payload_hash = _UNSIGNED_PAYLOAD
+        else:
+            body_bytes, fd_request = self._prepare_body(Body)
+            payload_hash = _sigv4_accel_module().sha256_hex(body_bytes)
         extra_headers = []
         if Metadata:
             for key, value in Metadata.items():
                 extra_headers.append((f"x-amz-meta-{key}", str(value)))
-        extra_headers.extend([("x-amz-checksum-crc32", checksum_crc32), ("x-amz-sdk-checksum-algorithm", "CRC32")])
+        if fd_request is None:
+            checksum_crc32 = _base64_crc32(body_bytes)
+            extra_headers.extend([("x-amz-checksum-crc32", checksum_crc32), ("x-amz-sdk-checksum-algorithm", "CRC32")])
         headers = self._signed_headers("PUT", path, query, payload_hash, body=body_bytes, extra_headers=extra_headers)
         if fd_request is not None:
             status, resp_headers, resp_body = _http_accel_module().request_fd("PUT", url, headers, *fd_request)
@@ -283,10 +291,7 @@ class NativeS3Client:
     def _native_multipart_put_object(self, *, Bucket, Key, Body, Metadata, fd_request, multipart_cfg):
         chunk_size = multipart_cfg["chunk_size"]
         concurrency = multipart_cfg["concurrency"]
-        upload_kwargs = {"Bucket": Bucket, "Key": Key}
-        if Metadata:
-            upload_kwargs["Metadata"] = Metadata
-        created = self._fallback.create_multipart_upload(**upload_kwargs)
+        created = self._native_create_multipart_upload(Bucket=Bucket, Key=Key, Metadata=Metadata)
         upload_id = created["UploadId"]
         parts = []
         try:
@@ -301,54 +306,62 @@ class NativeS3Client:
                     batch.append(self._multipart_part_request(Bucket, Key, upload_id, part_number, fd_request[0], offset, length))
                 parts.extend(self._execute_multipart_batch(batch))
             parts.sort(key=lambda part: part["PartNumber"])
-            completed = self._fallback.complete_multipart_upload(
+            return self._native_complete_multipart_upload(
                 Bucket=Bucket,
                 Key=Key,
                 UploadId=upload_id,
-                MultipartUpload={"Parts": parts},
+                Parts=parts,
             )
-            return completed
         except Exception:
             try:
-                self._fallback.abort_multipart_upload(Bucket=Bucket, Key=Key, UploadId=upload_id)
+                self._native_abort_multipart_upload(Bucket=Bucket, Key=Key, UploadId=upload_id)
             except Exception:
                 pass
             raise
 
     def _multipart_part_request(self, bucket: str, key: str, upload_id: str, part_number: int, fd: int, offset: int, length: int):
-        body = os.pread(fd, length, offset)
         path, query, url = self._build_url(
             bucket,
             key,
             params={"partNumber": part_number, "uploadId": upload_id},
         )
-        payload_hash = _sigv4_accel_module().sha256_hex(body)
-        headers = self._signed_headers("PUT", path, query, payload_hash, body=body)
+        headers = self._signed_headers("PUT", path, query, _UNSIGNED_PAYLOAD, body=None)
         return {
             "part_number": part_number,
             "method": "PUT",
             "url": url,
             "headers": headers,
-            "body": body,
+            "fd_request": (fd, offset, length),
         }
 
     def _execute_multipart_batch(self, batch):
         if len(batch) == 1:
             item = batch[0]
-            status, resp_headers, resp_body = _http_accel_module().request(
-                item["method"],
-                item["url"],
-                item["headers"],
-                item["body"],
-            )
+            status, resp_headers, resp_body = self._send_batch_item(item)
             return [self._parse_upload_part_result(item["part_number"], status, resp_headers, resp_body)]
-        requests = [(item["method"], item["url"], item["headers"], item["body"]) for item in batch]
-        results = _http_accel_module().request_batch(requests)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(batch)) as pool:
+            results = [future.result() for future in [pool.submit(self._send_batch_item, item) for item in batch]]
         parts = []
         for item, result in zip(batch, results, strict=True):
             status, resp_headers, resp_body = result
             parts.append(self._parse_upload_part_result(item["part_number"], status, resp_headers, resp_body))
         return parts
+
+    def _send_batch_item(self, item):
+        fd_request = item.get("fd_request")
+        if fd_request is not None:
+            return _http_accel_module().request_fd(
+                item["method"],
+                item["url"],
+                item["headers"],
+                *fd_request,
+            )
+        return _http_accel_module().request(
+            item["method"],
+            item["url"],
+            item["headers"],
+            item["body"],
+        )
 
     def _parse_upload_part_result(self, part_number: int, status, resp_headers, resp_body):
         parsed_headers = _parse_headers(resp_headers)
@@ -402,6 +415,52 @@ class NativeS3Client:
             out["ServerSideEncryption"] = parsed_headers["x-amz-server-side-encryption"]
         out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
         return out
+
+    def _native_create_multipart_upload(self, *, Bucket, Key, Metadata=None):
+        path, query, url = self._build_url(Bucket, Key, params={"uploads": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        extra_headers = []
+        if Metadata:
+            for key, value in Metadata.items():
+                extra_headers.append((f"x-amz-meta-{key}", str(value)))
+        headers = self._signed_headers("POST", path, query, payload_hash, body=None, extra_headers=extra_headers)
+        status, resp_headers, resp_body = _http_accel_module().request("POST", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("CreateMultipartUpload", status, parsed_headers, resp_body)
+        upload_id = self._parse_text_xml_field(resp_body, "UploadId")
+        if not upload_id:
+            raise ClientError(
+                {
+                    "Error": {"Code": "MissingUploadId", "Message": "CreateMultipartUpload response missing UploadId"},
+                    "ResponseMetadata": self._response_metadata(status, parsed_headers),
+                },
+                "CreateMultipartUpload",
+            )
+        return {
+            "UploadId": upload_id,
+            "ResponseMetadata": self._response_metadata(status, parsed_headers),
+        }
+
+    def _native_complete_multipart_upload(self, *, Bucket, Key, UploadId, Parts):
+        path, query, url = self._build_url(Bucket, Key, params={"uploadId": UploadId})
+        body = self._encode_complete_multipart_xml(Parts)
+        payload_hash = _sigv4_accel_module().sha256_hex(body)
+        headers = self._signed_headers("POST", path, query, payload_hash, body=body)
+        status, resp_headers, resp_body = _http_accel_module().request("POST", url, headers, body)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("CompleteMultipartUpload", status, parsed_headers, resp_body)
+        out = self._parse_complete_multipart_upload(resp_body)
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
+
+    def _native_abort_multipart_upload(self, *, Bucket, Key, UploadId):
+        path, query, url = self._build_url(Bucket, Key, params={"uploadId": UploadId})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("DELETE", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("DELETE", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("AbortMultipartUpload", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
 
     def _prepare_body(self, body):
         if body is None:
@@ -614,6 +673,40 @@ class NativeS3Client:
                 copy_result[tag] = child.text
         result["CopyObjectResult"] = copy_result
         return result
+
+    def _parse_complete_multipart_upload(self, body: bytes):
+        if not body:
+            return {}
+        root = ET.fromstring(body)
+        out = {}
+        for child in root:
+            tag = _strip_ns(child.tag)
+            if tag == "Bucket" and child.text is not None:
+                out["Bucket"] = child.text
+            elif tag == "Key" and child.text is not None:
+                out["Key"] = child.text
+            elif tag == "ETag" and child.text is not None:
+                out["ETag"] = child.text
+            elif tag.startswith("Checksum") and child.text is not None:
+                out[tag] = child.text
+        return out
+
+    def _parse_text_xml_field(self, body: bytes, name: str):
+        if not body:
+            return None
+        root = ET.fromstring(body)
+        for child in root.iter():
+            if _strip_ns(child.tag) == name:
+                return child.text
+        return None
+
+    def _encode_complete_multipart_xml(self, parts):
+        root = ET.Element("CompleteMultipartUpload")
+        for part in parts:
+            part_el = ET.SubElement(root, "Part")
+            ET.SubElement(part_el, "PartNumber").text = str(part["PartNumber"])
+            ET.SubElement(part_el, "ETag").text = part["ETag"]
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     def _response_metadata(self, status, headers):
         return {

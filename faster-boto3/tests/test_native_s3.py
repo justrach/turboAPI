@@ -171,6 +171,40 @@ def test_native_multipart_put_object(setup_bucket, monkeypatch):
         os.unlink(path)
 
 
+def test_native_multipart_put_object_avoids_fallback_control_plane(setup_bucket, monkeypatch):
+    monkeypatch.setenv("FASTER_BOTO3_NATIVE", "s3")
+    monkeypatch.setenv("FASTER_BOTO3_MULTIPART_THRESHOLD", str(5 * 1024 * 1024))
+    monkeypatch.setenv("FASTER_BOTO3_MULTIPART_CHUNKSIZE", str(5 * 1024 * 1024))
+    monkeypatch.setenv("FASTER_BOTO3_MULTIPART_CONCURRENCY", "2")
+
+    import faster_boto3
+
+    faster_boto3.patch()
+    s3 = faster_boto3.client("s3", endpoint_url=ENDPOINT, region_name=REGION, **CREDS)
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("fallback multipart control plane should not be used")
+
+    s3._fallback.create_multipart_upload = fail
+    s3._fallback.complete_multipart_upload = fail
+    s3._fallback.abort_multipart_upload = fail
+
+    data = os.urandom((6 * 1024 * 1024) + 321)
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        f.write(data)
+        path = f.name
+    try:
+        with open(path, "rb") as body:
+            resp = s3.put_object(Bucket=BUCKET, Key="multipart-native-direct", Body=body)
+        assert resp["ResponseMetadata"]["HTTPStatusCode"] == 200
+        faster_boto3.unpatch()
+        vanilla = boto3.client("s3", endpoint_url=ENDPOINT, region_name=REGION, **CREDS)
+        downloaded = vanilla.get_object(Bucket=BUCKET, Key="multipart-native-direct")["Body"].read()
+        assert downloaded == data
+    finally:
+        os.unlink(path)
+
+
 def test_operation_override_put_object_only(setup_bucket, monkeypatch):
     monkeypatch.setenv("FASTER_BOTO3_NATIVE", "legacy")
     monkeypatch.setenv("FASTER_BOTO3_NATIVE_S3_OPS", "put_object")

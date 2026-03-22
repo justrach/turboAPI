@@ -112,42 +112,62 @@ following are true:
 
 ## Current Bench Snapshot
 
-Latest quick LocalStack snapshot on branch `native-boto3-plan` after:
+Latest quick LocalStack snapshot on branch `native-boto-3` after:
 
 - native multipart upload path
 - per-operation rollout controls
 - streaming `request_fd` uploads in Zig transport
+- preallocated large native response buffers
+- file-backed `PutObject` and multipart `UploadPart` using `UNSIGNED-PAYLOAD`
+  with fd streaming instead of Python-side full-body hashing
 
 ### End-to-end native vs legacy
 
 | Operation | Legacy | Native | Speedup |
 |---|---:|---:|---:|
-| `HeadObject` | 1793.8 us | 1325.4 us | 1.35x |
-| `GetObject` 1 KiB | 1440.6 us | 1198.9 us | 1.20x |
-| `PutObject` 1 KiB | 2608.8 us | 2256.8 us | 1.16x |
-| `PutObject` file 1 MiB | 12073.7 us | 9220.9 us | 1.31x |
-| `PutObject` file 8 MiB | 74720.8 us | 64552.7 us | 1.16x |
-| `ListObjectsV2` | 3510.9 us | 2380.6 us | 1.48x |
-| `CopyObject` | 2566.2 us | 2186.2 us | 1.17x |
+| `HeadObject` | 1139.2 us | 1005.0 us | 1.13x |
+| `GetObject` 1 KiB | 1189.1 us | 965.3 us | 1.23x |
+| `GetObject` 8 MiB | 47574.0 us | 29944.9 us | 1.59x |
+| `PutObject` 1 KiB | 2284.2 us | 1695.1 us | 1.35x |
+| `PutObject` file 1 MiB | 11448.2 us | 7104.4 us | 1.61x |
+| `PutObject` file 8 MiB | 70812.5 us | 55729.4 us | 1.27x |
+| `ListObjectsV2` | 3350.4 us | 1815.7 us | 1.85x |
+| `CopyObject` | 2194.0 us | 1711.9 us | 1.28x |
 
 ### Upload-path comparison
 
-Isolated native upload comparison with multipart disabled vs enabled:
+The older multipart toggle by itself was mostly neutral. The newer meaningful
+change was removing Python-side full-body hashing for file-backed native puts.
 
-| File size | Native single PUT | Native multipart | Delta |
+| File size | Legacy | Native | Delta |
 |---|---:|---:|---:|
-| 1 MiB | 9046.7 us | 8866.3 us | 1.02x faster |
-| 8 MiB | 57271.0 us | 57488.7 us | 0.996x |
+| 1 MiB | 11448.2 us | 7104.4 us | 1.61x faster |
+| 8 MiB | 70812.5 us | 55729.4 us | 1.27x faster |
+
+### Raw native phase breakdown
+
+`raw_native` isolates native prep, transport, and parse time without the public
+wrapper dispatch. The current file-backed upload path is much cheaper in prep
+than the older read-and-hash approach.
+
+| Operation | Prep | Transport | Parse | Total |
+|---|---:|---:|---:|---:|
+| `GetObject` 8 MiB | 56.9 us | 29288.2 us | 42.1 us | 29387.0 us |
+| `PutObject` file 1 MiB | 127.1 us | 6702.7 us | 29.8 us | 6888.3 us |
+| `PutObject` file 8 MiB | 64.0 us | 55665.8 us | 13.1 us | 55742.8 us |
+| `ListObjectsV2` | 29.4 us | 1705.6 us | 115.6 us | 1851.3 us |
 
 ### Notes
 
 - The current native path is materially faster than legacy on the implemented
   S3 operations, but LocalStack transport latency still dominates total wall
   time.
-- Multipart by itself is only a marginal win in the isolated LocalStack upload
-  comparison right now.
-- The larger upload win comes from the native request path overall plus the
-  streaming fd transport path, not from multipart orchestration alone.
+- The larger upload win is now coming from the native request path plus the
+  streaming fd transport and unsigned file-backed payload path, not from
+  multipart orchestration alone.
+- For 1 MiB file-backed puts, raw native prep is now about `127 us`, down from
+  the previous roughly `700+ us` range when Python read and hashed the full
+  body before send.
 - Real AWS measurements are still needed before treating these upload numbers as
   the final shape of the optimization.
 
