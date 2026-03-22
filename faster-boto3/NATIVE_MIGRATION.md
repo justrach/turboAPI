@@ -163,9 +163,11 @@ than the older read-and-hash approach.
 - The current native path is materially faster than legacy on the implemented
   S3 operations, but LocalStack transport latency still dominates total wall
   time.
-- Public native S3 coverage is now 19 operations: `CreateBucket`,
-  `DeleteBucket`, `HeadBucket`, `ListBuckets`, `ListObjects`, `HeadObject`,
-  `GetObject`, `PutObject`, `ListObjectsV2`, `DeleteObject`,
+- Public native S3 coverage is now 26 operations: `CreateBucket`,
+  `DeleteBucket`, `HeadBucket`, `ListBuckets`, `GetBucketLocation`,
+  `GetBucketTagging`, `PutBucketTagging`, `DeleteBucketTagging`,
+  `ListObjects`, `HeadObject`, `GetObject`, `GetObjectTagging`,
+  `PutObject`, `PutObjectTagging`, `DeleteObject`, `DeleteObjectTagging`,
   `DeleteObjects`, `CopyObject`, `CreateMultipartUpload`, `UploadPart`,
   `UploadPartCopy`, `CompleteMultipartUpload`, `AbortMultipartUpload`,
   `ListParts`, and `ListMultipartUploads`.

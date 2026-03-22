@@ -73,6 +73,21 @@ def test_native_bucket_ops(native_s3):
     assert deleted["ResponseMetadata"]["HTTPStatusCode"] == 204
 
 
+def test_native_bucket_location_and_tagging(native_s3):
+    location = native_s3.get_bucket_location(Bucket=BUCKET)
+    assert location["LocationConstraint"] in {None, "", REGION}
+
+    tagging = {"TagSet": [{"Key": "team", "Value": "turbo"}, {"Key": "env", "Value": "test"}]}
+    put = native_s3.put_bucket_tagging(Bucket=BUCKET, Tagging=tagging)
+    assert put["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+    got = native_s3.get_bucket_tagging(Bucket=BUCKET)
+    assert got["TagSet"] == tagging["TagSet"]
+
+    deleted = native_s3.delete_bucket_tagging(Bucket=BUCKET)
+    assert deleted["ResponseMetadata"]["HTTPStatusCode"] == 204
+
+
 def test_native_head_and_get(native_s3):
     head = native_s3.head_object(Bucket=BUCKET, Key="hello.txt")
     body = native_s3.get_object(Bucket=BUCKET, Key="hello.txt")["Body"].read()
@@ -126,6 +141,20 @@ def test_native_copy_object(native_s3):
     assert resp["CopyObjectResult"]["ETag"]
     copied = native_s3.get_object(Bucket=BUCKET, Key="copy-dst")["Body"].read()
     assert copied == b"copy-data"
+
+
+def test_native_object_tagging(native_s3):
+    native_s3.put_object(Bucket=BUCKET, Key="tagged-object", Body=b"tag-me")
+    tagging = {"TagSet": [{"Key": "kind", "Value": "object"}, {"Key": "state", "Value": "fresh"}]}
+
+    put = native_s3.put_object_tagging(Bucket=BUCKET, Key="tagged-object", Tagging=tagging)
+    assert put["ResponseMetadata"]["HTTPStatusCode"] == 200
+
+    got = native_s3.get_object_tagging(Bucket=BUCKET, Key="tagged-object")
+    assert got["TagSet"] == tagging["TagSet"]
+
+    deleted = native_s3.delete_object_tagging(Bucket=BUCKET, Key="tagged-object")
+    assert deleted["ResponseMetadata"]["HTTPStatusCode"] == 204
 
 
 def test_native_missing_key_errors(native_s3):

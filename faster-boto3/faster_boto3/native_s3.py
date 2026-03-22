@@ -207,6 +207,42 @@ class NativeS3Client:
             return self._fallback.list_buckets()
         return self._run_mode("list_buckets", native, fallback)
 
+    def get_bucket_location(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.get_bucket_location(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_get_bucket_location(Bucket=Bucket)
+        def fallback():
+            return self._fallback.get_bucket_location(Bucket=Bucket)
+        return self._run_mode("get_bucket_location", native, fallback)
+
+    def get_bucket_tagging(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.get_bucket_tagging(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_get_bucket_tagging(Bucket=Bucket)
+        def fallback():
+            return self._fallback.get_bucket_tagging(Bucket=Bucket)
+        return self._run_mode("get_bucket_tagging", native, fallback)
+
+    def put_bucket_tagging(self, *, Bucket, Tagging, **kwargs):
+        if kwargs:
+            return self._fallback.put_bucket_tagging(Bucket=Bucket, Tagging=Tagging, **kwargs)
+        def native():
+            return self._native_put_bucket_tagging(Bucket=Bucket, Tagging=Tagging)
+        def fallback():
+            return self._fallback.put_bucket_tagging(Bucket=Bucket, Tagging=Tagging)
+        return self._run_mode("put_bucket_tagging", native, fallback)
+
+    def delete_bucket_tagging(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.delete_bucket_tagging(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_delete_bucket_tagging(Bucket=Bucket)
+        def fallback():
+            return self._fallback.delete_bucket_tagging(Bucket=Bucket)
+        return self._run_mode("delete_bucket_tagging", native, fallback)
+
     def list_objects(self, *, Bucket, Prefix=None, Marker=None, MaxKeys=None, Delimiter=None, **kwargs):
         if kwargs:
             return self._fallback.list_objects(
@@ -237,6 +273,33 @@ class NativeS3Client:
                 fallback_kwargs["Delimiter"] = Delimiter
             return self._fallback.list_objects(**fallback_kwargs)
         return self._run_mode("list_objects", native, fallback)
+
+    def get_object_tagging(self, *, Bucket, Key, **kwargs):
+        if kwargs:
+            return self._fallback.get_object_tagging(Bucket=Bucket, Key=Key, **kwargs)
+        def native():
+            return self._native_get_object_tagging(Bucket=Bucket, Key=Key)
+        def fallback():
+            return self._fallback.get_object_tagging(Bucket=Bucket, Key=Key)
+        return self._run_mode("get_object_tagging", native, fallback)
+
+    def put_object_tagging(self, *, Bucket, Key, Tagging, **kwargs):
+        if kwargs:
+            return self._fallback.put_object_tagging(Bucket=Bucket, Key=Key, Tagging=Tagging, **kwargs)
+        def native():
+            return self._native_put_object_tagging(Bucket=Bucket, Key=Key, Tagging=Tagging)
+        def fallback():
+            return self._fallback.put_object_tagging(Bucket=Bucket, Key=Key, Tagging=Tagging)
+        return self._run_mode("put_object_tagging", native, fallback)
+
+    def delete_object_tagging(self, *, Bucket, Key, **kwargs):
+        if kwargs:
+            return self._fallback.delete_object_tagging(Bucket=Bucket, Key=Key, **kwargs)
+        def native():
+            return self._native_delete_object_tagging(Bucket=Bucket, Key=Key)
+        def fallback():
+            return self._fallback.delete_object_tagging(Bucket=Bucket, Key=Key)
+        return self._run_mode("delete_object_tagging", native, fallback)
 
     def list_objects_v2(self, *, Bucket, Prefix=None, MaxKeys=None, **kwargs):
         if kwargs:
@@ -593,6 +656,49 @@ class NativeS3Client:
         out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
         return out
 
+    def _native_get_bucket_location(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None, params={"location": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("GetBucketLocation", status, parsed_headers, resp_body)
+        location = self._parse_text_xml_field(resp_body, "LocationConstraint")
+        return {
+            "LocationConstraint": location,
+            "ResponseMetadata": self._response_metadata(status, parsed_headers),
+        }
+
+    def _native_get_bucket_tagging(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None, params={"tagging": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("GetBucketTagging", status, parsed_headers, resp_body)
+        out = self._parse_tagging(resp_body)
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
+
+    def _native_put_bucket_tagging(self, *, Bucket, Tagging):
+        path, query, url = self._build_url(Bucket, None, params={"tagging": ""})
+        body = self._encode_tagging_xml(Tagging)
+        payload_hash = _sigv4_accel_module().sha256_hex(body)
+        headers = self._signed_headers("PUT", path, query, payload_hash, body=body)
+        status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, body)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("PutBucketTagging", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
+    def _native_delete_bucket_tagging(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None, params={"tagging": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("DELETE", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("DELETE", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("DeleteBucketTagging", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
     def _native_multipart_put_object(self, *, Bucket, Key, Body, Metadata, fd_request, multipart_cfg):
         chunk_size = multipart_cfg["chunk_size"]
         concurrency = multipart_cfg["concurrency"]
@@ -717,6 +823,36 @@ class NativeS3Client:
         parsed = self._parse_list_objects_v1(resp_body)
         parsed["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
         return parsed
+
+    def _native_get_object_tagging(self, *, Bucket, Key):
+        path, query, url = self._build_url(Bucket, Key, params={"tagging": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("GetObjectTagging", status, parsed_headers, resp_body)
+        out = self._parse_tagging(resp_body)
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
+
+    def _native_put_object_tagging(self, *, Bucket, Key, Tagging):
+        path, query, url = self._build_url(Bucket, Key, params={"tagging": ""})
+        body = self._encode_tagging_xml(Tagging)
+        payload_hash = _sigv4_accel_module().sha256_hex(body)
+        headers = self._signed_headers("PUT", path, query, payload_hash, body=body)
+        status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, body)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("PutObjectTagging", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
+    def _native_delete_object_tagging(self, *, Bucket, Key):
+        path, query, url = self._build_url(Bucket, Key, params={"tagging": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("DELETE", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("DELETE", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("DeleteObjectTagging", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
 
     def _native_delete_object(self, *, Bucket, Key):
         path, query, url = self._build_url(Bucket, Key)
@@ -1150,6 +1286,21 @@ class NativeS3Client:
                 out["Buckets"].append(item)
         return out
 
+    def _parse_tagging(self, body: bytes):
+        if not body:
+            return {"TagSet": []}
+        root = ET.fromstring(body)
+        out = {"TagSet": []}
+        for tag_node in root.findall(".//{*}Tag"):
+            item = {}
+            for child in tag_node:
+                text = child.text
+                if text is not None:
+                    item[_strip_ns(child.tag)] = text
+            if item:
+                out["TagSet"].append(item)
+        return out
+
     def _parse_copy_object(self, body: bytes):
         if not body:
             return {}
@@ -1219,6 +1370,15 @@ class NativeS3Client:
         location = config.get("LocationConstraint")
         if location is not None:
             ET.SubElement(root, "LocationConstraint").text = str(location)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    def _encode_tagging_xml(self, tagging):
+        root = ET.Element("Tagging")
+        tag_set = ET.SubElement(root, "TagSet")
+        for item in tagging.get("TagSet", []):
+            tag = ET.SubElement(tag_set, "Tag")
+            ET.SubElement(tag, "Key").text = str(item["Key"])
+            ET.SubElement(tag, "Value").text = str(item["Value"])
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     def _encode_delete_objects_xml(self, delete):
@@ -1406,6 +1566,10 @@ def _results_equal(operation_name: str, native_result, fallback_result) -> bool:
         native_buckets = [item.get("Name") for item in native_result.get("Buckets", [])]
         fallback_buckets = [item.get("Name") for item in fallback_result.get("Buckets", [])]
         return native_buckets == fallback_buckets
+    if operation_name in {"get_bucket_tagging", "get_object_tagging"}:
+        return native_result.get("TagSet") == fallback_result.get("TagSet")
+    if operation_name == "get_bucket_location":
+        return native_result.get("LocationConstraint") == fallback_result.get("LocationConstraint")
     if operation_name == "delete_objects":
         native_deleted = [item.get("Key") for item in native_result.get("Deleted", [])]
         fallback_deleted = [item.get("Key") for item in fallback_result.get("Deleted", [])]
@@ -1423,6 +1587,10 @@ def _results_equal(operation_name: str, native_result, fallback_result) -> bool:
         "head_object",
         "create_bucket",
         "delete_bucket",
+        "put_bucket_tagging",
+        "delete_bucket_tagging",
+        "put_object_tagging",
+        "delete_object_tagging",
         "put_object",
         "delete_object",
         "copy_object",
