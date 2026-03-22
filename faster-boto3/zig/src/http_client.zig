@@ -23,6 +23,7 @@ pub const HttpError = error{
     RequestFailed,
     InvalidUrl,
     OutOfMemory,
+    ReadFailed,
 };
 
 /// Single HTTP request using nanobrew's pattern:
@@ -129,6 +130,113 @@ pub fn doRequest(
     };
 }
 
+pub fn doRequestFromFd(
+    allocator: Allocator,
+    client: *http.Client,
+    method: http.Method,
+    url: []const u8,
+    extra_headers: []const http.Header,
+    fd: std.posix.fd_t,
+    offset: u64,
+    length: usize,
+) HttpError!HttpResponse {
+    const uri = std.Uri.parse(url) catch return HttpError.InvalidUrl;
+
+    var req = client.request(method, uri, .{
+        .redirect_behavior = @enumFromInt(5),
+        .extra_headers = extra_headers,
+        .keep_alive = true,
+    }) catch return HttpError.ConnectionFailed;
+
+    req.transfer_encoding = .{ .content_length = length };
+    var send_body = req.sendBody(&.{}) catch {
+        req.deinit();
+        return HttpError.RequestFailed;
+    };
+
+    var buf: [256 * 1024]u8 = undefined;
+    var remaining = length;
+    var pos: usize = 0;
+    while (remaining > 0) {
+        const to_read = @min(buf.len, remaining);
+        const n = std.posix.pread(fd, buf[0..to_read], offset + pos) catch {
+            req.deinit();
+            return HttpError.ReadFailed;
+        };
+        if (n == 0) break;
+        send_body.writer.writeAll(buf[0..n]) catch {
+            req.deinit();
+            return HttpError.RequestFailed;
+        };
+        remaining -= n;
+        pos += n;
+    }
+    send_body.end() catch {
+        req.deinit();
+        return HttpError.RequestFailed;
+    };
+
+    var head_buf: [16384]u8 = undefined;
+    var response = req.receiveHead(&head_buf) catch {
+        req.deinit();
+        return HttpError.RequestFailed;
+    };
+
+    const status_int: u16 = @intFromEnum(response.head.status);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    var reader = response.reader(&.{});
+    _ = reader.streamRemaining(&out.writer) catch {
+        if (out.toOwnedSlice()) |s| allocator.free(s) else |_| {}
+        req.deinit();
+        return HttpError.RequestFailed;
+    };
+    const resp_body = out.toOwnedSlice() catch {
+        req.deinit();
+        return HttpError.OutOfMemory;
+    };
+
+    var hdr_out: std.ArrayList(u8) = .empty;
+    var hdr_iter = response.head.iterateHeaders();
+    while (hdr_iter.next()) |h| {
+        hdr_out.appendSlice(allocator, h.name) catch {
+            allocator.free(resp_body);
+            req.deinit();
+            return HttpError.OutOfMemory;
+        };
+        hdr_out.appendSlice(allocator, ": ") catch {
+            allocator.free(resp_body);
+            req.deinit();
+            return HttpError.OutOfMemory;
+        };
+        hdr_out.appendSlice(allocator, h.value) catch {
+            allocator.free(resp_body);
+            req.deinit();
+            return HttpError.OutOfMemory;
+        };
+        hdr_out.appendSlice(allocator, "\r\n") catch {
+            allocator.free(resp_body);
+            req.deinit();
+            return HttpError.OutOfMemory;
+        };
+    }
+
+    const headers_str = hdr_out.toOwnedSlice(allocator) catch {
+        allocator.free(resp_body);
+        req.deinit();
+        return HttpError.OutOfMemory;
+    };
+
+    req.deinit();
+
+    return HttpResponse{
+        .status = status_int,
+        .headers_buf = headers_str,
+        .body = resp_body,
+        .allocator = allocator,
+    };
+}
+
 /// Convenience: one-shot request (creates + destroys client).
 pub fn request(
     allocator: Allocator,
@@ -194,6 +302,7 @@ fn batchWorker(allocator: Allocator, req: *const BatchRequest, result: *BatchRes
                 HttpError.RequestFailed => "request failed",
                 HttpError.InvalidUrl => "invalid URL",
                 HttpError.OutOfMemory => "out of memory",
+                HttpError.ReadFailed => "read failed",
             },
         };
         return;

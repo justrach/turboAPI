@@ -110,6 +110,28 @@ following are true:
 | Paginators / waiters | Botocore | Botocore | Legacy first, migrate later |
 | Streaming uploads | Botocore | Zig transport + `request_fd` | Native |
 
+## Current Upload Bench
+
+Latest LocalStack upload-only comparison for the current native `put_object`
+path in this worktree:
+
+| File size | Native single PUT | Native multipart | Delta |
+|---|---:|---:|---:|
+| 1 MiB | 9046.7 us | 8866.3 us | 1.02x faster |
+| 8 MiB | 57271.0 us | 57488.7 us | 0.996x |
+
+Notes:
+
+- This compares the current native upload path with multipart disabled vs
+  multipart enabled.
+- On LocalStack, multipart is only a marginal win at 1 MiB and effectively
+  neutral at 8 MiB in the current implementation.
+- The larger end-to-end native win over legacy for big uploads currently comes
+  more from the native request path overall than from multipart orchestration by
+  itself.
+- Real AWS measurements are still needed before promoting multipart behavior
+  aggressively.
+
 ## What Gets Checked
 
 For each migrated operation, store:

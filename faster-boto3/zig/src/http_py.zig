@@ -156,6 +156,7 @@ fn py_http_request(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObjec
             http_client.HttpError.RequestFailed => "request failed",
             http_client.HttpError.InvalidUrl => "invalid URL",
             http_client.HttpError.OutOfMemory => "out of memory",
+            http_client.HttpError.ReadFailed => "read failed",
         };
         c.PyErr_SetString(c.PyExc_ConnectionError, msg);
         return null;
@@ -195,6 +196,7 @@ fn py_http_request_oneshot(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c
             http_client.HttpError.RequestFailed => "request failed",
             http_client.HttpError.InvalidUrl => "invalid URL",
             http_client.HttpError.OutOfMemory => "out of memory",
+            http_client.HttpError.ReadFailed => "read failed",
         };
         c.PyErr_SetString(c.PyExc_ConnectionError, msg);
         return null;
@@ -387,41 +389,28 @@ fn py_http_request_fd(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyOb
         }
     }
 
-    // Read file region into buffer via pread (no Python copy)
-    const len: usize = @intCast(length);
-    const body = allocator.alloc(u8, len) catch {
-        c.PyErr_SetString(c.PyExc_MemoryError, "body alloc failed");
-        return null;
-    };
-    defer allocator.free(body);
-
     const file_fd: std.posix.fd_t = @intCast(fd);
     const off: u64 = @intCast(offset);
-    var total_read: usize = 0;
-    while (total_read < len) {
-        const n = std.posix.pread(file_fd, body[total_read..], off + total_read) catch {
-            c.PyErr_SetString(c.PyExc_OSError, "pread failed");
-            return null;
-        };
-        if (n == 0) break; // EOF
-        total_read += n;
-    }
+    const len: usize = @intCast(length);
 
     const client_ptr = getClient();
 
-    var resp = http_client.doRequest(
+    var resp = http_client.doRequestFromFd(
         allocator,
         client_ptr,
         method,
         std.mem.span(url_ptr),
         headers.items,
-        body[0..total_read],
+        file_fd,
+        off,
+        len,
     ) catch |err| {
         const msg = switch (err) {
             http_client.HttpError.ConnectionFailed => "connection failed",
             http_client.HttpError.RequestFailed => "request failed",
             http_client.HttpError.InvalidUrl => "invalid URL",
             http_client.HttpError.OutOfMemory => "out of memory",
+            http_client.HttpError.ReadFailed => "read failed",
         };
         c.PyErr_SetString(c.PyExc_ConnectionError, msg);
         return null;
