@@ -1,5 +1,7 @@
 """Python Redis client. Zig handles the entire hot path."""
 
+import redis as _redis_py
+
 from faster_redis._redis_accel import (
     connect as _connect,
     execute as _execute,
@@ -107,11 +109,46 @@ def _parse_acl_getuser(result):
     }
 
 
+_ERROR_PREFIXES = (
+    "ERR ",
+    "WRONGTYPE ",
+    "EXECABORT ",
+    "NOGROUP ",
+    "BUSY ",
+    "NOSCRIPT ",
+    "NOAUTH ",
+    "NOPERM ",
+    "READONLY ",
+    "MISCONF ",
+    "LOADING ",
+    "MASTERDOWN ",
+    "OOM ",
+    "TRYAGAIN ",
+    "CLUSTERDOWN ",
+    "CROSSSLOT ",
+    "MOVED ",
+    "ASK ",
+)
+
+
+def _raise_pipeline_error(value):
+    if isinstance(value, list):
+        for item in value:
+            _raise_pipeline_error(item)
+        return
+    if isinstance(value, str) and value.startswith(_ERROR_PREFIXES):
+        raise _redis_py.exceptions.ResponseError(value)
+
+
 class Redis:
     """Zig-native Redis client. Every command is one Zig call."""
 
     def __init__(self, host='127.0.0.1', port=6379, db=0, password=None,
                  decode_responses=True):
+        self._host = host
+        self._port = port
+        self._db = db
+        self._password = password
         self._decode = decode_responses
         _connect(host, port)
         if password:
@@ -132,7 +169,7 @@ class Redis:
 
     def _apply_response_callback(self, args, result):
         key = _response_key(args)
-        if key in {"AUTH", "CONFIG RESETSTAT", "CONFIG SET", "FLUSHALL", "FLUSHDB", "MSET", "PING", "SELECT", "SET"}:
+        if key in {"AUTH", "CONFIG RESETSTAT", "CONFIG SET", "FLUSHALL", "FLUSHDB", "MSET", "PING", "SELECT", "SET", "UNWATCH", "WATCH"}:
             return True if result == "OK" or result == "PONG" else result
         if key == "ACL GETUSER":
             return _parse_acl_getuser(result)
@@ -376,6 +413,8 @@ class Pipeline:
     def __init__(self, client, transaction=False):
         self._client = client
         self._transaction = transaction
+        self._watching = False
+        self._in_multi = not transaction
         self._commands = []
 
     def __enter__(self):
@@ -386,6 +425,8 @@ class Pipeline:
 
     def execute(self):
         if not self._commands:
+            if self._watching:
+                self._watching = False
             return []
         cmds = self._commands
         if self._transaction:
@@ -398,14 +439,40 @@ class Pipeline:
 
         if self._transaction and results:
             if isinstance(results[-1], list):
-                return [
+                exec_results = [
                     self._client._apply_response_callback(cmd, self._client._dec(result))
                     for cmd, result in zip(self._commands, results[-1])
                 ]
-            return results[1:-1]
+                _raise_pipeline_error(exec_results)
+                self._commands = []
+                self._watching = False
+                self._in_multi = False
+                return exec_results
+            self._commands = []
+            self._watching = False
+            self._in_multi = False
+            raise _redis_py.exceptions.WatchError("Watched variable changed.")
 
+        _raise_pipeline_error(results)
         self._commands = []
+        self._watching = False
         return results
+
+    def watch(self, *keys):
+        self._watching = True
+        self._in_multi = False
+        return self._client._exec('WATCH', *keys)
+
+    def unwatch(self):
+        self._watching = False
+        self._in_multi = False
+        self._commands = []
+        return self._client._exec('UNWATCH')
+
+    def multi(self):
+        self._transaction = True
+        self._in_multi = True
+        return self
 
     def __getattr__(self, name):
         """Buffer any Redis command."""
@@ -413,6 +480,8 @@ class Pipeline:
             raise AttributeError(name)
         def method(*args, **kwargs):
             _reject_unsupported_kwargs(name, kwargs)
+            if self._watching and not self._in_multi:
+                return getattr(self._client, name)(*args, **kwargs)
             self._commands.append(_normalize_command_name(name) + list(args))
             return self
         return method
