@@ -872,8 +872,8 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
 
 // ── Raw query API (no HTTP, direct pg.zig from Python) ──────────────────────
 
-const RawCell = struct { start: u32, len: u16, is_null: bool };
-const MAX_RAW_CELLS = 32768; // supports up to ~1000 rows * 32 cols
+const RawCell = struct { start: u32, len: u16, is_null: bool, oid: i32 };
+const MAX_RAW_CELLS = 32768;
 pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var sql_ptr: [*c]const u8 = null;
     var params_obj: ?*c.PyObject = null;
@@ -960,6 +960,7 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     defer allocator.free(cells);
 
     var col_name_ptrs: [32][]const u8 = undefined;
+    var col_name_storage: [32][64]u8 = undefined; // owned copies of column names
     var cell_count: usize = 0;
     var num_cols: usize = 0;
     var num_rows: usize = 0;
@@ -967,7 +968,10 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     const col_names = result.column_names;
     num_cols = @min(col_names.len, 32);
     for (0..num_cols) |ci| {
-        col_name_ptrs[ci] = col_names[ci];
+        const name = col_names[ci];
+        const copy_len = @min(name.len, 63);
+        @memcpy(col_name_storage[ci][0..copy_len], name[0..copy_len]);
+        col_name_ptrs[ci] = col_name_storage[ci][0..copy_len];
     }
 
     while (result.next() catch null) |row| {
@@ -975,17 +979,20 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         for (0..num_cols) |ci| {
             const value = row.values[ci];
             if (value.is_null) {
-                cells[cell_count] = .{ .start = 0, .len = 0, .is_null = true };
+                cells[cell_count] = .{ .start = 0, .len = 0, .is_null = true, .oid = 0 };
             } else {
-                const remaining = flat_buf[flat_pos..];
-                if (remaining.len < 8192) break;
-                const val_len = row.writeJsonValue(ci, remaining[0..8192]);
+                // Store raw binary data + OID for direct decoding in Phase 3
+                const data = value.data;
+                const copy_len = @min(data.len, flat_buf.len - flat_pos);
+                if (copy_len < data.len) break; // buffer full
+                @memcpy(flat_buf[flat_pos..][0..copy_len], data[0..copy_len]);
                 cells[cell_count] = .{
                     .start = @intCast(flat_pos),
-                    .len = @intCast(val_len),
+                    .len = @intCast(copy_len),
                     .is_null = false,
+                    .oid = row.oids[ci],
                 };
-                flat_pos += val_len;
+                flat_pos += copy_len;
             }
             cell_count += 1;
         }
@@ -1022,46 +1029,38 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
             if (cell.is_null) {
                 py_val = py.pyNone();
             } else {
-                const val_str = flat_buf[cell.start..][0..cell.len];
-                if (val_str.len == 0) {
-                    py_val = py.pyNone();
-                } else if (val_str[0] == '"' and val_str[val_str.len - 1] == '"') {
-                    const inner = val_str[1 .. val_str.len - 1];
-                    py_val = c.PyUnicode_DecodeUTF8(@ptrCast(inner.ptr), @intCast(inner.len), "replace") orelse {
-                        c.Py_DecRef(py_key);
-                        c.Py_DecRef(py_dict);
-                        c.Py_DecRef(py_list);
-                        return null;
-                    };
-                } else if (val_str.len == 4 and std.mem.eql(u8, val_str, "true")) {
-                    py_val = py.pyTrue();
-                } else if (val_str.len == 5 and std.mem.eql(u8, val_str, "false")) {
-                    py_val = py.pyFalse();
-                } else {
-                    const int_val = std.fmt.parseInt(i64, val_str, 10) catch {
-                        const float_val = std.fmt.parseFloat(f64, val_str) catch {
-                            py_val = c.PyUnicode_DecodeUTF8(
-                                @ptrCast(val_str.ptr),
-                                @intCast(val_str.len),
-                                "replace",
-                            ) orelse {
-                                c.Py_DecRef(py_key);
-                                c.Py_DecRef(py_dict);
-                                c.Py_DecRef(py_list);
-                                return null;
-                            };
-                            _ = c.PyDict_SetItem(py_dict, py_key, py_val);
-                            c.Py_DecRef(py_val);
+                const data = flat_buf[cell.start..][0..cell.len];
+                // Decode binary data directly based on Postgres OID
+                switch (cell.oid) {
+                    // Integers: int2, int4, int8
+                    21 => py_val = c.PyLong_FromLong(@as(c_long, std.mem.readInt(i16, data[0..2], .big))),
+                    23 => py_val = c.PyLong_FromLong(@as(c_long, std.mem.readInt(i32, data[0..4], .big))),
+                    20 => py_val = c.PyLong_FromLongLong(std.mem.readInt(i64, data[0..8], .big)),
+                    // Float: float4, float8
+                    700 => py_val = c.PyFloat_FromDouble(@floatCast(@as(f32, @bitCast(std.mem.readInt(u32, data[0..4], .big))))),
+                    701 => py_val = c.PyFloat_FromDouble(@bitCast(std.mem.readInt(u64, data[0..8], .big))),
+                    // Bool
+                    16 => py_val = if (data[0] != 0) py.pyTrue() else py.pyFalse(),
+                    // OID (uint32)
+                    26 => py_val = c.PyLong_FromUnsignedLong(@as(c_ulong, std.mem.readInt(u32, data[0..4], .big))),
+                    // Text, varchar, name, char(n), unknown
+                    25, 1043, 19, 1042, 705, 18 => {
+                        py_val = c.PyUnicode_DecodeUTF8(@ptrCast(data.ptr), @intCast(data.len), "replace") orelse {
                             c.Py_DecRef(py_key);
-                            continue;
+                            c.Py_DecRef(py_dict);
+                            c.Py_DecRef(py_list);
+                            return null;
                         };
-                        py_val = c.PyFloat_FromDouble(float_val);
-                        _ = c.PyDict_SetItem(py_dict, py_key, py_val);
-                        c.Py_DecRef(py_val);
-                        c.Py_DecRef(py_key);
-                        continue;
-                    };
-                    py_val = c.PyLong_FromLongLong(int_val);
+                    },
+                    // Everything else: try as UTF-8 string
+                    else => {
+                        py_val = c.PyUnicode_DecodeUTF8(@ptrCast(data.ptr), @intCast(data.len), "replace") orelse {
+                            c.Py_DecRef(py_key);
+                            c.Py_DecRef(py_dict);
+                            c.Py_DecRef(py_list);
+                            return null;
+                        };
+                    },
                 }
             }
 
