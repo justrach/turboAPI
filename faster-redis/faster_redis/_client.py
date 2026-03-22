@@ -23,7 +23,7 @@ def _reject_unsupported_kwargs(name, kwargs):
 
 def _response_key(args):
     parts = [str(part).upper() for part in args[:2]]
-    if len(parts) >= 2 and parts[0] in {"CLIENT", "CONFIG", "OBJECT", "XGROUP"}:
+    if len(parts) >= 2 and parts[0] in {"ACL", "CLIENT", "CONFIG", "OBJECT", "XGROUP"}:
         return f"{parts[0]} {parts[1]}"
     return parts[0] if parts else ""
 
@@ -77,6 +77,36 @@ def _parse_xreadgroup(result):
     return streams
 
 
+def _parse_acl_getuser(result):
+    if not isinstance(result, list):
+        return result
+    raw = _pairs_to_dict(result)
+    flags = raw.get("flags", [])
+    if not isinstance(flags, list):
+        flags = [flags]
+    command_tokens = str(raw.get("commands", "")).split()
+    categories = [token for token in command_tokens if token.startswith(("+@", "-@"))]
+    commands = [token for token in command_tokens if not token.startswith(("+@", "-@"))]
+
+    def _listify(value):
+        if value in ("", None):
+            return []
+        if isinstance(value, list):
+            return value
+        return str(value).split()
+
+    return {
+        "flags": flags,
+        "passwords": raw.get("passwords", []) if isinstance(raw.get("passwords", []), list) else _listify(raw.get("passwords")),
+        "commands": commands,
+        "keys": _listify(raw.get("keys")),
+        "channels": _listify(raw.get("channels")),
+        "selectors": raw.get("selectors", []) if isinstance(raw.get("selectors", []), list) else _listify(raw.get("selectors")),
+        "categories": categories,
+        "enabled": "on" in flags,
+    }
+
+
 class Redis:
     """Zig-native Redis client. Every command is one Zig call."""
 
@@ -104,6 +134,8 @@ class Redis:
         key = _response_key(args)
         if key in {"AUTH", "FLUSHALL", "FLUSHDB", "MSET", "PING", "SELECT", "SET"}:
             return True if result == "OK" or result == "PONG" else result
+        if key == "ACL GETUSER":
+            return _parse_acl_getuser(result)
         if key == "CONFIG GET":
             return _pairs_to_dict(result)
         if key == "CLIENT LIST":
@@ -286,6 +318,9 @@ class Redis:
 
     # -- Server ------------------------------------------------------------
     def ping(self): return self._exec('PING')
+    def acl_list(self): return self._exec('ACL', 'LIST')
+    def acl_whoami(self): return self._exec('ACL', 'WHOAMI')
+    def acl_getuser(self, username): return self._exec('ACL', 'GETUSER', username)
     def info(self, section=None): return self._exec('INFO', section) if section else self._exec('INFO')
     def client_list(self, _type=None):
         args = ['CLIENT', 'LIST']
