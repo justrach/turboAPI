@@ -259,9 +259,9 @@ TurboAPI serves the S3 endpoints from a Zig FFI handler library instead of a
 Python route function.
 
 This is a spike, not a parity-complete backend. It currently focuses on the
-fully native `GET` and `ListObjectsV2` path. `HeadObject` is intentionally
-excluded from the FFI throughput table because the LocalStack `HEAD` lane is
-still unstable in this route-level experiment.
+fully native route path for a small S3 slice. The current validated FFI handlers
+are `GetObject`, `HeadObject`, `ListObjectsV2`, `HeadBucket`, `DeleteObject`,
+and `CopyObject`.
 
 Command:
 
@@ -278,21 +278,23 @@ Load: `wrk -t8 -c200 -d3s`
 
 | Operation | Turbo RPS | Fast RPS | Speedup | Turbo p99 |
 |---|---:|---:|---:|---:|
-| `S3 GetObject (1KB)` | 5707 | 1213 | 4.71x | 9.5 ms |
-| `S3 GetObject (10KB)` | 5545 | 1200 | 4.62x | 9.6 ms |
-| `S3 ListObjects (20)` | 5285 | 772 | 6.84x | 9.9 ms |
+| `S3 GetObject (1KB)` | 1159 | 1158 | 1.00x | 33.7 ms |
+| `S3 GetObject (10KB)` | 1127 | 1061 | 1.06x | 72.5 ms |
+| `S3 HeadObject` | 1118 | 1305 | 0.86x | 78.0 ms |
+| `S3 ListObjects (20)` | 924 | 690 | 1.34x | 77.2 ms |
 
 ### Notes
 
-- The first native-ffi run looked artificially terrible because the handler
-  still had per-request debug logging enabled. Once the hot-path logging was
-  removed, the benchmark reflected the actual route execution cost.
-- These numbers are materially higher than the `TurboAPI + faster-boto3`
-  Python-route benchmark because this spike bypasses Python route dispatch and
-  Python-side response shaping entirely.
-- The FFI handler still creates a fresh Zig HTTP client per request. That means
-  there is still meaningful headroom left if this path graduates from spike to
-  a real runtime backend.
+- The first native-ffi run looked dramatically faster because the handler was
+  returning fast `400` responses while still surfacing `200` at the route
+  level. After fixing outbound `Host` handling and checking the route against
+  real objects, these are the corrected numbers.
+- The current FFI handler creates a fresh Zig `std.http.Client` per request and
+  still does request signing work on every call. That is why this spike is only
+  modestly ahead of `FastAPI + boto3` on `get`/`list`, not another multi-x jump.
+- `HeadObject` is currently implemented as a signed `GET` in the FFI spike so
+  the route is correct against LocalStack. It is not yet a true optimized HEAD
+  transport path.
 
 ## What Gets Checked
 

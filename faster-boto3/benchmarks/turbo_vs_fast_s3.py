@@ -83,7 +83,10 @@ app = TurboAPI(title="TurboNativeFFIBench")
 app.static_route("GET", "/health", '{{"status":"ok"}}')
 app.native_route("GET", "/s3/get/{{key}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_get")
 app.native_route("GET", "/s3/head/{{key}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_head")
+app.native_route("GET", "/s3/head-bucket", r"{NATIVE_HANDLER_LIB}", "handle_s3_head_bucket")
 app.native_route("GET", "/s3/list", r"{NATIVE_HANDLER_LIB}", "handle_s3_list")
+app.native_route("DELETE", "/s3/delete/{{key}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_delete")
+app.native_route("PUT", "/s3/copy/{{src}}/{{dst}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_copy")
 app.run(host="127.0.0.1", port={TURBO_PORT})
 """
 
@@ -294,12 +297,6 @@ def main():
             ("S3 HeadObject", "/s3/head/bench-1k"),
             ("S3 ListObjects (20)", "/s3/list"),
         ]
-        if args.turbo_mode == "native-ffi":
-            # The FFI spike is meant to test the fully native GET/list hot path.
-            # HEAD is still unstable against LocalStack on this route and would
-            # just dominate the benchmark with a known transport-specific miss.
-            tests = [item for item in tests if item[0] != "S3 HeadObject"]
-
         results = []
         for name, path in tests:
             turbo_r = run_wrk(

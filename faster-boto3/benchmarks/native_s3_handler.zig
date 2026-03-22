@@ -286,7 +286,6 @@ fn buildSignedHeaders(
         headers.deinit(allocator);
     }
 
-    try headers.append(allocator, .{ .name = "host", .value = host });
     try headers.append(allocator, .{ .name = "x-amz-content-sha256", .value = payload_hash });
     try headers.append(allocator, .{ .name = "x-amz-date", .value = try allocator.dupe(u8, &now.amz_date) });
     for (extra_headers) |h| {
@@ -351,12 +350,27 @@ export fn handle_s3_head(req: *const Request) callconv(.c) Response {
     const url = makeUrl(cfg, canonical_uri) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     defer allocator.free(url);
 
+    var headers = buildSignedHeaders(cfg, "GET", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
+    defer headers.deinit(allocator);
+    var resp = doRequest(.GET, url, headers.items) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+    defer resp.deinit();
+    const size = parseContentLength(resp.headers_buf) orelse resp.body.len;
+    const body = std.fmt.allocPrint(allocator, "{{\"key\":\"{s}\",\"size\":{d}}}", .{ key, size }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
+}
+
+export fn handle_s3_head_bucket(_: *const Request) callconv(.c) Response {
+    const cfg = loadConfig();
+    const canonical_uri = std.fmt.allocPrint(allocator, "/{s}", .{cfg.bucket}) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    defer allocator.free(canonical_uri);
+    const url = makeUrl(cfg, canonical_uri) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    defer allocator.free(url);
+
     var headers = buildSignedHeaders(cfg, "HEAD", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
     defer headers.deinit(allocator);
     var resp = doRequest(.HEAD, url, headers.items) catch return jsonResponse(502, "{\"error\":\"s3\"}");
     defer resp.deinit();
-    const size = parseContentLength(resp.headers_buf) orelse 0;
-    const body = std.fmt.allocPrint(allocator, "{{\"key\":\"{s}\",\"size\":{d}}}", .{ key, size }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    const body = std.fmt.allocPrint(allocator, "{{\"bucket\":\"{s}\",\"status\":{d}}}", .{ cfg.bucket, resp.status }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
 }
 
@@ -393,6 +407,41 @@ export fn handle_s3_list(_: *const Request) callconv(.c) Response {
     defer resp.deinit();
     const count = countTag(resp.body, "<Contents>");
     const body = std.fmt.allocPrint(allocator, "{{\"count\":{d}}}", .{count}) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
+}
+
+export fn handle_s3_delete(req: *const Request) callconv(.c) Response {
+    const cfg = loadConfig();
+    const key = getParam(req, "key") orelse return jsonResponse(400, "{\"error\":\"missing key\"}");
+    const canonical_uri = std.fmt.allocPrint(allocator, "/{s}/{s}", .{ cfg.bucket, key }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    defer allocator.free(canonical_uri);
+    const url = makeUrl(cfg, canonical_uri) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    defer allocator.free(url);
+
+    var headers = buildSignedHeaders(cfg, "DELETE", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
+    defer headers.deinit(allocator);
+    var resp = doRequest(.DELETE, url, headers.items) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+    defer resp.deinit();
+    const body = std.fmt.allocPrint(allocator, "{{\"key\":\"{s}\",\"deleted\":true}}", .{key}) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
+}
+
+export fn handle_s3_copy(req: *const Request) callconv(.c) Response {
+    const cfg = loadConfig();
+    const src = getParam(req, "src") orelse return jsonResponse(400, "{\"error\":\"missing src\"}");
+    const dst = getParam(req, "dst") orelse return jsonResponse(400, "{\"error\":\"missing dst\"}");
+    const canonical_uri = std.fmt.allocPrint(allocator, "/{s}/{s}", .{ cfg.bucket, dst }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    defer allocator.free(canonical_uri);
+    const url = makeUrl(cfg, canonical_uri) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    defer allocator.free(url);
+    const copy_source = std.fmt.allocPrint(allocator, "/{s}/{s}", .{ cfg.bucket, src }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    defer allocator.free(copy_source);
+
+    var headers = buildSignedHeaders(cfg, "PUT", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{.{ "x-amz-copy-source", copy_source }}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
+    defer headers.deinit(allocator);
+    var resp = doRequest(.PUT, url, headers.items) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+    defer resp.deinit();
+    const body = std.fmt.allocPrint(allocator, "{{\"src\":\"{s}\",\"dst\":\"{s}\",\"status\":{d}}}", .{ src, dst, resp.status }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
 }
 
