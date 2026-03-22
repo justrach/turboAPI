@@ -30,6 +30,8 @@ WRK_DURATION = os.environ.get("BENCH_DURATION", "10s")
 WRK_THREADS = 4
 WRK_CONNECTIONS = 100
 POOL_SIZE = int(os.environ.get("BENCH_POOL_SIZE", "32"))
+TURBO_POOL_SIZE = int(os.environ.get("BENCH_TURBO_POOL_SIZE", str(POOL_SIZE)))
+COMPETITOR_POOL_SIZE = int(os.environ.get("BENCH_COMPETITOR_POOL_SIZE", str(POOL_SIZE)))
 SOLO_TURBO = os.environ.get("BENCH_SOLO_TURBO") == "1"
 
 
@@ -111,7 +113,8 @@ class ServerHandle:
 
 def start_server(name: str, code: str) -> ServerHandle:
     port = free_port()
-    rendered = code.format(db_url=DB_URL, port=port, pool_size=POOL_SIZE)
+    pool_size = TURBO_POOL_SIZE if name == "TurboAPI + pg.zig" else COMPETITOR_POOL_SIZE
+    rendered = code.format(db_url=DB_URL, port=port, pool_size=pool_size)
     err_file = tempfile.NamedTemporaryFile(mode="w", suffix=f".{name}.log", delete=False)
     proc = subprocess.Popen(
         [sys.executable, "-c", rendered],
@@ -290,6 +293,10 @@ def main() -> int:
     print("=" * 78, flush=True)
     print(f"Postgres: {DB_URL}", flush=True)
     print(f"wrk: -t{WRK_THREADS} -c{WRK_CONNECTIONS} -d{WRK_DURATION}", flush=True)
+    print(
+        f"pool sizes: turbo={TURBO_POOL_SIZE} competitors={COMPETITOR_POOL_SIZE}",
+        flush=True,
+    )
     if SOLO_TURBO:
         print("TurboAPI-only run. Cache is OFF.", flush=True)
     else:
