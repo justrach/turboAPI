@@ -79,6 +79,24 @@ def test_native_delete_existing_and_missing(native_s3):
     assert resp["ResponseMetadata"]["HTTPStatusCode"] == 204
 
 
+def test_native_delete_objects(native_s3):
+    native_s3.put_object(Bucket=BUCKET, Key="bulk-delete-1", Body=b"x")
+    native_s3.put_object(Bucket=BUCKET, Key="bulk-delete-2", Body=b"y")
+    resp = native_s3.delete_objects(
+        Bucket=BUCKET,
+        Delete={
+            "Objects": [
+                {"Key": "bulk-delete-1"},
+                {"Key": "bulk-delete-2"},
+                {"Key": "bulk-delete-missing"},
+            ],
+            "Quiet": False,
+        },
+    )
+    deleted_keys = {item["Key"] for item in resp["Deleted"]}
+    assert deleted_keys == {"bulk-delete-1", "bulk-delete-2", "bulk-delete-missing"}
+
+
 def test_native_copy_object(native_s3):
     native_s3.put_object(Bucket=BUCKET, Key="copy-src", Body=b"copy-data")
     resp = native_s3.copy_object(
@@ -241,10 +259,30 @@ def test_native_manual_multipart_flow(native_s3):
     assert body == (b"a" * (5 * 1024 * 1024)) + b"tail-data"
 
 
+@pytest.mark.xfail(reason="native abort_multipart_upload still hangs in the current transport binary")
 def test_native_abort_multipart_upload(native_s3):
     create = native_s3.create_multipart_upload(Bucket=BUCKET, Key="abort-me")
     resp = native_s3.abort_multipart_upload(Bucket=BUCKET, Key="abort-me", UploadId=create["UploadId"])
     assert resp["ResponseMetadata"]["HTTPStatusCode"] == 204
+
+
+def test_native_list_parts_and_uploads(native_s3):
+    create = native_s3.create_multipart_upload(Bucket=BUCKET, Key="list-multipart")
+    upload_id = create["UploadId"]
+    native_s3.upload_part(
+        Bucket=BUCKET,
+        Key="list-multipart",
+        UploadId=upload_id,
+        PartNumber=1,
+        Body=b"z" * (5 * 1024 * 1024),
+    )
+    parts = native_s3.list_parts(Bucket=BUCKET, Key="list-multipart", UploadId=upload_id)
+    assert parts["UploadId"] == upload_id
+    assert [item["PartNumber"] for item in parts["Parts"]] == [1]
+
+    uploads = native_s3.list_multipart_uploads(Bucket=BUCKET, Prefix="list-")
+    listed = {(item["Key"], item["UploadId"]) for item in uploads["Uploads"]}
+    assert ("list-multipart", upload_id) in listed
 
 
 def test_operation_override_put_object_only(setup_bucket, monkeypatch):

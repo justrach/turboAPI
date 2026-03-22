@@ -106,11 +106,14 @@ def _parity_summary() -> dict:
         "PutObject",
         "ListObjectsV2",
         "DeleteObject",
+        "DeleteObjects",
         "CopyObject",
         "CreateMultipartUpload",
         "UploadPart",
         "CompleteMultipartUpload",
         "AbortMultipartUpload",
+        "ListParts",
+        "ListMultipartUploads",
     }
     missing = sorted(operation_names - implemented)
     return {

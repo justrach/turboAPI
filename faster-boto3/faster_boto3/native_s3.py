@@ -187,6 +187,15 @@ class NativeS3Client:
             return self._fallback.delete_object(Bucket=Bucket, Key=Key)
         return self._run_mode("delete_object", native, fallback)
 
+    def delete_objects(self, *, Bucket, Delete, **kwargs):
+        if kwargs:
+            return self._fallback.delete_objects(Bucket=Bucket, Delete=Delete, **kwargs)
+        def native():
+            return self._native_delete_objects(Bucket=Bucket, Delete=Delete)
+        def fallback():
+            return self._fallback.delete_objects(Bucket=Bucket, Delete=Delete)
+        return self._run_mode("delete_objects", native, fallback)
+
     def copy_object(self, *, Bucket, Key, CopySource, **kwargs):
         if kwargs:
             return self._fallback.copy_object(Bucket=Bucket, Key=Key, CopySource=CopySource, **kwargs)
@@ -263,6 +272,87 @@ class NativeS3Client:
         def fallback():
             return self._fallback.abort_multipart_upload(Bucket=Bucket, Key=Key, UploadId=UploadId)
         return self._run_mode("abort_multipart_upload", native, fallback)
+
+    def list_parts(self, *, Bucket, Key, UploadId, MaxParts=None, PartNumberMarker=None, **kwargs):
+        if kwargs:
+            return self._fallback.list_parts(
+                Bucket=Bucket,
+                Key=Key,
+                UploadId=UploadId,
+                MaxParts=MaxParts,
+                PartNumberMarker=PartNumberMarker,
+                **kwargs,
+            )
+        def native():
+            return self._native_list_parts(
+                Bucket=Bucket,
+                Key=Key,
+                UploadId=UploadId,
+                MaxParts=MaxParts,
+                PartNumberMarker=PartNumberMarker,
+            )
+        def fallback():
+            fallback_kwargs = {
+                "Bucket": Bucket,
+                "Key": Key,
+                "UploadId": UploadId,
+            }
+            if MaxParts is not None:
+                fallback_kwargs["MaxParts"] = MaxParts
+            if PartNumberMarker is not None:
+                fallback_kwargs["PartNumberMarker"] = PartNumberMarker
+            return self._fallback.list_parts(**fallback_kwargs)
+        return self._run_mode("list_parts", native, fallback)
+
+    def list_multipart_uploads(
+        self,
+        *,
+        Bucket,
+        Prefix=None,
+        MaxUploads=None,
+        KeyMarker=None,
+        UploadIdMarker=None,
+        Delimiter=None,
+        EncodingType=None,
+        **kwargs,
+    ):
+        if kwargs:
+            return self._fallback.list_multipart_uploads(
+                Bucket=Bucket,
+                Prefix=Prefix,
+                MaxUploads=MaxUploads,
+                KeyMarker=KeyMarker,
+                UploadIdMarker=UploadIdMarker,
+                Delimiter=Delimiter,
+                EncodingType=EncodingType,
+                **kwargs,
+            )
+        def native():
+            return self._native_list_multipart_uploads(
+                Bucket=Bucket,
+                Prefix=Prefix,
+                MaxUploads=MaxUploads,
+                KeyMarker=KeyMarker,
+                UploadIdMarker=UploadIdMarker,
+                Delimiter=Delimiter,
+                EncodingType=EncodingType,
+            )
+        def fallback():
+            fallback_kwargs = {"Bucket": Bucket}
+            if Prefix is not None:
+                fallback_kwargs["Prefix"] = Prefix
+            if MaxUploads is not None:
+                fallback_kwargs["MaxUploads"] = MaxUploads
+            if KeyMarker is not None:
+                fallback_kwargs["KeyMarker"] = KeyMarker
+            if UploadIdMarker is not None:
+                fallback_kwargs["UploadIdMarker"] = UploadIdMarker
+            if Delimiter is not None:
+                fallback_kwargs["Delimiter"] = Delimiter
+            if EncodingType is not None:
+                fallback_kwargs["EncodingType"] = EncodingType
+            return self._fallback.list_multipart_uploads(**fallback_kwargs)
+        return self._run_mode("list_multipart_uploads", native, fallback)
 
     def _run_mode(self, operation_name: str, native_call, fallback_call):
         mode = self._operation_modes.get(operation_name, self._mode)
@@ -470,6 +560,18 @@ class NativeS3Client:
         self._raise_for_error("DeleteObject", status, parsed_headers, resp_body)
         return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
 
+    def _native_delete_objects(self, *, Bucket, Delete):
+        path, query, url = self._build_url(Bucket, None, params={"delete": ""})
+        body = self._encode_delete_objects_xml(Delete)
+        payload_hash = _sigv4_accel_module().sha256_hex(body)
+        headers = self._signed_headers("POST", path, query, payload_hash, body=body)
+        status, resp_headers, resp_body = _http_accel_module().request("POST", url, headers, body)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("DeleteObjects", status, parsed_headers, resp_body)
+        out = self._parse_delete_objects(resp_body)
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
+
     def _native_copy_object(self, *, Bucket, Key, CopySource):
         path, query, url = self._build_url(Bucket, Key)
         payload_hash = _sigv4_accel_module().sha256_hex(b"")
@@ -546,6 +648,56 @@ class NativeS3Client:
         parsed_headers = _parse_headers(resp_headers)
         self._raise_for_error("AbortMultipartUpload", status, parsed_headers, resp_body)
         return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
+    def _native_list_parts(self, *, Bucket, Key, UploadId, MaxParts=None, PartNumberMarker=None):
+        params = {"uploadId": UploadId}
+        if MaxParts is not None:
+            params["max-parts"] = MaxParts
+        if PartNumberMarker is not None:
+            params["part-number-marker"] = PartNumberMarker
+        path, query, url = self._build_url(Bucket, Key, params=params)
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("ListParts", status, parsed_headers, resp_body)
+        out = self._parse_list_parts(resp_body)
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
+
+    def _native_list_multipart_uploads(
+        self,
+        *,
+        Bucket,
+        Prefix=None,
+        MaxUploads=None,
+        KeyMarker=None,
+        UploadIdMarker=None,
+        Delimiter=None,
+        EncodingType=None,
+    ):
+        params = {"uploads": ""}
+        if Prefix is not None:
+            params["prefix"] = Prefix
+        if MaxUploads is not None:
+            params["max-uploads"] = MaxUploads
+        if KeyMarker is not None:
+            params["key-marker"] = KeyMarker
+        if UploadIdMarker is not None:
+            params["upload-id-marker"] = UploadIdMarker
+        if Delimiter is not None:
+            params["delimiter"] = Delimiter
+        if EncodingType is not None:
+            params["encoding-type"] = EncodingType
+        path, query, url = self._build_url(Bucket, None, params=params)
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("ListMultipartUploads", status, parsed_headers, resp_body)
+        out = self._parse_list_multipart_uploads(resp_body)
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
 
     def _prepare_body(self, body):
         if body is None:
@@ -793,6 +945,126 @@ class NativeS3Client:
             ET.SubElement(part_el, "ETag").text = part["ETag"]
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
+    def _encode_delete_objects_xml(self, delete):
+        root = ET.Element("Delete")
+        if delete.get("Quiet"):
+            ET.SubElement(root, "Quiet").text = "true"
+        for obj in delete.get("Objects", []):
+            obj_el = ET.SubElement(root, "Object")
+            ET.SubElement(obj_el, "Key").text = obj["Key"]
+            if obj.get("VersionId") is not None:
+                ET.SubElement(obj_el, "VersionId").text = obj["VersionId"]
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    def _parse_delete_objects(self, body: bytes):
+        if not body:
+            return {"Deleted": []}
+        root = ET.fromstring(body)
+        out = {"Deleted": []}
+        for child in root:
+            tag = _strip_ns(child.tag)
+            if tag == "Deleted":
+                item = {}
+                for field in child:
+                    field_tag = _strip_ns(field.tag)
+                    if field.text is not None:
+                        item[field_tag] = field.text
+                out["Deleted"].append(item)
+            elif tag == "Error":
+                item = {}
+                for field in child:
+                    field_tag = _strip_ns(field.tag)
+                    if field.text is not None:
+                        item[field_tag] = field.text
+                out.setdefault("Errors", []).append(item)
+        return out
+
+    def _parse_list_parts(self, body: bytes):
+        if not body:
+            return {"Parts": []}
+        root = ET.fromstring(body)
+        out = {"Parts": []}
+        for child in root:
+            tag = _strip_ns(child.tag)
+            text = child.text
+            if tag in {"Bucket", "Key", "UploadId", "StorageClass"} and text is not None:
+                out[tag] = text
+            elif tag in {"PartNumberMarker", "NextPartNumberMarker", "MaxParts"} and text:
+                out[tag] = int(text)
+            elif tag == "IsTruncated" and text is not None:
+                out[tag] = text.lower() == "true"
+            elif tag in {"Initiator", "Owner"}:
+                out[tag] = self._parse_person(child)
+            elif tag == "Part":
+                out["Parts"].append(self._parse_list_part(child))
+        out.setdefault("IsTruncated", False)
+        return out
+
+    def _parse_list_part(self, node):
+        out = {}
+        for child in node:
+            tag = _strip_ns(child.tag)
+            text = child.text
+            if tag in {"PartNumber", "Size"} and text:
+                out[tag] = int(text)
+            elif tag == "LastModified" and text:
+                out[tag] = _parse_fast_timestamp(text)
+            elif text is not None:
+                out[tag] = text
+        return out
+
+    def _parse_list_multipart_uploads(self, body: bytes):
+        if not body:
+            return {"Uploads": []}
+        root = ET.fromstring(body)
+        out = {"Uploads": []}
+        for child in root:
+            tag = _strip_ns(child.tag)
+            text = child.text
+            if tag in {
+                "Bucket",
+                "KeyMarker",
+                "UploadIdMarker",
+                "NextKeyMarker",
+                "Prefix",
+                "Delimiter",
+                "NextUploadIdMarker",
+                "EncodingType",
+            } and text is not None:
+                out[tag] = text
+            elif tag == "MaxUploads" and text:
+                out[tag] = int(text)
+            elif tag == "IsTruncated" and text is not None:
+                out[tag] = text.lower() == "true"
+            elif tag == "Upload":
+                out["Uploads"].append(self._parse_upload(child))
+            elif tag == "CommonPrefixes":
+                prefix = self._parse_text_xml_field(ET.tostring(child, encoding="utf-8"), "Prefix")
+                if prefix is not None:
+                    out.setdefault("CommonPrefixes", []).append({"Prefix": prefix})
+        out.setdefault("IsTruncated", False)
+        return out
+
+    def _parse_upload(self, node):
+        out = {}
+        for child in node:
+            tag = _strip_ns(child.tag)
+            text = child.text
+            if tag in {"UploadId", "Key", "StorageClass"} and text is not None:
+                out[tag] = text
+            elif tag == "Initiated" and text:
+                out[tag] = _parse_fast_timestamp(text)
+            elif tag in {"Owner", "Initiator"}:
+                out[tag] = self._parse_person(child)
+        return out
+
+    def _parse_person(self, node):
+        out = {}
+        for child in node:
+            if child.text is not None:
+                out[_strip_ns(child.tag)] = child.text
+        return out
+
     def _response_metadata(self, status, headers):
         return {
             "HTTPStatusCode": status,
@@ -850,6 +1122,18 @@ def _results_equal(operation_name: str, native_result, fallback_result) -> bool:
         native_keys = [item.get("Key") for item in native_result.get("Contents", [])]
         fallback_keys = [item.get("Key") for item in fallback_result.get("Contents", [])]
         return native_keys == fallback_keys and native_result.get("KeyCount") == fallback_result.get("KeyCount")
+    if operation_name == "delete_objects":
+        native_deleted = [item.get("Key") for item in native_result.get("Deleted", [])]
+        fallback_deleted = [item.get("Key") for item in fallback_result.get("Deleted", [])]
+        return native_deleted == fallback_deleted
+    if operation_name == "list_parts":
+        native_parts = [item.get("PartNumber") for item in native_result.get("Parts", [])]
+        fallback_parts = [item.get("PartNumber") for item in fallback_result.get("Parts", [])]
+        return native_parts == fallback_parts and native_result.get("UploadId") == fallback_result.get("UploadId")
+    if operation_name == "list_multipart_uploads":
+        native_uploads = [(item.get("Key"), item.get("UploadId")) for item in native_result.get("Uploads", [])]
+        fallback_uploads = [(item.get("Key"), item.get("UploadId")) for item in fallback_result.get("Uploads", [])]
+        return native_uploads == fallback_uploads
     if operation_name in {
         "head_object",
         "put_object",
