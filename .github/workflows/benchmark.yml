@@ -14,9 +14,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Reset Docker benchmark state
+        run: |
+          docker compose -f benchmarks/pgbench/docker-compose.yml down -v --remove-orphans || true
+
       - name: Run benchmark
         run: |
           docker compose -f benchmarks/pgbench/docker-compose.yml up --build --abort-on-container-exit pgbench | tee pgbench_output.txt
+
+      - name: Tear down Docker benchmark state
+        if: always()
+        run: |
+          docker compose -f benchmarks/pgbench/docker-compose.yml down -v --remove-orphans || true
 
       - name: Upload benchmark output
         uses: actions/upload-artifact@v4

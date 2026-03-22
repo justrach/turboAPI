@@ -15,10 +15,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Reset Docker benchmark state
+        run: |
+          docker compose -f benchmarks/postgres/docker-compose.yml down -v --remove-orphans || true
+
       - name: Run DB benchmark
         id: bench
         run: |
           docker compose -f benchmarks/postgres/docker-compose.yml up --build --abort-on-container-exit bench | tee bench_output.txt
+
+      - name: Tear down Docker benchmark state
+        if: always()
+        run: |
+          docker compose -f benchmarks/postgres/docker-compose.yml down -v --remove-orphans || true
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
