@@ -76,6 +76,12 @@ def core_parity_scenarios():
         ParityScenario("acl-list", lambda c: c.acl_list(), tags=("acl",)),
         ParityScenario("acl-getuser", lambda c: c.acl_getuser("default"), tags=("acl",)),
         ParityScenario("config-get", lambda c: c.config_get("timeout"), tags=("server",)),
+        ParityScenario(
+            "config-set",
+            lambda c: (lambda value: c.config_set("timeout", value))(c.config_get("timeout")["timeout"]),
+            tags=("server", "config"),
+        ),
+        ParityScenario("config-resetstat", lambda c: c.config_resetstat(), tags=("server", "config")),
         ParityScenario("object-encoding", lambda c: (c.flushdb(), c.set("obj", "v"), c.object("ENCODING", "obj"))[-1], tags=("object",)),
         ParityScenario("object-refcount", lambda c: (c.flushdb(), c.set("obj", "v"), c.object("REFCOUNT", "obj"))[-1], tags=("object",)),
         ParityScenario("object-idletime", lambda c: (c.flushdb(), c.set("obj", "v"), isinstance(c.object("IDLETIME", "obj"), int))[-1], tags=("object",)),
