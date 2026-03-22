@@ -29,6 +29,8 @@ DB_URL = os.environ.get("BENCH_PG_URL", "postgresql://bench:bench@127.0.0.1:5432
 WRK_DURATION = os.environ.get("BENCH_DURATION", "10s")
 WRK_THREADS = 4
 WRK_CONNECTIONS = 100
+POOL_SIZE = int(os.environ.get("BENCH_POOL_SIZE", "32"))
+SOLO_TURBO = os.environ.get("BENCH_SOLO_TURBO") == "1"
 
 
 def free_port() -> int:
@@ -109,7 +111,7 @@ class ServerHandle:
 
 def start_server(name: str, code: str) -> ServerHandle:
     port = free_port()
-    rendered = code.format(db_url=DB_URL, port=port)
+    rendered = code.format(db_url=DB_URL, port=port, pool_size=POOL_SIZE)
     err_file = tempfile.NamedTemporaryFile(mode="w", suffix=f".{name}.log", delete=False)
     proc = subprocess.Popen(
         [sys.executable, "-c", rendered],
@@ -143,12 +145,12 @@ TURBO_CODE = textwrap.dedent(
     os.environ["TURBO_DISABLE_CACHE"] = "1"
     os.environ["TURBO_DISABLE_DB_CACHE"] = "1"
     os.environ["TURBO_DISABLE_RATE_LIMITING"] = "1"
-    os.environ["TURBO_THREAD_POOL_SIZE"] = "16"
+    os.environ["TURBO_THREAD_POOL_SIZE"] = "{pool_size}"
 
     from turboapi import TurboAPI
 
     app = TurboAPI()
-    app.configure_db("{db_url}", pool_size=16)
+    app.configure_db("{db_url}", pool_size={pool_size})
 
     @app.db_get("/users/{{user_id}}", table="users", pk="id", columns=["id", "name", "email", "age"])
     def get_user():
@@ -194,7 +196,7 @@ FASTAPI_ASYNCPG_CODE = textwrap.dedent(
     @asynccontextmanager
     async def lifespan(app):
         global pool
-        pool = await asyncpg.create_pool(DB_URL, min_size=16, max_size=16)
+        pool = await asyncpg.create_pool(DB_URL, min_size={pool_size}, max_size={pool_size})
         yield
         await pool.close()
 
@@ -243,7 +245,7 @@ FASTAPI_SQLALCHEMY_CODE = textwrap.dedent(
     from sqlalchemy import create_engine, text
     from sqlalchemy.orm import Session
 
-    engine = create_engine("{db_url}", pool_size=16)
+    engine = create_engine("{db_url}", pool_size={pool_size})
     app = FastAPI()
 
     @app.get("/users/{{user_id}}")
@@ -288,14 +290,18 @@ def main() -> int:
     print("=" * 78, flush=True)
     print(f"Postgres: {DB_URL}", flush=True)
     print(f"wrk: -t{WRK_THREADS} -c{WRK_CONNECTIONS} -d{WRK_DURATION}", flush=True)
-    print("All servers expose the same HTTP routes. TurboAPI cache is OFF.", flush=True)
+    if SOLO_TURBO:
+        print("TurboAPI-only run. Cache is OFF.", flush=True)
+    else:
+        print("All servers expose the same HTTP routes. TurboAPI cache is OFF.", flush=True)
     print(flush=True)
 
-    servers = [
-        ("TurboAPI + pg.zig", TURBO_CODE),
-        ("FastAPI + asyncpg", FASTAPI_ASYNCPG_CODE),
-        ("FastAPI + SQLAlchemy", FASTAPI_SQLALCHEMY_CODE),
-    ]
+    servers = [("TurboAPI + pg.zig", TURBO_CODE)]
+    if not SOLO_TURBO:
+        servers.extend([
+            ("FastAPI + asyncpg", FASTAPI_ASYNCPG_CODE),
+            ("FastAPI + SQLAlchemy", FASTAPI_SQLALCHEMY_CODE),
+        ])
 
     handles: list[ServerHandle] = []
     try:
@@ -354,55 +360,66 @@ def main() -> int:
         print("=" * 78, flush=True)
         print("SUMMARY", flush=True)
         print("=" * 78, flush=True)
-        header = "{:<30} {:>16} {:>18} {:>22}"
-        print(
-            header.format(
-                "Test",
-                "TurboAPI+pg.zig",
-                "FastAPI+asyncpg",
-                "FastAPI+SQLAlchemy",
-            ),
-            flush=True,
-        )
-        print("-" * 90, flush=True)
-        row = "{:<30} {:>16,.0f} {:>18,.0f} {:>22,.0f}"
-        print(
-            row.format(
-                "GET /health",
-                results["health"]["TurboAPI + pg.zig"],
-                results["health"]["FastAPI + asyncpg"],
-                results["health"]["FastAPI + SQLAlchemy"],
-            ),
-            flush=True,
-        )
-        print(
-            row.format(
-                "GET /users/{id}",
-                results["by_id"]["TurboAPI + pg.zig"],
-                results["by_id"]["FastAPI + asyncpg"],
-                results["by_id"]["FastAPI + SQLAlchemy"],
-            ),
-            flush=True,
-        )
-        print(
-            row.format(
-                "GET /users",
-                results["list"]["TurboAPI + pg.zig"],
-                results["list"]["FastAPI + asyncpg"],
-                results["list"]["FastAPI + SQLAlchemy"],
-            ),
-            flush=True,
-        )
-        print(
-            row.format(
-                "GET /search",
-                results["search"]["TurboAPI + pg.zig"],
-                results["search"]["FastAPI + asyncpg"],
-                results["search"]["FastAPI + SQLAlchemy"],
-            ),
-            flush=True,
-        )
-        print("-" * 90, flush=True)
+        if SOLO_TURBO:
+            header = "{:<30} {:>16}"
+            row = "{:<30} {:>16,.0f}"
+            print(header.format("Test", "TurboAPI+pg.zig"), flush=True)
+            print("-" * 50, flush=True)
+            print(row.format("GET /health", results["health"]["TurboAPI + pg.zig"]), flush=True)
+            print(row.format("GET /users/{id}", results["by_id"]["TurboAPI + pg.zig"]), flush=True)
+            print(row.format("GET /users", results["list"]["TurboAPI + pg.zig"]), flush=True)
+            print(row.format("GET /search", results["search"]["TurboAPI + pg.zig"]), flush=True)
+            print("-" * 50, flush=True)
+        else:
+            header = "{:<30} {:>16} {:>18} {:>22}"
+            print(
+                header.format(
+                    "Test",
+                    "TurboAPI+pg.zig",
+                    "FastAPI+asyncpg",
+                    "FastAPI+SQLAlchemy",
+                ),
+                flush=True,
+            )
+            print("-" * 90, flush=True)
+            row = "{:<30} {:>16,.0f} {:>18,.0f} {:>22,.0f}"
+            print(
+                row.format(
+                    "GET /health",
+                    results["health"]["TurboAPI + pg.zig"],
+                    results["health"]["FastAPI + asyncpg"],
+                    results["health"]["FastAPI + SQLAlchemy"],
+                ),
+                flush=True,
+            )
+            print(
+                row.format(
+                    "GET /users/{id}",
+                    results["by_id"]["TurboAPI + pg.zig"],
+                    results["by_id"]["FastAPI + asyncpg"],
+                    results["by_id"]["FastAPI + SQLAlchemy"],
+                ),
+                flush=True,
+            )
+            print(
+                row.format(
+                    "GET /users",
+                    results["list"]["TurboAPI + pg.zig"],
+                    results["list"]["FastAPI + asyncpg"],
+                    results["list"]["FastAPI + SQLAlchemy"],
+                ),
+                flush=True,
+            )
+            print(
+                row.format(
+                    "GET /search",
+                    results["search"]["TurboAPI + pg.zig"],
+                    results["search"]["FastAPI + asyncpg"],
+                    results["search"]["FastAPI + SQLAlchemy"],
+                ),
+                flush=True,
+            )
+            print("-" * 90, flush=True)
         return 0
     finally:
         for handle in handles:
