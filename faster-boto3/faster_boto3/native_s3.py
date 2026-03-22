@@ -239,6 +239,34 @@ class NativeS3Client:
             )
         return self._run_mode("upload_part", native, fallback)
 
+    def upload_part_copy(self, *, Bucket, Key, UploadId, PartNumber, CopySource, **kwargs):
+        if kwargs:
+            return self._fallback.upload_part_copy(
+                Bucket=Bucket,
+                Key=Key,
+                UploadId=UploadId,
+                PartNumber=PartNumber,
+                CopySource=CopySource,
+                **kwargs,
+            )
+        def native():
+            return self._native_upload_part_copy(
+                Bucket=Bucket,
+                Key=Key,
+                UploadId=UploadId,
+                PartNumber=PartNumber,
+                CopySource=CopySource,
+            )
+        def fallback():
+            return self._fallback.upload_part_copy(
+                Bucket=Bucket,
+                Key=Key,
+                UploadId=UploadId,
+                PartNumber=PartNumber,
+                CopySource=CopySource,
+            )
+        return self._run_mode("upload_part_copy", native, fallback)
+
     def complete_multipart_upload(self, *, Bucket, Key, UploadId, MultipartUpload, **kwargs):
         if kwargs:
             return self._fallback.complete_multipart_upload(
@@ -603,6 +631,30 @@ class NativeS3Client:
             status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, body_bytes)
         return self._parse_upload_part_result(PartNumber, status, resp_headers, resp_body)
 
+    def _native_upload_part_copy(self, *, Bucket, Key, UploadId, PartNumber, CopySource):
+        path, query, url = self._build_url(
+            Bucket,
+            Key,
+            params={"partNumber": PartNumber, "uploadId": UploadId},
+        )
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers(
+            "PUT",
+            path,
+            query,
+            payload_hash,
+            body=None,
+            extra_headers=[("x-amz-copy-source", self._format_copy_source(CopySource))],
+        )
+        status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("UploadPartCopy", status, parsed_headers, resp_body)
+        out = self._parse_upload_part_copy(resp_body)
+        if "x-amz-server-side-encryption" in parsed_headers:
+            out["ServerSideEncryption"] = parsed_headers["x-amz-server-side-encryption"]
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
+
     def _native_create_multipart_upload(self, *, Bucket, Key, Metadata=None):
         path, query, url = self._build_url(Bucket, Key, params={"uploads": ""})
         payload_hash = _sigv4_accel_module().sha256_hex(b"")
@@ -928,6 +980,19 @@ class NativeS3Client:
                 out[tag] = child.text
         return out
 
+    def _parse_upload_part_copy(self, body: bytes):
+        if not body:
+            return {}
+        root = ET.fromstring(body)
+        out = {"CopyPartResult": {}}
+        for child in root:
+            tag = _strip_ns(child.tag)
+            if tag == "ETag" and child.text is not None:
+                out["CopyPartResult"]["ETag"] = child.text
+            elif tag == "LastModified" and child.text:
+                out["CopyPartResult"]["LastModified"] = datetime.datetime.fromisoformat(child.text.replace("Z", "+00:00"))
+        return out
+
     def _parse_text_xml_field(self, body: bytes, name: str):
         if not body:
             return None
@@ -1141,6 +1206,7 @@ def _results_equal(operation_name: str, native_result, fallback_result) -> bool:
         "copy_object",
         "create_multipart_upload",
         "upload_part",
+        "upload_part_copy",
         "complete_multipart_upload",
         "abort_multipart_upload",
     }:

@@ -110,6 +110,7 @@ def _parity_summary() -> dict:
         "CopyObject",
         "CreateMultipartUpload",
         "UploadPart",
+        "UploadPartCopy",
         "CompleteMultipartUpload",
         "AbortMultipartUpload",
         "ListParts",

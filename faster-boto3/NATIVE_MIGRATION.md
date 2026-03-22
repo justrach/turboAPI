@@ -163,11 +163,11 @@ than the older read-and-hash approach.
 - The current native path is materially faster than legacy on the implemented
   S3 operations, but LocalStack transport latency still dominates total wall
   time.
-- Public native S3 coverage is now 13 operations: `HeadObject`, `GetObject`,
+- Public native S3 coverage is now 14 operations: `HeadObject`, `GetObject`,
   `PutObject`, `ListObjectsV2`, `DeleteObject`, `DeleteObjects`,
   `CopyObject`, `CreateMultipartUpload`, `UploadPart`,
-  `CompleteMultipartUpload`, `AbortMultipartUpload`, `ListParts`, and
-  `ListMultipartUploads`.
+  `UploadPartCopy`, `CompleteMultipartUpload`, `AbortMultipartUpload`,
+  `ListParts`, and `ListMultipartUploads`.
 - `AbortMultipartUpload` is currently implemented, but the native transport
   path is still unstable in this workspace and is being tracked as a transport
   bug rather than treated as parity-complete.

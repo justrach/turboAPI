@@ -30,14 +30,27 @@ fn readResponseBody(
     allocator: Allocator,
     response: anytype,
 ) HttpError![]u8 {
+    const status = response.head.status;
+    if (status == .no_content or status == .not_modified) {
+        return allocator.dupe(u8, "") catch return HttpError.OutOfMemory;
+    }
     const maybe_len = response.head.content_length;
+    if (maybe_len) |len| {
+        if (len == 0) {
+            return allocator.dupe(u8, "") catch return HttpError.OutOfMemory;
+        }
+    }
     var out = if (maybe_len) |len|
         std.Io.Writer.Allocating.initCapacity(allocator, @intCast(len)) catch return HttpError.OutOfMemory
     else
         std.Io.Writer.Allocating.init(allocator);
     errdefer if (out.toOwnedSlice()) |s| allocator.free(s) else |_| {};
 
-    var reader = response.reader(&.{});
+    var reader = response.request.reader.bodyReader(
+        &.{},
+        response.head.transfer_encoding,
+        response.head.content_length,
+    );
     _ = reader.streamRemaining(&out.writer) catch return HttpError.RequestFailed;
     return out.toOwnedSlice() catch return HttpError.OutOfMemory;
 }

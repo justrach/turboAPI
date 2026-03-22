@@ -259,6 +259,21 @@ def test_native_manual_multipart_flow(native_s3):
     assert body == (b"a" * (5 * 1024 * 1024)) + b"tail-data"
 
 
+def test_native_upload_part_copy(native_s3):
+    native_s3.put_object(Bucket=BUCKET, Key="copy-part-src", Body=os.urandom(6 * 1024 * 1024))
+    create = native_s3.create_multipart_upload(Bucket=BUCKET, Key="copy-part-dst")
+    upload_id = create["UploadId"]
+
+    part = native_s3.upload_part_copy(
+        Bucket=BUCKET,
+        Key="copy-part-dst",
+        UploadId=upload_id,
+        PartNumber=1,
+        CopySource={"Bucket": BUCKET, "Key": "copy-part-src"},
+    )
+    assert part["CopyPartResult"]["ETag"]
+
+
 @pytest.mark.xfail(reason="native abort_multipart_upload still hangs in the current transport binary")
 def test_native_abort_multipart_upload(native_s3):
     create = native_s3.create_multipart_upload(Bucket=BUCKET, Key="abort-me")
