@@ -196,6 +196,74 @@ class NativeS3Client:
             return self._fallback.copy_object(Bucket=Bucket, Key=Key, CopySource=CopySource)
         return self._run_mode("copy_object", native, fallback)
 
+    def create_multipart_upload(self, *, Bucket, Key, Metadata=None, **kwargs):
+        if kwargs:
+            return self._fallback.create_multipart_upload(Bucket=Bucket, Key=Key, Metadata=Metadata, **kwargs)
+        def native():
+            return self._native_create_multipart_upload(Bucket=Bucket, Key=Key, Metadata=Metadata)
+        def fallback():
+            fallback_kwargs = {"Bucket": Bucket, "Key": Key}
+            if Metadata is not None:
+                fallback_kwargs["Metadata"] = Metadata
+            return self._fallback.create_multipart_upload(**fallback_kwargs)
+        return self._run_mode("create_multipart_upload", native, fallback)
+
+    def upload_part(self, *, Bucket, Key, UploadId, PartNumber, Body=b"", **kwargs):
+        if kwargs:
+            return self._fallback.upload_part(
+                Bucket=Bucket,
+                Key=Key,
+                UploadId=UploadId,
+                PartNumber=PartNumber,
+                Body=Body,
+                **kwargs,
+            )
+        def native():
+            return self._native_upload_part(Bucket=Bucket, Key=Key, UploadId=UploadId, PartNumber=PartNumber, Body=Body)
+        def fallback():
+            return self._fallback.upload_part(
+                Bucket=Bucket,
+                Key=Key,
+                UploadId=UploadId,
+                PartNumber=PartNumber,
+                Body=Body,
+            )
+        return self._run_mode("upload_part", native, fallback)
+
+    def complete_multipart_upload(self, *, Bucket, Key, UploadId, MultipartUpload, **kwargs):
+        if kwargs:
+            return self._fallback.complete_multipart_upload(
+                Bucket=Bucket,
+                Key=Key,
+                UploadId=UploadId,
+                MultipartUpload=MultipartUpload,
+                **kwargs,
+            )
+        def native():
+            return self._native_complete_multipart_upload(
+                Bucket=Bucket,
+                Key=Key,
+                UploadId=UploadId,
+                Parts=MultipartUpload["Parts"],
+            )
+        def fallback():
+            return self._fallback.complete_multipart_upload(
+                Bucket=Bucket,
+                Key=Key,
+                UploadId=UploadId,
+                MultipartUpload=MultipartUpload,
+            )
+        return self._run_mode("complete_multipart_upload", native, fallback)
+
+    def abort_multipart_upload(self, *, Bucket, Key, UploadId, **kwargs):
+        if kwargs:
+            return self._fallback.abort_multipart_upload(Bucket=Bucket, Key=Key, UploadId=UploadId, **kwargs)
+        def native():
+            return self._native_abort_multipart_upload(Bucket=Bucket, Key=Key, UploadId=UploadId)
+        def fallback():
+            return self._fallback.abort_multipart_upload(Bucket=Bucket, Key=Key, UploadId=UploadId)
+        return self._run_mode("abort_multipart_upload", native, fallback)
+
     def _run_mode(self, operation_name: str, native_call, fallback_call):
         mode = self._operation_modes.get(operation_name, self._mode)
         if mode == "native":
@@ -415,6 +483,23 @@ class NativeS3Client:
             out["ServerSideEncryption"] = parsed_headers["x-amz-server-side-encryption"]
         out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
         return out
+
+    def _native_upload_part(self, *, Bucket, Key, UploadId, PartNumber, Body=b""):
+        file_request = self._file_request(Body)
+        path, query, url = self._build_url(
+            Bucket,
+            Key,
+            params={"partNumber": PartNumber, "uploadId": UploadId},
+        )
+        if file_request is not None:
+            headers = self._signed_headers("PUT", path, query, _UNSIGNED_PAYLOAD, body=None)
+            status, resp_headers, resp_body = _http_accel_module().request_fd("PUT", url, headers, *file_request)
+        else:
+            body_bytes, _ = self._prepare_body(Body)
+            payload_hash = _sigv4_accel_module().sha256_hex(body_bytes)
+            headers = self._signed_headers("PUT", path, query, payload_hash, body=body_bytes)
+            status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, body_bytes)
+        return self._parse_upload_part_result(PartNumber, status, resp_headers, resp_body)
 
     def _native_create_multipart_upload(self, *, Bucket, Key, Metadata=None):
         path, query, url = self._build_url(Bucket, Key, params={"uploads": ""})
@@ -765,6 +850,15 @@ def _results_equal(operation_name: str, native_result, fallback_result) -> bool:
         native_keys = [item.get("Key") for item in native_result.get("Contents", [])]
         fallback_keys = [item.get("Key") for item in fallback_result.get("Contents", [])]
         return native_keys == fallback_keys and native_result.get("KeyCount") == fallback_result.get("KeyCount")
-    if operation_name in {"head_object", "put_object", "delete_object", "copy_object"}:
+    if operation_name in {
+        "head_object",
+        "put_object",
+        "delete_object",
+        "copy_object",
+        "create_multipart_upload",
+        "upload_part",
+        "complete_multipart_upload",
+        "abort_multipart_upload",
+    }:
         return native_result == fallback_result or native_result.get("ResponseMetadata", {}).get("HTTPStatusCode") == fallback_result.get("ResponseMetadata", {}).get("HTTPStatusCode")
     return True

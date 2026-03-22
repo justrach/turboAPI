@@ -205,6 +205,48 @@ def test_native_multipart_put_object_avoids_fallback_control_plane(setup_bucket,
         os.unlink(path)
 
 
+def test_native_manual_multipart_flow(native_s3):
+    create = native_s3.create_multipart_upload(
+        Bucket=BUCKET,
+        Key="manual-multipart",
+        Metadata={"flow": "native"},
+    )
+    upload_id = create["UploadId"]
+
+    part1 = native_s3.upload_part(
+        Bucket=BUCKET,
+        Key="manual-multipart",
+        UploadId=upload_id,
+        PartNumber=1,
+        Body=b"a" * (5 * 1024 * 1024),
+    )
+    part2 = native_s3.upload_part(
+        Bucket=BUCKET,
+        Key="manual-multipart",
+        UploadId=upload_id,
+        PartNumber=2,
+        Body=b"tail-data",
+    )
+
+    native_s3.complete_multipart_upload(
+        Bucket=BUCKET,
+        Key="manual-multipart",
+        UploadId=upload_id,
+        MultipartUpload={"Parts": [part1, part2]},
+    )
+
+    head = native_s3.head_object(Bucket=BUCKET, Key="manual-multipart")
+    body = native_s3.get_object(Bucket=BUCKET, Key="manual-multipart")["Body"].read()
+    assert head["Metadata"]["flow"] == "native"
+    assert body == (b"a" * (5 * 1024 * 1024)) + b"tail-data"
+
+
+def test_native_abort_multipart_upload(native_s3):
+    create = native_s3.create_multipart_upload(Bucket=BUCKET, Key="abort-me")
+    resp = native_s3.abort_multipart_upload(Bucket=BUCKET, Key="abort-me", UploadId=create["UploadId"])
+    assert resp["ResponseMetadata"]["HTTPStatusCode"] == 204
+
+
 def test_operation_override_put_object_only(setup_bucket, monkeypatch):
     monkeypatch.setenv("FASTER_BOTO3_NATIVE", "legacy")
     monkeypatch.setenv("FASTER_BOTO3_NATIVE_S3_OPS", "put_object")

@@ -21,6 +21,7 @@ Phase 1 targets S3 first:
 - `GetObject`
 - `PutObject`
 - `ListObjectsV2`
+- multipart control plane and part upload APIs
 
 These are enough to prove the architecture on rest-xml, request signing,
 streaming/non-streaming bodies, and common error handling.
@@ -162,6 +163,10 @@ than the older read-and-hash approach.
 - The current native path is materially faster than legacy on the implemented
   S3 operations, but LocalStack transport latency still dominates total wall
   time.
+- Public native S3 coverage is now 10 operations: `HeadObject`, `GetObject`,
+  `PutObject`, `ListObjectsV2`, `DeleteObject`, `CopyObject`,
+  `CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`, and
+  `AbortMultipartUpload`.
 - The larger upload win is now coming from the native request path plus the
   streaming fd transport and unsigned file-backed payload path, not from
   multipart orchestration alone.
