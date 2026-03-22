@@ -129,6 +129,13 @@ class ClientFallbackTests(unittest.TestCase):
         self.assertIs(self.faster.config_set("timeout", timeout), True)
         self.assertIs(self.faster.config_resetstat(), True)
 
+    def test_xgroup_management_commands_match_redis_py_semantics(self):
+        self.faster.xadd("stream", {"field": "value"})
+        self.assertIs(self.faster.xgroup_create("stream", "g1", id="0", mkstream=True), True)
+        self.assertEqual(self.faster.xgroup_createconsumer("stream", "g1", "c1"), 1)
+        self.assertEqual(self.faster.xgroup_delconsumer("stream", "g1", "c1"), 0)
+        self.assertIs(self.faster.xgroup_destroy("stream", "g1"), True)
+
 
 if __name__ == "__main__":
     unittest.main()
