@@ -110,27 +110,46 @@ following are true:
 | Paginators / waiters | Botocore | Botocore | Legacy first, migrate later |
 | Streaming uploads | Botocore | Zig transport + `request_fd` | Native |
 
-## Current Upload Bench
+## Current Bench Snapshot
 
-Latest LocalStack upload-only comparison for the current native `put_object`
-path in this worktree:
+Latest quick LocalStack snapshot on branch `native-boto3-plan` after:
+
+- native multipart upload path
+- per-operation rollout controls
+- streaming `request_fd` uploads in Zig transport
+
+### End-to-end native vs legacy
+
+| Operation | Legacy | Native | Speedup |
+|---|---:|---:|---:|
+| `HeadObject` | 1793.8 us | 1325.4 us | 1.35x |
+| `GetObject` 1 KiB | 1440.6 us | 1198.9 us | 1.20x |
+| `PutObject` 1 KiB | 2608.8 us | 2256.8 us | 1.16x |
+| `PutObject` file 1 MiB | 12073.7 us | 9220.9 us | 1.31x |
+| `PutObject` file 8 MiB | 74720.8 us | 64552.7 us | 1.16x |
+| `ListObjectsV2` | 3510.9 us | 2380.6 us | 1.48x |
+| `CopyObject` | 2566.2 us | 2186.2 us | 1.17x |
+
+### Upload-path comparison
+
+Isolated native upload comparison with multipart disabled vs enabled:
 
 | File size | Native single PUT | Native multipart | Delta |
 |---|---:|---:|---:|
 | 1 MiB | 9046.7 us | 8866.3 us | 1.02x faster |
 | 8 MiB | 57271.0 us | 57488.7 us | 0.996x |
 
-Notes:
+### Notes
 
-- This compares the current native upload path with multipart disabled vs
-  multipart enabled.
-- On LocalStack, multipart is only a marginal win at 1 MiB and effectively
-  neutral at 8 MiB in the current implementation.
-- The larger end-to-end native win over legacy for big uploads currently comes
-  more from the native request path overall than from multipart orchestration by
-  itself.
-- Real AWS measurements are still needed before promoting multipart behavior
-  aggressively.
+- The current native path is materially faster than legacy on the implemented
+  S3 operations, but LocalStack transport latency still dominates total wall
+  time.
+- Multipart by itself is only a marginal win in the isolated LocalStack upload
+  comparison right now.
+- The larger upload win comes from the native request path overall plus the
+  streaming fd transport path, not from multipart orchestration alone.
+- Real AWS measurements are still needed before treating these upload numbers as
+  the final shape of the optimization.
 
 ## What Gets Checked
 
