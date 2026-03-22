@@ -8,6 +8,13 @@
 
 This file is intentionally driver-only. If you want end-to-end web stack numbers, use `benchmarks/postgres/BENCHMARKS.md` instead.
 
+These results are local to this Apple Silicon / Colima environment. The same
+suite in GitHub Actions runs on `ubuntu-latest` x86_64 inside Docker and shows
+different rankings. On the PR CI run, `turbopg` won `generate_series` and
+`arrays`, while `asyncpg` led `SELECT 1+1`, `pg_type`, `large_object`,
+`COPY FROM`, and `batch INSERT`. Treat local and CI runs as separate benchmark
+environments, not a single pooled dataset.
+
 ## Current Primary Results
 
 The primary table below is from a full clean rerun after fixing the Turbo runner issues that previously invalidated parts of the suite:

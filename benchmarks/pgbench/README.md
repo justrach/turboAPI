@@ -20,6 +20,12 @@ python3 validate_runs.py --runs 3
 
 This writes raw logs to `benchmarks/pgbench/artifacts/` and prints a median summary table.
 
+Important: this suite is environment-sensitive. The local Apple Silicon /
+Colima results in this directory do not exactly match the GitHub Actions Ubuntu
+runner. CI still runs the same suite for regression visibility, but those
+numbers should be read as a separate environment rather than averaged into the
+local table below.
+
 ## What it tests
 
 MagicStack's pgbench measures raw driver throughput (queries/sec, latency percentiles). All three drivers talk to Postgres directly using the binary wire protocol. No HTTP involved.
