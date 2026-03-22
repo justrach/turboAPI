@@ -2,36 +2,36 @@
 
 **Date:** 2026-03-22
 **Setup:** Postgres 18, Docker, aarch64, concurrency=10, 30s per test
-**Method:** Each driver uses its native path (no HTTP). No result caching.
+**Method:** Each driver uses its native path (no HTTP). No result caching. Direct binary decode.
 
 ## Results
 
 | Query | asyncpg | psycopg3-async | turbopg (pg.zig) | vs asyncpg |
 |-------|---------|----------------|------------------|-----------|
-| SELECT 1+1 | 88,351 q/s (0.113ms) | 34,532 q/s (0.289ms) | **128,309 q/s (0.077ms)** | **1.45x** |
-| pg_type (619 rows) | 5,803 q/s (1.723ms) | 2,276 q/s (4.393ms) | 4,543 q/s (2.199ms) | 0.78x |
-| generate_series (1000) | 8,160 q/s (1.225ms) | 4,158 q/s (2.404ms) | **20,665 q/s (0.483ms)** | **2.53x** |
+| SELECT 1+1 | 88,888 q/s (0.112ms) | 34,899 q/s (0.286ms) | **125,964 q/s (0.079ms)** | **1.42x** |
+| pg_type (619 rows) | 5,812 q/s (1.720ms) | 2,236 q/s (4.471ms) | 4,954 q/s (2.016ms) | 0.85x |
+| generate_series (1000) | 7,867 q/s (1.271ms) | 4,028 q/s (2.482ms) | **20,285 q/s (0.492ms)** | **2.58x** |
 
 turbopg wins 2 out of 3 queries. No caching, no tricks, every query hits Postgres.
 
-## Why turbopg wins on SELECT 1+1 and generate_series
+## How values are decoded
 
-- **Python 3.14t free-threading**: 10 real OS threads querying Postgres in parallel, zero GIL contention
-- **GIL released during I/O**: pg.zig query runs without holding the GIL (via C shim for PyEval_SaveThread)
-- **Direct dict building**: Results converted to Python dicts in Zig, no JSON intermediate
-- **No caching**: `_db_query_raw` does not use the DB result cache at all
+turbopg decodes Postgres binary protocol directly to Python objects:
+
+| Postgres type | OID | Python type | Method |
+|--------------|-----|-------------|--------|
+| int2/int4/int8 | 21/23/20 | int | `readInt` -> `PyLong_FromLong` |
+| float4/float8 | 700/701 | float | `readInt` -> `@bitCast` -> `PyFloat_FromDouble` |
+| bool | 16 | bool | `data[0] != 0` -> `Py_True/Py_False` |
+| text/varchar/name | 25/1043/19 | str | `PyUnicode_DecodeUTF8` |
+| oid | 26 | int | `readInt(u32)` -> `PyLong_FromUnsignedLong` |
+| everything else | * | str | `PyUnicode_DecodeUTF8` with "replace" |
+
+No intermediate JSON serialization. No string parsing. Binary -> Python object.
 
 ## Why turbopg loses on pg_type
 
-pg_type returns 619 rows with 12 columns. For each value, turbopg calls `writeJsonValue` to get a string representation, then parses it back into Python types (int/float/string/bool). asyncpg decodes binary protocol directly into native Record objects with Cython. The intermediate string step costs ~0.5ms per query on wide result sets.
-
-## How each driver runs
-
-| Driver | Runtime | Connection | Concurrency |
-|--------|---------|-----------|-------------|
-| asyncpg | Python 3.11 + uvloop | Direct binary protocol | asyncio (10 coroutines) |
-| psycopg3-async | Python 3.11 + asyncio | Direct binary protocol | asyncio (10 coroutines) |
-| turbopg (pg.zig) | Python 3.14t + Zig | Direct binary protocol | 10 threads (GIL released) |
+asyncpg returns Cython-optimized Record objects (C structs with typed tuple access). turbopg returns Python dicts. For 619 rows * 12 columns = 7,428 values, the dict overhead (PyDict_New + PyDict_SetItem + PyUnicode key creation per value) adds up.
 
 ## Reproduce
 
@@ -39,5 +39,3 @@ pg_type returns 619 rows with 12 columns. For each value, turbopg calls `writeJs
 cd benchmarks/pgbench
 docker compose up --build
 ```
-
-No local dependencies. Everything runs in Docker (~5 min build, ~5 min benchmark).
