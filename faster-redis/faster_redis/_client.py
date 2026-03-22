@@ -136,6 +136,20 @@ class Redis:
     def pipeline(self, transaction=False):
         return Pipeline(self, transaction)
 
+    # -- Catch-all for any Redis command not explicitly defined -----
+    def execute_command(self, *args):
+        """Execute any Redis command. Same as redis-py's interface."""
+        return self._exec(*args)
+
+    def __getattr__(self, name):
+        """Any undefined command falls through to Zig execute."""
+        if name.startswith('_'):
+            raise AttributeError(name)
+        def method(*args, **kwargs):
+            cmd = name.upper().replace('_', ' ').split()
+            return self._exec(*cmd, *args)
+        return method
+
 
 class Pipeline:
     """Buffered pipeline. execute() sends all commands in one Zig call."""
