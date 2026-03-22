@@ -260,8 +260,8 @@ Python route function.
 
 This is a spike, not a parity-complete backend. It currently focuses on the
 fully native route path for a small S3 slice. The current validated FFI handlers
-are `GetObject`, `HeadObject`, `ListObjectsV2`, `HeadBucket`, `DeleteObject`,
-and `CopyObject`.
+are `GetObject`, `HeadObject`, `ListObjectsV2`, `HeadBucket`, `ListBuckets`,
+`GetBucketLocation`, `DeleteObject`, and `CopyObject`.
 
 Command:
 
@@ -294,6 +294,30 @@ Load: `wrk -t8 -c200 -d3s`
 - The common-path signer/header builder now uses fixed stack buffers instead of
   rebuilding maps and heap arrays per request.
 - `HeadObject` is back on a true `HEAD` request in the FFI spike.
+
+## Cost Model
+
+There is now a small explicit model in
+[benchmarks/native_s3_cost_model.py](benchmarks/native_s3_cost_model.py) for
+the current native-FFI measurements. It is not trying to be a perfect fit. It
+exists to make the current bottlenecks legible and to let us reason about
+counterfactuals.
+
+Current derived estimates from that script:
+
+- fixed native path from `HeadObject`: about `0.629 ms`
+- incremental transfer cost from `1 KiB -> 10 KiB` `GetObject`: effectively
+  negligible in this LocalStack setup, about `0.00023 ms/KB`
+- incremental `ListObjectsV2` cost vs `HeadObject`: about `0.582 ms`
+- implied list parse overhead per returned item: about `0.029 ms/item`
+
+That model points at the same practical conclusion as the benchmarks:
+
+- shaving more bytes off the `get` path will not move the needle much here
+- the fixed request path and list parsing are better optimization targets
+- if we halve the current fixed path, `HeadObject` projects to about `3181 RPS`
+- if we halve the current list-specific parse cost, `ListObjectsV2` projects to
+  about `1088 RPS`
 
 ## What Gets Checked
 

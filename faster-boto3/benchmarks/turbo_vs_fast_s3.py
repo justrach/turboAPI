@@ -85,6 +85,8 @@ app.native_route("GET", "/s3/get/{{key}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_g
 app.native_route("GET", "/s3/head/{{key}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_head")
 app.native_route("GET", "/s3/head-bucket", r"{NATIVE_HANDLER_LIB}", "handle_s3_head_bucket")
 app.native_route("GET", "/s3/list", r"{NATIVE_HANDLER_LIB}", "handle_s3_list")
+app.native_route("GET", "/s3/list-buckets", r"{NATIVE_HANDLER_LIB}", "handle_s3_list_buckets")
+app.native_route("GET", "/s3/bucket-location", r"{NATIVE_HANDLER_LIB}", "handle_s3_bucket_location")
 app.native_route("DELETE", "/s3/delete/{{key}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_delete")
 app.native_route("PUT", "/s3/copy/{{src}}/{{dst}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_copy")
 app.run(host="127.0.0.1", port={TURBO_PORT})

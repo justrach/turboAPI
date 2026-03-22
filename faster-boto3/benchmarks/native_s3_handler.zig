@@ -468,6 +468,37 @@ export fn handle_s3_list(_: *const Request) callconv(.c) Response {
     return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
 }
 
+export fn handle_s3_list_buckets(_: *const Request) callconv(.c) Response {
+    const cfg = loadConfig();
+    const url = makeUrl(cfg, "/") catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    defer allocator.free(url);
+
+    const headers = buildSignedHeaders(cfg, "GET", "/", "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
+    var resp = doRequest(.GET, url, headers.slice()) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+    defer resp.deinit();
+    if (ensureOk(&resp)) |err_resp| return err_resp;
+    const count = countTag(resp.body, "<Bucket>");
+    const body = std.fmt.allocPrint(allocator, "{{\"count\":{d}}}", .{count}) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
+}
+
+export fn handle_s3_bucket_location(_: *const Request) callconv(.c) Response {
+    const cfg = loadConfig();
+    const canonical_uri = std.fmt.allocPrint(allocator, "/{s}", .{cfg.bucket}) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    defer allocator.free(canonical_uri);
+    const suffix = std.fmt.allocPrint(allocator, "{s}?location", .{canonical_uri}) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    defer allocator.free(suffix);
+    const url = makeUrl(cfg, suffix) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    defer allocator.free(url);
+
+    const headers = buildSignedHeaders(cfg, "GET", canonical_uri, "location=", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
+    var resp = doRequest(.GET, url, headers.slice()) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+    defer resp.deinit();
+    if (ensureOk(&resp)) |err_resp| return err_resp;
+    const body = std.fmt.allocPrint(allocator, "{{\"bucket\":\"{s}\",\"status\":{d}}}", .{ cfg.bucket, resp.status }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
+}
+
 export fn handle_s3_delete(req: *const Request) callconv(.c) Response {
     const cfg = loadConfig();
     const key = getParam(req, "key") orelse return jsonResponse(400, "{\"error\":\"missing key\"}");
