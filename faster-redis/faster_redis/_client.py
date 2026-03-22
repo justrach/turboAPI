@@ -23,7 +23,7 @@ def _reject_unsupported_kwargs(name, kwargs):
 
 def _response_key(args):
     parts = [str(part).upper() for part in args[:2]]
-    if len(parts) >= 2 and parts[0] in {"CLIENT", "OBJECT"}:
+    if len(parts) >= 2 and parts[0] in {"CLIENT", "CONFIG", "OBJECT", "XGROUP"}:
         return f"{parts[0]} {parts[1]}"
     return parts[0] if parts else ""
 
@@ -43,6 +43,38 @@ def _parse_client_list(result):
             entry[key] = value
         rows.append(entry)
     return rows
+
+
+def _pairs_to_dict(result):
+    if not isinstance(result, list):
+        return result
+    return dict(zip(result[::2], result[1::2]))
+
+
+def _parse_stream_entries(result):
+    if not isinstance(result, list):
+        return result
+    entries = []
+    for item in result:
+        if not isinstance(item, list) or len(item) != 2:
+            entries.append(item)
+            continue
+        entry_id, fields = item
+        entries.append((entry_id, _pairs_to_dict(fields)))
+    return entries
+
+
+def _parse_xreadgroup(result):
+    if not isinstance(result, list):
+        return result
+    streams = []
+    for item in result:
+        if not isinstance(item, list) or len(item) != 2:
+            streams.append(item)
+            continue
+        stream_name, entries = item
+        streams.append([stream_name, _parse_stream_entries(entries)])
+    return streams
 
 
 class Redis:
@@ -72,8 +104,12 @@ class Redis:
         key = _response_key(args)
         if key in {"AUTH", "FLUSHALL", "FLUSHDB", "MSET", "PING", "SELECT", "SET"}:
             return True if result == "OK" or result == "PONG" else result
+        if key == "CONFIG GET":
+            return _pairs_to_dict(result)
         if key == "CLIENT LIST":
             return _parse_client_list(result)
+        if key == "XGROUP CREATE":
+            return True if result == "OK" else result
         if key in {"EXPIRE", "HEXISTS", "SISMEMBER", "SETNX"}:
             return bool(result) if result is not None else None
         if key == "ZRANGE" and any(str(part).upper() == "WITHSCORES" for part in args[1:]):
@@ -205,6 +241,49 @@ class Redis:
                 parsed.append(item)
         return parsed
 
+    # -- Streams -----------------------------------------------------------
+    def xadd(self, name, fields, id='*', maxlen=None, approximate=True, nomkstream=False):
+        args = ['XADD', name]
+        if nomkstream:
+            args.append('NOMKSTREAM')
+        if maxlen is not None:
+            args.extend(['MAXLEN'])
+            if approximate:
+                args.append('~')
+            args.append(maxlen)
+        args.append(id)
+        for key, value in fields.items():
+            args.extend([key, value])
+        return self._exec(*args)
+
+    def xrange(self, name, min='-', max='+', count=None):
+        args = ['XRANGE', name, min, max]
+        if count is not None:
+            args.extend(['COUNT', count])
+        return _parse_stream_entries(self._exec(*args))
+
+    def xgroup_create(self, name, groupname, id='$', mkstream=False, entriesread=None):
+        args = ['XGROUP', 'CREATE', name, groupname, id]
+        if mkstream:
+            args.append('MKSTREAM')
+        if entriesread is not None:
+            args.extend(['ENTRIESREAD', entriesread])
+        return self._exec(*args)
+
+    def xreadgroup(self, groupname, consumername, streams, count=None, block=None, noack=False):
+        args = ['XREADGROUP', 'GROUP', groupname, consumername]
+        if count is not None:
+            args.extend(['COUNT', count])
+        if block is not None:
+            args.extend(['BLOCK', block])
+        if noack:
+            args.append('NOACK')
+        args.append('STREAMS')
+        keys = list(streams.keys())
+        args.extend(keys)
+        args.extend(streams[key] for key in keys)
+        return _parse_xreadgroup(self._exec(*args))
+
     # -- Server ------------------------------------------------------------
     def ping(self): return self._exec('PING')
     def info(self, section=None): return self._exec('INFO', section) if section else self._exec('INFO')
@@ -220,6 +299,7 @@ class Redis:
     def select(self, db): return self._exec('SELECT', str(db))
     def echo(self, msg): return self._exec('ECHO', msg)
     def time(self): return self._exec('TIME')
+    def config_get(self, pattern="*"): return self._exec('CONFIG', 'GET', pattern)
 
     # -- Pipeline ----------------------------------------------------------
     def pipeline(self, transaction=False):
