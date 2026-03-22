@@ -7,6 +7,8 @@
 
 ## Results — All 7 MagicStack pgbench Queries
 
+### Clean rerun (source of truth)
+
 | Query | asyncpg | psycopg3-async | turbopg (pg.zig) | vs asyncpg |
 |-------|---------|----------------|------------------|-----------|
 | SELECT 1+1 | 94,790 q/s (0.105ms) | 34,638 q/s (0.288ms) | **130,837 q/s (0.076ms)** | **1.38x** |
@@ -19,6 +21,33 @@
 
 **turbopg wins 6/6 queries it completed against asyncpg in the clean rerun.** `COPY FROM` remains inconclusive versus `asyncpg` on this machine because `asyncpg` failed twice with `DiskFullError`. Against `psycopg3-async`, turbopg also wins `COPY FROM` (`366 q/s` vs `114 q/s`, `3.21x`).
 
+### First full run captured earlier (reference only)
+
+| Query | asyncpg | psycopg3-async | turbopg (pg.zig) | vs asyncpg |
+|-------|---------|----------------|------------------|-----------|
+| SELECT 1+1 | 97,842 q/s (0.102ms) | 34,384 q/s (0.290ms) | **126,979 q/s (0.078ms)** | **1.30x** |
+| pg_type (619 rows, 12 cols) | 5,761 q/s (1.735ms) | 2,310 q/s (4.328ms) | **7,084 q/s (1.410ms)** | **1.23x** |
+| generate_series (1000 rows) | 8,093 q/s (1.235ms) | 4,218 q/s (2.370ms) | **20,783 q/s (0.480ms)** | **2.57x** |
+| large_object (100 bytea rows) | FAILED / stale table | FAILED / stale table | **29,987 q/s** | n/a |
+| arrays (100 int[] rows) | 9,685 q/s (1.032ms) | 3,306 q/s (3.024ms) | **13,638 q/s (0.732ms)** | **1.41x** |
+| COPY FROM (10k rows/op) | FAILED / disk full | 116 q/s (86.3ms) | **372 q/s (26.9ms)** | n/a |
+| batch INSERT (1k rows) | 1,020 q/s (9.8ms) | 33 q/s (300ms) | **29,387 q/s (0.339ms)** | **28.8x** |
+
+### Validation comparison: first run vs clean rerun
+
+| Query | Metric | First run | Clean rerun | Delta |
+|-------|--------|-----------|-------------|-------|
+| SELECT 1+1 | turbopg q/s | 126,979 | 130,837 | +3.0% |
+| SELECT 1+1 | asyncpg q/s | 97,842 | 94,790 | -3.1% |
+| pg_type | turbopg q/s | 7,084 | 7,090 | +0.1% |
+| pg_type | asyncpg q/s | 5,761 | 5,803 | +0.7% |
+| generate_series | turbopg q/s | 20,783 | 19,725 | -5.1% |
+| generate_series | asyncpg q/s | 8,093 | 8,229 | +1.7% |
+| arrays | turbopg q/s | 13,638 | 13,763 | +0.9% |
+| arrays | asyncpg q/s | 9,685 | 9,676 | -0.1% |
+| batch INSERT | turbopg q/s | 29,387 | 31,004 | +5.5% |
+| batch INSERT | asyncpg q/s | 1,020 | 1,089 | +6.8% |
+
 ### Rows/sec (throughput)
 
 | Query | asyncpg | turbopg | Ratio |
@@ -30,6 +59,14 @@
 | arrays | 967,624 | 1,376,323 | 1.42x |
 | COPY FROM | failed | 3,656,253 | unverified |
 | batch INSERT | 1,088,866 | -- | 28.5x (q/s) |
+
+### COPY FROM verified comparison on this host
+
+| Driver | Queries/sec | Rows/sec | Mean latency |
+|--------|-------------|----------|--------------|
+| psycopg3-async | 114 | 1,141,376 | 87.483ms |
+| turbopg (pg.zig) | **366** | **3,656,253** | **27.326ms** |
+| asyncpg | FAILED | FAILED | `DiskFullError` |
 
 ## Validation notes
 
