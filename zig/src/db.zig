@@ -1003,23 +1003,41 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
 
     // Phase 3: Reacquire GIL, build Python objects
     py_gil_restore(gil_state);
-    const py_list = c.PyList_New(@intCast(num_rows)) orelse return null;
+
+    // Pre-intern column name keys (created once, reused for all rows)
+    var py_keys: [32]?*c.PyObject = [_]?*c.PyObject{null} ** 32;
+    for (0..num_cols) |ci| {
+        py_keys[ci] = c.PyUnicode_FromStringAndSize(
+            @ptrCast(col_name_ptrs[ci].ptr),
+            @intCast(col_name_ptrs[ci].len),
+        );
+        if (py_keys[ci] == null) {
+            // Clean up already created keys
+            for (0..ci) |j| {
+                if (py_keys[j]) |k| c.Py_DecRef(k);
+            }
+            return null;
+        }
+    }
+
+    const py_list = c.PyList_New(@intCast(num_rows)) orelse {
+        for (0..num_cols) |ci| {
+            if (py_keys[ci]) |k| c.Py_DecRef(k);
+        }
+        return null;
+    };
 
     for (0..num_rows) |ri| {
-        const py_dict = c.PyDict_New() orelse {
+        const py_dict = c._PyDict_NewPresized(@intCast(num_cols)) orelse {
             c.Py_DecRef(py_list);
+            for (0..num_cols) |ci| {
+                if (py_keys[ci]) |k| c.Py_DecRef(k);
+            }
             return null;
         };
 
         for (0..num_cols) |ci| {
-            const py_key = c.PyUnicode_FromStringAndSize(
-                @ptrCast(col_name_ptrs[ci].ptr),
-                @intCast(col_name_ptrs[ci].len),
-            ) orelse {
-                c.Py_DecRef(py_dict);
-                c.Py_DecRef(py_list);
-                return null;
-            };
+            const py_key = py_keys[ci].?;
 
             var py_val: *c.PyObject = undefined;
 
@@ -1046,7 +1064,6 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
                     // Text, varchar, name, char(n), unknown
                     25, 1043, 19, 1042, 705, 18 => {
                         py_val = c.PyUnicode_DecodeUTF8(@ptrCast(data.ptr), @intCast(data.len), "replace") orelse {
-                            c.Py_DecRef(py_key);
                             c.Py_DecRef(py_dict);
                             c.Py_DecRef(py_list);
                             return null;
@@ -1055,7 +1072,6 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
                     // Everything else: try as UTF-8 string
                     else => {
                         py_val = c.PyUnicode_DecodeUTF8(@ptrCast(data.ptr), @intCast(data.len), "replace") orelse {
-                            c.Py_DecRef(py_key);
                             c.Py_DecRef(py_dict);
                             c.Py_DecRef(py_list);
                             return null;
@@ -1066,11 +1082,14 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
 
             _ = c.PyDict_SetItem(py_dict, py_key, py_val);
             c.Py_DecRef(py_val);
-            c.Py_DecRef(py_key);
         }
 
-        // Use SET_ITEM (steals ref) since we pre-allocated the list
         c.PyList_SET_ITEM(py_list, @intCast(ri), py_dict);
+    }
+
+    // Clean up interned keys
+    for (0..num_cols) |ci| {
+        if (py_keys[ci]) |k| c.Py_DecRef(k);
     }
 
     return py_list;
