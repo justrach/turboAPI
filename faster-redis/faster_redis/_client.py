@@ -8,6 +8,19 @@ from faster_redis._redis_accel import (
 )
 
 
+def _normalize_command_name(name):
+    return name.upper().replace('_', ' ').split()
+
+
+def _reject_unsupported_kwargs(name, kwargs):
+    if kwargs:
+        keys = ", ".join(sorted(kwargs))
+        raise TypeError(
+            f"{name}() does not support keyword arguments in the raw-command fallback; "
+            f"use execute_command(...) or an explicit method instead (got: {keys})"
+        )
+
+
 class Redis:
     """Zig-native Redis client. Every command is one Zig call."""
 
@@ -142,11 +155,12 @@ class Redis:
         return self._exec(*args)
 
     def __getattr__(self, name):
-        """Any undefined command falls through to Zig execute."""
+        """Fallback for raw Redis commands without redis-py response callbacks."""
         if name.startswith('_'):
             raise AttributeError(name)
         def method(*args, **kwargs):
-            cmd = name.upper().replace('_', ' ').split()
+            _reject_unsupported_kwargs(name, kwargs)
+            cmd = _normalize_command_name(name)
             return self._exec(*cmd, *args)
         return method
 
@@ -185,7 +199,10 @@ class Pipeline:
 
     def __getattr__(self, name):
         """Buffer any Redis command."""
+        if name.startswith('_'):
+            raise AttributeError(name)
         def method(*args, **kwargs):
-            self._commands.append([name.upper()] + list(args))
+            _reject_unsupported_kwargs(name, kwargs)
+            self._commands.append(_normalize_command_name(name) + list(args))
             return self
         return method
