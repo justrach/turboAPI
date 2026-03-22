@@ -49,6 +49,26 @@ var global_cfg = EnvConfig{
     .bucket = "turbo-vs-fast",
 };
 
+threadlocal var tls_client: ?std.http.Client = null;
+threadlocal var tls_signing_cache = SigningCache{};
+
+const SigningCache = struct {
+    valid: bool = false,
+    date_stamp: [8]u8 = [_]u8{0} ** 8,
+    signing_key: [32]u8 = [_]u8{0} ** 32,
+};
+
+const SignedHeaders = struct {
+    headers: [4]std.http.Header,
+    len: usize,
+    amz_date: [16]u8,
+    authorization: [256]u8,
+
+    fn slice(self: *const SignedHeaders) []const std.http.Header {
+        return self.headers[0..self.len];
+    }
+};
+
 fn getEnv(name: [:0]const u8, fallback: []const u8) []const u8 {
     const value = std.c.getenv(name);
     if (value) |ptr| return std.mem.span(ptr);
@@ -127,6 +147,13 @@ fn sha256Hex(data: []const u8) [64]u8 {
     return std.fmt.bytesToHex(hash, .lower);
 }
 
+fn getClient() *std.http.Client {
+    if (tls_client == null) {
+        tls_client = std.http.Client{ .allocator = allocator };
+    }
+    return &tls_client.?;
+}
+
 fn deriveSigningKey(secret_key: []const u8, datestamp: []const u8, region: []const u8, service: []const u8) [32]u8 {
     var aws4_key_buf: [256]u8 = undefined;
     const prefix = "AWS4";
@@ -145,8 +172,22 @@ fn deriveSigningKey(secret_key: []const u8, datestamp: []const u8, region: []con
     return k_signing;
 }
 
-fn sign(secret_key: []const u8, datestamp: []const u8, region: []const u8, service: []const u8, string_to_sign: []const u8) [64]u8 {
+fn getSigningKey(secret_key: []const u8, datestamp: []const u8, region: []const u8, service: []const u8) [32]u8 {
+    if (
+        tls_signing_cache.valid and
+        std.mem.eql(u8, tls_signing_cache.date_stamp[0..], datestamp)
+    ) {
+        return tls_signing_cache.signing_key;
+    }
     const key = deriveSigningKey(secret_key, datestamp, region, service);
+    tls_signing_cache.valid = true;
+    @memcpy(tls_signing_cache.date_stamp[0..], datestamp[0..8]);
+    tls_signing_cache.signing_key = key;
+    return key;
+}
+
+fn sign(secret_key: []const u8, datestamp: []const u8, region: []const u8, service: []const u8, string_to_sign: []const u8) [64]u8 {
+    const key = getSigningKey(secret_key, datestamp, region, service);
     var mac: [32]u8 = undefined;
     HmacSha256.create(&mac, string_to_sign, &key);
     return std.fmt.bytesToHex(mac, .lower);
@@ -164,14 +205,13 @@ const HttpResp = struct {
 };
 
 fn doRequest(method: std.http.Method, url: []const u8, headers: []const std.http.Header) !HttpResp {
-    var client = std.http.Client{ .allocator = allocator };
-    defer client.deinit();
+    const client = getClient();
 
     const uri = try std.Uri.parse(url);
     var req = try client.request(method, uri, .{
         .redirect_behavior = @enumFromInt(5),
         .extra_headers = headers,
-        .keep_alive = method != .HEAD,
+        .keep_alive = true,
     });
     defer req.deinit();
 
@@ -212,8 +252,10 @@ fn buildSignedHeaders(
     canonical_query: []const u8,
     payload_hash: []const u8,
     extra_headers: []const [2][]const u8,
-) !std.ArrayList(std.http.Header) {
+) !SignedHeaders {
     const now = utcNow();
+
+    var host_buf: [128]u8 = undefined;
     const host = blk: {
         const uri = try std.Uri.parse(cfg.endpoint);
         const hostname = switch (uri.host orelse return error.InvalidUrl) {
@@ -221,78 +263,78 @@ fn buildSignedHeaders(
             .percent_encoded => |h| h,
         };
         if (uri.port) |port| {
-            break :blk try std.fmt.allocPrint(allocator, "{s}:{d}", .{ hostname, port });
+            break :blk try std.fmt.bufPrint(&host_buf, "{s}:{d}", .{ hostname, port });
         }
-        break :blk try allocator.dupe(u8, hostname);
+        break :blk hostname;
     };
-    defer allocator.free(host);
 
-    var header_map = std.StringHashMap([]const u8).init(allocator);
-    defer header_map.deinit();
-    try header_map.put("host", host);
-    try header_map.put("x-amz-content-sha256", payload_hash);
-    try header_map.put("x-amz-date", &now.amz_date);
-    for (extra_headers) |h| try header_map.put(h[0], h[1]);
+    const signed_headers = if (extra_headers.len == 0)
+        "host;x-amz-content-sha256;x-amz-date"
+    else if (std.mem.eql(u8, extra_headers[0][0], "range"))
+        "host;range;x-amz-content-sha256;x-amz-date"
+    else if (std.mem.eql(u8, extra_headers[0][0], "x-amz-copy-source"))
+        "host;x-amz-content-sha256;x-amz-copy-source;x-amz-date"
+    else
+        return error.UnsupportedHeaderSet;
 
-    var keys: std.ArrayList([]const u8) = .empty;
-    defer keys.deinit(allocator);
-    var it = header_map.iterator();
-    while (it.next()) |entry| try keys.append(allocator, entry.key_ptr.*);
-    std.mem.sortUnstable([]const u8, keys.items, {}, struct {
-        fn less(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, a, b);
-        }
-    }.less);
+    var canonical_headers_buf: [512]u8 = undefined;
+    const canonical_headers = if (extra_headers.len == 0)
+        try std.fmt.bufPrint(
+            &canonical_headers_buf,
+            "host:{s}\nx-amz-content-sha256:{s}\nx-amz-date:{s}\n",
+            .{ host, payload_hash, &now.amz_date },
+        )
+    else
+        try std.fmt.bufPrint(
+            &canonical_headers_buf,
+            "host:{s}\n{s}:{s}\nx-amz-content-sha256:{s}\nx-amz-date:{s}\n",
+            .{ host, extra_headers[0][0], extra_headers[0][1], payload_hash, &now.amz_date },
+        );
 
-    var canonical_headers: std.ArrayList(u8) = .empty;
-    defer canonical_headers.deinit(allocator);
-    for (keys.items) |k| {
-        try canonical_headers.writer(allocator).print("{s}:{s}\n", .{ k, header_map.get(k).? });
-    }
-
-    const signed_headers = try std.mem.join(allocator, ";", keys.items);
-    defer allocator.free(signed_headers);
-
-    const canonical_request = try std.fmt.allocPrint(
-        allocator,
+    var canonical_request_buf: [1024]u8 = undefined;
+    const canonical_request = try std.fmt.bufPrint(
+        &canonical_request_buf,
         "{s}\n{s}\n{s}\n{s}\n{s}\n{s}",
-        .{ method, canonical_uri, canonical_query, canonical_headers.items, signed_headers, payload_hash },
+        .{ method, canonical_uri, canonical_query, canonical_headers, signed_headers, payload_hash },
     );
-    defer allocator.free(canonical_request);
 
     const request_hash = sha256Hex(canonical_request);
-    const scope = try std.fmt.allocPrint(allocator, "{s}/{s}/s3/aws4_request", .{ &now.date_stamp, cfg.region });
-    defer allocator.free(scope);
-    const string_to_sign = try std.fmt.allocPrint(
-        allocator,
+
+    var scope_buf: [128]u8 = undefined;
+    const scope = try std.fmt.bufPrint(&scope_buf, "{s}/{s}/s3/aws4_request", .{ &now.date_stamp, cfg.region });
+
+    var string_to_sign_buf: [512]u8 = undefined;
+    const string_to_sign = try std.fmt.bufPrint(
+        &string_to_sign_buf,
         "AWS4-HMAC-SHA256\n{s}\n{s}\n{s}",
         .{ &now.amz_date, scope, &request_hash },
     );
-    defer allocator.free(string_to_sign);
 
     const signature = sign(cfg.secret_key, &now.date_stamp, cfg.region, "s3", string_to_sign);
-    const auth = try std.fmt.allocPrint(
-        allocator,
+
+    var out = SignedHeaders{
+        .headers = undefined,
+        .len = 0,
+        .amz_date = now.amz_date,
+        .authorization = undefined,
+    };
+    const auth = try std.fmt.bufPrint(
+        &out.authorization,
         "AWS4-HMAC-SHA256 Credential={s}/{s}, SignedHeaders={s}, Signature={s}",
         .{ cfg.access_key, scope, signed_headers, &signature },
     );
-    errdefer allocator.free(auth);
 
-    var headers: std.ArrayList(std.http.Header) = .empty;
-    errdefer {
-        for (headers.items) |h| {
-            if (!std.mem.eql(u8, h.name, "host") and !std.mem.eql(u8, h.name, "x-amz-content-sha256") and !std.mem.eql(u8, h.name, "x-amz-date")) allocator.free(h.value);
-        }
-        headers.deinit(allocator);
+    out.headers[out.len] = .{ .name = "x-amz-content-sha256", .value = payload_hash };
+    out.len += 1;
+    out.headers[out.len] = .{ .name = "x-amz-date", .value = out.amz_date[0..] };
+    out.len += 1;
+    if (extra_headers.len == 1) {
+        out.headers[out.len] = .{ .name = extra_headers[0][0], .value = extra_headers[0][1] };
+        out.len += 1;
     }
-
-    try headers.append(allocator, .{ .name = "x-amz-content-sha256", .value = payload_hash });
-    try headers.append(allocator, .{ .name = "x-amz-date", .value = try allocator.dupe(u8, &now.amz_date) });
-    for (extra_headers) |h| {
-        try headers.append(allocator, .{ .name = h[0], .value = h[1] });
-    }
-    try headers.append(allocator, .{ .name = "authorization", .value = auth });
-    return headers;
+    out.headers[out.len] = .{ .name = "authorization", .value = auth };
+    out.len += 1;
+    return out;
 }
 
 fn jsonResponse(status: u16, body: []const u8) Response {
@@ -303,6 +345,22 @@ fn jsonResponse(status: u16, body: []const u8) Response {
         .content_type_len = 16,
         .body = duped.ptr,
         .body_len = duped.len,
+    };
+}
+
+fn ensureOk(resp: *const HttpResp) ?Response {
+    if (resp.status < 400) return null;
+    const body = std.fmt.allocPrint(
+        allocator,
+        "{{\"error\":\"s3\",\"status\":{d}}}",
+        .{resp.status},
+    ) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+    return .{
+        .status_code = if (resp.status > 599) 502 else resp.status,
+        .content_type = "application/json",
+        .content_type_len = 16,
+        .body = body.ptr,
+        .body_len = body.len,
     };
 }
 
@@ -350,10 +408,10 @@ export fn handle_s3_head(req: *const Request) callconv(.c) Response {
     const url = makeUrl(cfg, canonical_uri) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     defer allocator.free(url);
 
-    var headers = buildSignedHeaders(cfg, "GET", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
-    defer headers.deinit(allocator);
-    var resp = doRequest(.GET, url, headers.items) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+    const headers = buildSignedHeaders(cfg, "HEAD", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
+    var resp = doRequest(.HEAD, url, headers.slice()) catch return jsonResponse(502, "{\"error\":\"s3\"}");
     defer resp.deinit();
+    if (ensureOk(&resp)) |err_resp| return err_resp;
     const size = parseContentLength(resp.headers_buf) orelse resp.body.len;
     const body = std.fmt.allocPrint(allocator, "{{\"key\":\"{s}\",\"size\":{d}}}", .{ key, size }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
@@ -366,10 +424,10 @@ export fn handle_s3_head_bucket(_: *const Request) callconv(.c) Response {
     const url = makeUrl(cfg, canonical_uri) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     defer allocator.free(url);
 
-    var headers = buildSignedHeaders(cfg, "HEAD", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
-    defer headers.deinit(allocator);
-    var resp = doRequest(.HEAD, url, headers.items) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+    const headers = buildSignedHeaders(cfg, "HEAD", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
+    var resp = doRequest(.HEAD, url, headers.slice()) catch return jsonResponse(502, "{\"error\":\"s3\"}");
     defer resp.deinit();
+    if (ensureOk(&resp)) |err_resp| return err_resp;
     const body = std.fmt.allocPrint(allocator, "{{\"bucket\":\"{s}\",\"status\":{d}}}", .{ cfg.bucket, resp.status }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
 }
@@ -382,10 +440,10 @@ export fn handle_s3_get(req: *const Request) callconv(.c) Response {
     const url = makeUrl(cfg, canonical_uri) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     defer allocator.free(url);
 
-    var headers = buildSignedHeaders(cfg, "GET", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
-    defer headers.deinit(allocator);
-    var resp = doRequest(.GET, url, headers.items) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+    const headers = buildSignedHeaders(cfg, "GET", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
+    var resp = doRequest(.GET, url, headers.slice()) catch return jsonResponse(502, "{\"error\":\"s3\"}");
     defer resp.deinit();
+    if (ensureOk(&resp)) |err_resp| return err_resp;
     const size = parseContentLength(resp.headers_buf) orelse resp.body.len;
     const body = std.fmt.allocPrint(allocator, "{{\"key\":\"{s}\",\"size\":{d}}}", .{ key, size }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
@@ -401,10 +459,10 @@ export fn handle_s3_list(_: *const Request) callconv(.c) Response {
     const url = makeUrl(cfg, suffix) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     defer allocator.free(url);
 
-    var headers = buildSignedHeaders(cfg, "GET", canonical_uri, canonical_query, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
-    defer headers.deinit(allocator);
-    var resp = doRequest(.GET, url, headers.items) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+    const headers = buildSignedHeaders(cfg, "GET", canonical_uri, canonical_query, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
+    var resp = doRequest(.GET, url, headers.slice()) catch return jsonResponse(502, "{\"error\":\"s3\"}");
     defer resp.deinit();
+    if (ensureOk(&resp)) |err_resp| return err_resp;
     const count = countTag(resp.body, "<Contents>");
     const body = std.fmt.allocPrint(allocator, "{{\"count\":{d}}}", .{count}) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
@@ -418,10 +476,10 @@ export fn handle_s3_delete(req: *const Request) callconv(.c) Response {
     const url = makeUrl(cfg, canonical_uri) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     defer allocator.free(url);
 
-    var headers = buildSignedHeaders(cfg, "DELETE", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
-    defer headers.deinit(allocator);
-    var resp = doRequest(.DELETE, url, headers.items) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+    const headers = buildSignedHeaders(cfg, "DELETE", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
+    var resp = doRequest(.DELETE, url, headers.slice()) catch return jsonResponse(502, "{\"error\":\"s3\"}");
     defer resp.deinit();
+    if (ensureOk(&resp)) |err_resp| return err_resp;
     const body = std.fmt.allocPrint(allocator, "{{\"key\":\"{s}\",\"deleted\":true}}", .{key}) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
 }
@@ -437,10 +495,10 @@ export fn handle_s3_copy(req: *const Request) callconv(.c) Response {
     const copy_source = std.fmt.allocPrint(allocator, "/{s}/{s}", .{ cfg.bucket, src }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     defer allocator.free(copy_source);
 
-    var headers = buildSignedHeaders(cfg, "PUT", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{.{ "x-amz-copy-source", copy_source }}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
-    defer headers.deinit(allocator);
-    var resp = doRequest(.PUT, url, headers.items) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+    const headers = buildSignedHeaders(cfg, "PUT", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{.{ "x-amz-copy-source", copy_source }}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
+    var resp = doRequest(.PUT, url, headers.slice()) catch return jsonResponse(502, "{\"error\":\"s3\"}");
     defer resp.deinit();
+    if (ensureOk(&resp)) |err_resp| return err_resp;
     const body = std.fmt.allocPrint(allocator, "{{\"src\":\"{s}\",\"dst\":\"{s}\",\"status\":{d}}}", .{ src, dst, resp.status }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
 }

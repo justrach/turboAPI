@@ -278,10 +278,10 @@ Load: `wrk -t8 -c200 -d3s`
 
 | Operation | Turbo RPS | Fast RPS | Speedup | Turbo p99 |
 |---|---:|---:|---:|---:|
-| `S3 GetObject (1KB)` | 1159 | 1158 | 1.00x | 33.7 ms |
-| `S3 GetObject (10KB)` | 1127 | 1061 | 1.06x | 72.5 ms |
-| `S3 HeadObject` | 1118 | 1305 | 0.86x | 78.0 ms |
-| `S3 ListObjects (20)` | 924 | 690 | 1.34x | 77.2 ms |
+| `S3 GetObject (1KB)` | 1313 | 1123 | 1.17x | 30.2 ms |
+| `S3 GetObject (10KB)` | 1309 | 1169 | 1.12x | 64.7 ms |
+| `S3 HeadObject` | 1591 | 1407 | 1.13x | 41.4 ms |
+| `S3 ListObjects (20)` | 826 | 641 | 1.29x | 55.4 ms |
 
 ### Notes
 
@@ -289,12 +289,11 @@ Load: `wrk -t8 -c200 -d3s`
   returning fast `400` responses while still surfacing `200` at the route
   level. After fixing outbound `Host` handling and checking the route against
   real objects, these are the corrected numbers.
-- The current FFI handler creates a fresh Zig `std.http.Client` per request and
-  still does request signing work on every call. That is why this spike is only
-  modestly ahead of `FastAPI + boto3` on `get`/`list`, not another multi-x jump.
-- `HeadObject` is currently implemented as a signed `GET` in the FFI spike so
-  the route is correct against LocalStack. It is not yet a true optimized HEAD
-  transport path.
+- The current FFI handler now reuses a thread-local Zig `std.http.Client` and
+  caches the derived SigV4 signing key by date per worker thread.
+- The common-path signer/header builder now uses fixed stack buffers instead of
+  rebuilding maps and heap arrays per request.
+- `HeadObject` is back on a true `HEAD` request in the FFI spike.
 
 ## What Gets Checked
 
