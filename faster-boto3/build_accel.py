@@ -6,7 +6,6 @@ import sys
 import sysconfig
 from pathlib import Path
 
-
 LIBS = {
     "sigv4_accel": "_sigv4_accel",
     "http_accel": "_http_accel",
@@ -43,9 +42,16 @@ def build():
     for f in lib_dir.iterdir():
         for zig_name, py_name in LIBS.items():
             if zig_name in f.name and (f.suffix == ".so" or f.suffix == ".dylib"):
-                dest = out_dir / f"{py_name}{ext_suffix}"
-                shutil.copy2(f, dest)
-                print(f"  Installed: {dest}")
+                local_so = out_dir / f"{py_name}.so"
+                import_target = out_dir / f"{py_name}{ext_suffix}"
+
+                shutil.copy2(f, local_so)
+                print(f"  Installed: {local_so}")
+
+                if import_target.exists() or import_target.is_symlink():
+                    import_target.unlink()
+                import_target.symlink_to(local_so.name)
+                print(f"  Linked:    {import_target} -> {local_so.name}")
                 installed += 1
 
     if installed < len(LIBS):

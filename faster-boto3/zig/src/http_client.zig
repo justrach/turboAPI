@@ -32,11 +32,13 @@ fn readResponseBody(
 ) HttpError![]u8 {
     const status = response.head.status;
     if (status == .no_content or status == .not_modified) {
+        response.request.reader.state = .ready;
         return allocator.dupe(u8, "") catch return HttpError.OutOfMemory;
     }
     const maybe_len = response.head.content_length;
     if (maybe_len) |len| {
         if (len == 0) {
+            response.request.reader.state = .ready;
             return allocator.dupe(u8, "") catch return HttpError.OutOfMemory;
         }
     }

@@ -274,7 +274,6 @@ def test_native_upload_part_copy(native_s3):
     assert part["CopyPartResult"]["ETag"]
 
 
-@pytest.mark.xfail(reason="native abort_multipart_upload still hangs in the current transport binary")
 def test_native_abort_multipart_upload(native_s3):
     create = native_s3.create_multipart_upload(Bucket=BUCKET, Key="abort-me")
     resp = native_s3.abort_multipart_upload(Bucket=BUCKET, Key="abort-me", UploadId=create["UploadId"])

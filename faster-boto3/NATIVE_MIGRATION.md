@@ -168,9 +168,8 @@ than the older read-and-hash approach.
   `CopyObject`, `CreateMultipartUpload`, `UploadPart`,
   `UploadPartCopy`, `CompleteMultipartUpload`, `AbortMultipartUpload`,
   `ListParts`, and `ListMultipartUploads`.
-- `AbortMultipartUpload` is currently implemented, but the native transport
-  path is still unstable in this workspace and is being tracked as a transport
-  bug rather than treated as parity-complete.
+- `AbortMultipartUpload` now returns cleanly on the native transport after the
+  no-body response handling fix in the Zig HTTP client.
 - The larger upload win is now coming from the native request path plus the
   streaming fd transport and unsigned file-backed payload path, not from
   multipart orchestration alone.
