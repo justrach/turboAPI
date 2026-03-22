@@ -45,8 +45,9 @@ class ClientFallbackTests(unittest.TestCase):
         self.assertIsInstance(results[1], int)
 
     def test_fallback_rejects_kwargs(self):
-        with self.assertRaises(TypeError):
-            self.faster.client_list(_type="normal")
+        rows = self.faster.client_list(_type="normal")
+        self.assertIsInstance(rows, list)
+        self.assertIsInstance(rows[0], dict)
 
         with self.assertRaises(TypeError):
             with self.faster.pipeline() as pipe:
@@ -66,6 +67,16 @@ class ClientFallbackTests(unittest.TestCase):
             pipe.get("p")
             results = pipe.execute()
         self.assertEqual(results, [True, "1"])
+
+    def test_zrange_withscores_matches_redis_py_shape(self):
+        self.faster.zadd("z", {"a": 1.5, "b": 2.0})
+        self.assertEqual(self.faster.zrange("z", 0, -1, withscores=True), [("a", 1.5), ("b", 2.0)])
+
+    def test_client_list_returns_parsed_rows(self):
+        rows = self.faster.client_list()
+        self.assertIsInstance(rows, list)
+        self.assertIsInstance(rows[0], dict)
+        self.assertIn("id", rows[0])
 
 
 if __name__ == "__main__":

@@ -28,6 +28,23 @@ def _response_key(args):
     return parts[0] if parts else ""
 
 
+def _parse_client_list(result):
+    if not isinstance(result, str):
+        return result
+    rows = []
+    for line in result.splitlines():
+        if not line.strip():
+            continue
+        entry = {}
+        for field in line.split():
+            if "=" not in field:
+                continue
+            key, value = field.split("=", 1)
+            entry[key] = value
+        rows.append(entry)
+    return rows
+
+
 class Redis:
     """Zig-native Redis client. Every command is one Zig call."""
 
@@ -55,8 +72,19 @@ class Redis:
         key = _response_key(args)
         if key in {"AUTH", "FLUSHALL", "FLUSHDB", "MSET", "PING", "SELECT", "SET"}:
             return True if result == "OK" or result == "PONG" else result
+        if key == "CLIENT LIST":
+            return _parse_client_list(result)
         if key in {"EXPIRE", "HEXISTS", "SISMEMBER", "SETNX"}:
             return bool(result) if result is not None else None
+        if key == "ZRANGE" and any(str(part).upper() == "WITHSCORES" for part in args[1:]):
+            if not isinstance(result, list):
+                return result
+            pairs = []
+            for i in range(0, len(result), 2):
+                member = result[i]
+                score = result[i + 1]
+                pairs.append((member, float(score)))
+            return pairs
         return result
 
     def close(self):
@@ -153,6 +181,12 @@ class Redis:
     # -- Server ------------------------------------------------------------
     def ping(self): return self._exec('PING')
     def info(self, section=None): return self._exec('INFO', section) if section else self._exec('INFO')
+    def client_list(self, _type=None):
+        args = ['CLIENT', 'LIST']
+        if _type is not None:
+            args.extend(['TYPE', _type])
+        return self._exec(*args)
+    def client_id(self): return self._exec('CLIENT', 'ID')
     def dbsize(self): return self._exec('DBSIZE')
     def flushdb(self): return self._exec('FLUSHDB')
     def flushall(self): return self._exec('FLUSHALL')
