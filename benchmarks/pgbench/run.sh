@@ -71,7 +71,7 @@ run_driver() {
 cd /pgbench/_python
 source venv/bin/activate
 
-for QUERY in /pgbench/queries/7-oneplusone.json /pgbench/queries/1-pg_type.json /pgbench/queries/2-generate_series.json; do
+for QUERY in /pgbench/queries/7-oneplusone.json /pgbench/queries/1-pg_type.json /pgbench/queries/2-generate_series.json /pgbench/queries/3-large_object.json /pgbench/queries/4-arrays.json /pgbench/queries/5-copyfrom.json /pgbench/queries/6-batch.json; do
     QNAME=$(basename "$QUERY" .json)
     echo ""
     echo "=== Query: $QNAME ==="
