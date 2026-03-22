@@ -170,13 +170,40 @@ class Redis:
         args = ['ZADD', key]
         for m, s in mapping.items(): args.extend([s, m])
         return self._exec(*args)
-    def zrange(self, key, start, stop, withscores=False):
+    def zrange(self, key, start, stop, withscores=False, desc=False, byscore=False):
         args = ['ZRANGE', key, start, stop]
+        if byscore: args.append('BYSCORE')
+        if desc: args.append('REV')
         if withscores: args.append('WITHSCORES')
         return self._exec(*args)
     def zrank(self, key, member): return self._exec('ZRANK', key, member)
     def zcard(self, key): return self._exec('ZCARD', key)
     def zscore(self, key, member): return self._exec('ZSCORE', key, member)
+    def geoadd(self, key, values, nx=False, xx=False, ch=False):
+        args = ['GEOADD', key]
+        if nx: args.append('NX')
+        if xx: args.append('XX')
+        if ch: args.append('CH')
+        if isinstance(values, (list, tuple)) and values and not isinstance(values[0], (list, tuple)):
+            values = [values]
+        for item in values:
+            lon, lat, member = item
+            args.extend([lon, lat, member])
+        return self._exec(*args)
+    def geopos(self, key, *members):
+        result = self._exec('GEOPOS', key, *members)
+        if not isinstance(result, list):
+            return result
+        parsed = []
+        for item in result:
+            if item is None:
+                parsed.append(None)
+                continue
+            if isinstance(item, list) and len(item) == 2:
+                parsed.append((float(item[0]), float(item[1])))
+            else:
+                parsed.append(item)
+        return parsed
 
     # -- Server ------------------------------------------------------------
     def ping(self): return self._exec('PING')

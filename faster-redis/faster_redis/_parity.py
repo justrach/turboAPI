@@ -65,8 +65,28 @@ def core_parity_scenarios():
             tags=("sorted-set",),
         ),
         ParityScenario(
+            "zrange-desc",
+            lambda c: (c.flushdb(), c.zadd("z", {"a": 1, "b": 2, "c": 3}), c.zrange("z", 0, 1, desc=True))[-1],
+            tags=("sorted-set",),
+        ),
+        ParityScenario(
+            "zrange-byscore-withscores",
+            lambda c: (c.flushdb(), c.zadd("z", {"a": 1, "b": 2, "c": 3}), c.zrange("z", 1, 3, byscore=True, withscores=True))[-1],
+            tags=("sorted-set",),
+        ),
+        ParityScenario(
+            "geoadd-geopos",
+            lambda c: (c.flushdb(), c.geoadd("geo", [-122.27652, 37.805186, "station:1"]), c.geopos("geo", "station:1"))[-1],
+            tags=("geo",),
+        ),
+        ParityScenario(
             "pipeline-set-get",
             lambda c: (lambda p: [p.set("p", "1"), p.get("p"), p.execute()][-1])(c.pipeline()),
             tags=("pipeline",),
+        ),
+        ParityScenario(
+            "pipeline-transaction",
+            lambda c: (lambda p: [p.set("tx", "1"), p.get("tx"), p.execute()][-1])(c.pipeline(transaction=True)),
+            tags=("pipeline", "transaction"),
         ),
     ]
