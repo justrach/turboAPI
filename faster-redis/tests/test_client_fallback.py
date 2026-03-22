@@ -114,6 +114,16 @@ class ClientFallbackTests(unittest.TestCase):
         self.assertEqual(self.faster.object("REFCOUNT", "obj"), 1)
         self.assertIsInstance(self.faster.object("IDLETIME", "obj"), int)
 
+    def test_acl_explicit_api_matches_redis_py_shapes(self):
+        self.assertEqual(self.faster.acl_whoami(), "default")
+        acl_list = self.faster.acl_list()
+        self.assertIsInstance(acl_list, list)
+        self.assertTrue(any(item.startswith("user default ") for item in acl_list))
+        acl_user = self.faster.acl_getuser("default")
+        self.assertIsInstance(acl_user, dict)
+        self.assertEqual(acl_user["enabled"], True)
+        self.assertIn("flags", acl_user)
+
 
 if __name__ == "__main__":
     unittest.main()
