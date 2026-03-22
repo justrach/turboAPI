@@ -124,6 +124,11 @@ class ClientFallbackTests(unittest.TestCase):
         self.assertEqual(acl_user["enabled"], True)
         self.assertIn("flags", acl_user)
 
+    def test_config_set_and_resetstat_match_redis_py_semantics(self):
+        timeout = self.faster.config_get("timeout")["timeout"]
+        self.assertIs(self.faster.config_set("timeout", timeout), True)
+        self.assertIs(self.faster.config_resetstat(), True)
+
 
 if __name__ == "__main__":
     unittest.main()

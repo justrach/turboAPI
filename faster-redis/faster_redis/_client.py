@@ -132,7 +132,7 @@ class Redis:
 
     def _apply_response_callback(self, args, result):
         key = _response_key(args)
-        if key in {"AUTH", "FLUSHALL", "FLUSHDB", "MSET", "PING", "SELECT", "SET"}:
+        if key in {"AUTH", "CONFIG RESETSTAT", "CONFIG SET", "FLUSHALL", "FLUSHDB", "MSET", "PING", "SELECT", "SET"}:
             return True if result == "OK" or result == "PONG" else result
         if key == "ACL GETUSER":
             return _parse_acl_getuser(result)
@@ -335,6 +335,8 @@ class Redis:
     def echo(self, msg): return self._exec('ECHO', msg)
     def time(self): return self._exec('TIME')
     def config_get(self, pattern="*"): return self._exec('CONFIG', 'GET', pattern)
+    def config_set(self, name, value): return self._exec('CONFIG', 'SET', name, value)
+    def config_resetstat(self): return self._exec('CONFIG', 'RESETSTAT')
     def object(self, infotype, key):
         return self._exec('OBJECT', infotype, key)
     def object_encoding(self, key): return self.object('ENCODING', key)
