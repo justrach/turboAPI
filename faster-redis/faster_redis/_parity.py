@@ -73,6 +73,9 @@ def core_parity_scenarios():
         ParityScenario("hgetall", lambda c: (c.hset("h", mapping={"x": "1", "y": "2"}), c.hgetall("h"))[-1], tags=("hash",)),
         ParityScenario("client-id", lambda c: isinstance(c.client_id(), int), tags=("server",)),
         ParityScenario("config-get", lambda c: c.config_get("timeout"), tags=("server",)),
+        ParityScenario("object-encoding", lambda c: (c.flushdb(), c.set("obj", "v"), c.object("ENCODING", "obj"))[-1], tags=("object",)),
+        ParityScenario("object-refcount", lambda c: (c.flushdb(), c.set("obj", "v"), c.object("REFCOUNT", "obj"))[-1], tags=("object",)),
+        ParityScenario("object-idletime", lambda c: (c.flushdb(), c.set("obj", "v"), isinstance(c.object("IDLETIME", "obj"), int))[-1], tags=("object",)),
         ParityScenario(
             "zrange-withscores",
             lambda c: (c.flushdb(), c.zadd("z", {"a": 1.5, "b": 2.0}), c.zrange("z", 0, -1, withscores=True))[-1],
