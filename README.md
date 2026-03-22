@@ -150,14 +150,22 @@ All tables below use correct, identical response shapes and explicitly note when
 
 ### End-to-End HTTP + DB (uncached)
 
-Same HTTP routes, same Postgres dataset, TurboAPI response cache off, TurboAPI DB cache off, rate limiting off.
+Same HTTP routes, same seeded Postgres dataset, TurboAPI response cache off, TurboAPI DB cache off, rate limiting off.
+
+Primary table below is the median of 3 clean Docker reruns:
 
 | Route | TurboAPI + pg.zig | FastAPI + asyncpg | FastAPI + SQLAlchemy |
 |---|---|---|---|
-| GET /health | 140,641/s | 11,264/s | 8,425/s |
-| GET /users/{id} varying 1000 IDs | **13,202/s** | 5,523/s | 2,387/s |
-| GET /users?age_min=20 | **12,395/s** | 3,751/s | 1,889/s |
-| GET /search?q=user_42% | **6,825/s** | 4,337/s | 2,132/s |
+| GET /health | **266,351/s** | 9,161/s | 5,010/s |
+| GET /users/{id} varying 1000 IDs | **80,791/s** | 5,203/s | 1,983/s |
+| GET /users?age_min=20 | **71,650/s** | 3,162/s | 1,427/s |
+| GET /search?q=user_42% | **13,245/s** | 3,915/s | 1,742/s |
+
+3-run ranges:
+
+- TurboAPI `GET /users/{id}`: `77,768..94,248/s`
+- FastAPI + asyncpg `GET /users/{id}`: `4,973..5,464/s`
+- FastAPI + SQLAlchemy `GET /users/{id}`: `1,896..2,054/s`
 
 ### Driver-Only Postgres
 

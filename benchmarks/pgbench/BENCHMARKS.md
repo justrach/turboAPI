@@ -1,39 +1,42 @@
-# MagicStack pgbench Preliminary Results -- Driver-Only Native Postgres Comparison
+# MagicStack pgbench Results -- Driver-Only Native Postgres Comparison
 
-**Date:** 2026-03-22
-**Setup:** Postgres 18, Docker, aarch64 (M3 Pro), concurrency=10, 30s per test
+**Date:** 2026-03-22  
+**Setup:** Postgres 18, Docker on Colima, aarch64, concurrency=10, 30s per test  
+**Colima:** `Virtualization.Framework`, `aarch64`, `4 vCPU`, `8 GiB RAM`, `100 GiB disk`, `virtiofs`, Docker runtime  
+**Host CPU / RAM:** `Apple M3 Ultra`, `256 GiB`  
 **Method:** Each driver uses its native path only, with no HTTP server involved. No result caching. Direct binary decode.
-**Validation:** Primary results below are 3-run medians from clean reruns using `python3 benchmarks/pgbench/validate_runs.py --runs 3 --skip-build`. Raw logs and `summary.json` were written to `benchmarks/pgbench/artifacts/`. `COPY FROM` for `asyncpg` remains unverified on this host because all 3 validation runs reproduced a Docker/Postgres `DiskFullError`.
 
 This file is intentionally driver-only. If you want end-to-end web stack numbers, use `benchmarks/postgres/BENCHMARKS.md` instead.
 
-## Replicated Results — 3-Run Medians
+## Current Primary Results
 
-### Primary table: median of 3 clean reruns
+The primary table below is from a full clean rerun after fixing the Turbo runner issues that previously invalidated parts of the suite:
+
+- `pgbench_zig` no longer crashes on non-batch queries due to the `batch_info` bug
+- the suite was rerun from a wiped Docker state via `docker compose down -v`
+- the old Turbo `batch INSERT` claim (`~30k q/s`) is obsolete and should not be cited
+
+### Clean full-suite rerun
 
 | Query | asyncpg | psycopg3-async | turbopg (pg.zig) | vs asyncpg |
 |-------|---------|----------------|------------------|-----------|
-| SELECT 1+1 | 90,752 q/s (0.110ms) | 34,333 q/s (0.291ms) | **125,755 q/s (0.079ms)** | **1.39x** |
-| pg_type (619 rows, 12 cols) | 5,827 q/s (1.716ms) | 2,309 q/s (4.330ms) | **6,749 q/s (1.480ms)** | **1.16x** |
-| generate_series (1000 rows) | 8,265 q/s (1.209ms) | 4,222 q/s (2.368ms) | **21,212 q/s (0.470ms)** | **2.57x** |
-| large_object (100 bytea rows) | 29,750 q/s (0.336ms) | 3,309 q/s (3.021ms) | **31,575 q/s (0.316ms)** | **1.06x** |
-| arrays (100 int[] rows) | 9,780 q/s (1.022ms) | 3,392 q/s (2.947ms) | **13,538 q/s (0.738ms)** | **1.38x** |
-| COPY FROM (10k rows/op) | FAILED in 3/3 runs (`DiskFullError`) | 116 q/s (86.276ms) | **375 q/s (26.646ms)** | unverified on this host |
-| batch INSERT (1k rows) | 1,064 q/s (9.391ms) | 33 q/s (303.807ms) | **30,668 q/s (0.324ms)** | **28.8x** |
+| SELECT 1+1 | 92,715 q/s (0.107ms) | 33,726 q/s (0.296ms) | **99,431 q/s (0.100ms)** | **1.07x** |
+| pg_type (619 rows, 12 cols) | 5,450 q/s (1.834ms) | 2,273 q/s (4.399ms) | **7,152 q/s (1.397ms)** | **1.31x** |
+| generate_series (1000 rows) | 8,282 q/s (1.207ms) | 3,992 q/s (2.504ms) | **21,173 q/s (0.471ms)** | **2.56x** |
+| large_object (100 bytea rows) | 30,368 q/s (0.329ms) | 3,359 q/s (2.977ms) | **33,634 q/s (0.296ms)** | **1.11x** |
+| arrays (100 int[] rows) | 9,902 q/s (1.009ms) | 3,397 q/s (2.943ms) | **13,363 q/s (0.747ms)** | **1.35x** |
+| COPY FROM (10k rows/op) | **516 q/s (19.388ms)** | 111 q/s (90.189ms) | 313 q/s (31.973ms) | 0.61x |
+| batch INSERT (1k rows) | **1,101 q/s (9.083ms)** | 34 q/s (293.366ms) | 1,021 q/s (9.788ms) | 0.93x |
 
-**Current evidence:** across 3 clean reruns, turbopg wins 6/6 driver-only queries it completed against asyncpg. `COPY FROM` remains inconclusive versus `asyncpg` on this machine because `asyncpg` failed in all 3 validation runs with `DiskFullError`. Against `psycopg3-async`, turbopg also wins `COPY FROM` (`375 q/s` vs `116 q/s`, `3.23x`).
+**Current evidence:** on this clean corrected run, turbopg wins 5/7 driver-only queries against asyncpg. `asyncpg` still leads on `COPY FROM` and narrowly leads on `batch INSERT` on this host.
 
-### Validation summary
+## Notes on Older Results
 
-| Query | asyncpg | psycopg3-async | turbopg (pg.zig) |
-|-------|---------|----------------|------------------|
-| SELECT 1+1 | 3/3 successful, 89,993..91,184 q/s | 3/3 successful, 33,950..34,955 q/s | 3/3 successful, 122,377..129,743 q/s |
-| pg_type | 3/3 successful, 5,825..5,828 q/s | 3/3 successful, 2,155..2,313 q/s | 3/3 successful, 5,796..7,156 q/s |
-| generate_series | 3/3 successful, 7,635..8,301 q/s | 3/3 successful, 4,167..4,271 q/s | 3/3 successful, 20,788..21,305 q/s |
-| large_object | 3/3 successful, 28,132..29,849 q/s | 3/3 successful, 3,280..3,328 q/s | 3/3 successful, 31,522..31,658 q/s |
-| arrays | 3/3 successful, 9,282..9,866 q/s | 3/3 successful, 3,341..3,405 q/s | 3/3 successful, 12,938..13,789 q/s |
-| COPY FROM | 0/3 successful, `DiskFullError` every run | 3/3 successful, 115..117 q/s | 3/3 successful, 374..379 q/s |
-| batch INSERT | 3/3 successful, 1,029..1,083 q/s | 3/3 successful, 33..33 q/s | 3/3 successful, 29,323..30,690 q/s |
+Older tables in this file are kept below for historical reference only. They should not be used as the primary citation because:
+
+- earlier `batch INSERT` numbers were taken before the Turbo runner matched the workload correctly
+- earlier validation runs were recorded before the `pgbench_zig` runner bug was fixed
+- some older `COPY FROM` runs were affected by Docker storage failures on this machine
 
 ### First full run captured earlier (reference only)
 

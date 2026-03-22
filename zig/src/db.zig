@@ -55,6 +55,13 @@ var db_cache_count: usize = 0;
 var db_cache_mutex: std.Thread.Mutex = .{};
 var db_cache_checked_env: bool = false;
 
+const ExecManyMode = enum {
+    multi_values,
+    dynamic_protocol,
+};
+
+var exec_many_mode: ExecManyMode = .dynamic_protocol;
+
 fn isDbCacheEnabled() bool {
     if (!db_cache_checked_env) {
         db_cache_checked_env = true;
@@ -66,6 +73,17 @@ fn isDbCacheEnabled() bool {
         }
     }
     return db_cache_enabled;
+}
+
+fn configureExecManyModeFromEnv() void {
+    exec_many_mode = .multi_values;
+    if (std.posix.getenv("TURBOPG_EXEC_MANY_MODE")) |val| {
+        if (std.mem.eql(u8, val, "multi") or std.mem.eql(u8, val, "multi_values")) {
+            exec_many_mode = .multi_values;
+        } else if (std.mem.eql(u8, val, "dynamic") or std.mem.eql(u8, val, "protocol")) {
+            exec_many_mode = .dynamic_protocol;
+        }
+    }
 }
 // Per-thread connections
 const MAX_WORKERS: usize = 24;
@@ -815,6 +833,300 @@ fn execWithParams(conn: *pg.Conn, sql: []const u8, values: []const []const u8, c
     };
 }
 
+fn execCountWithParams(conn: *pg.Conn, sql: []const u8, values: []const []const u8, cache_name: ?[]const u8) ?i64 {
+    const opts = pg.Conn.QueryOpts{ .cache_name = cache_name };
+    return switch (values.len) {
+        0 => conn.execOpts(sql, .{}, opts) catch return null,
+        1 => conn.execOpts(sql, .{values[0]}, opts) catch return null,
+        2 => conn.execOpts(sql, .{ values[0], values[1] }, opts) catch return null,
+        3 => conn.execOpts(sql, .{ values[0], values[1], values[2] }, opts) catch return null,
+        4 => conn.execOpts(sql, .{ values[0], values[1], values[2], values[3] }, opts) catch return null,
+        5 => conn.execOpts(sql, .{ values[0], values[1], values[2], values[3], values[4] }, opts) catch return null,
+        6 => conn.execOpts(sql, .{ values[0], values[1], values[2], values[3], values[4], values[5] }, opts) catch return null,
+        7 => conn.execOpts(sql, .{ values[0], values[1], values[2], values[3], values[4], values[5], values[6] }, opts) catch return null,
+        8 => conn.execOpts(sql, .{ values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7] }, opts) catch return null,
+        else => null,
+    };
+}
+
+fn isNumericSqlValue(value: []const u8) bool {
+    if (value.len == 0) return false;
+    var has_digit = false;
+    for (value, 0..) |ch, i| {
+        switch (ch) {
+            '0'...'9' => has_digit = true,
+            '-', '+' => if (i != 0) return false,
+            '.', 'e', 'E' => {},
+            else => return false,
+        }
+    }
+    return has_digit;
+}
+
+fn appendSqlLiteral(out: *std.ArrayList(u8), value: []const u8) !void {
+    if (std.ascii.eqlIgnoreCase(value, "null")) {
+        try out.appendSlice(allocator, "NULL");
+        return;
+    }
+    if (std.ascii.eqlIgnoreCase(value, "true") or std.ascii.eqlIgnoreCase(value, "false") or isNumericSqlValue(value)) {
+        try out.appendSlice(allocator, value);
+        return;
+    }
+
+    try out.append(allocator, '\'');
+    for (value) |ch| {
+        if (ch == '\'') {
+            try out.appendSlice(allocator, "''");
+        } else {
+            try out.append(allocator, ch);
+        }
+    }
+    try out.append(allocator, '\'');
+}
+
+fn estimateMultiInsertCapacity(base_sql: []const u8, rows: []const []const []const u8) usize {
+    var total: usize = base_sql.len + 2;
+    for (rows, 0..) |row, ri| {
+        if (ri > 0) total += 2;
+        total += 2;
+        for (row, 0..) |value, ci| {
+            if (ci > 0) total += 2;
+            if (std.ascii.eqlIgnoreCase(value, "null") or
+                std.ascii.eqlIgnoreCase(value, "true") or
+                std.ascii.eqlIgnoreCase(value, "false") or
+                isNumericSqlValue(value))
+            {
+                total += value.len;
+            } else {
+                total += value.len + 2;
+                for (value) |ch| {
+                    if (ch == '\'') total += 1;
+                }
+            }
+        }
+    }
+    return total + 1;
+}
+
+fn buildMultiInsertSql(base_sql: []const u8, rows: []const []const []const u8) ?[]u8 {
+    if (rows.len == 0) return null;
+    const values_idx = std.mem.indexOf(u8, base_sql, "VALUES") orelse return null;
+    const prefix = std.mem.trimRight(u8, base_sql[0 .. values_idx + "VALUES".len], " \t\r\n");
+
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    out.ensureTotalCapacity(allocator, estimateMultiInsertCapacity(prefix, rows)) catch return null;
+    out.appendSlice(allocator, prefix) catch return null;
+    out.append(allocator, ' ') catch return null;
+
+    for (rows, 0..) |row, ri| {
+        if (ri > 0) out.appendSlice(allocator, ", ") catch return null;
+        out.append(allocator, '(') catch return null;
+        for (row, 0..) |value, ci| {
+            if (ci > 0) out.appendSlice(allocator, ", ") catch return null;
+            appendSqlLiteral(&out, value) catch return null;
+        }
+        out.append(allocator, ')') catch return null;
+    }
+    out.append(allocator, ';') catch return null;
+    return out.toOwnedSlice(allocator) catch null;
+}
+
+fn encodePySqlValue(item: *c.PyObject, buf: *[256]u8) usize {
+    if (py.isNone(item)) {
+        @memcpy(buf[0..4], "null");
+        return 4;
+    }
+    if (c.PyBool_Check(item) != 0) {
+        if (item == @as(*c.PyObject, @ptrCast(&c._Py_TrueStruct))) {
+            @memcpy(buf[0..4], "true");
+            return 4;
+        }
+        @memcpy(buf[0..5], "false");
+        return 5;
+    }
+    if (c.PyLong_Check(item) != 0) {
+        const value = c.PyLong_AsLongLong(item);
+        if (c.PyErr_Occurred() == null) {
+            const formatted = std.fmt.bufPrint(buf, "{d}", .{value}) catch return 0;
+            return formatted.len;
+        }
+        c.PyErr_Clear();
+    }
+    if (c.PyFloat_Check(item) != 0) {
+        const value = c.PyFloat_AsDouble(item);
+        if (c.PyErr_Occurred() == null) {
+            const formatted = std.fmt.bufPrint(buf, "{d}", .{value}) catch return 0;
+            return formatted.len;
+        }
+        c.PyErr_Clear();
+    }
+    if (c.PyUnicode_Check(item) != 0) {
+        if (c.PyUnicode_AsUTF8(item)) |cs| {
+            const s = std.mem.span(cs);
+            const copy_len = @min(s.len, 255);
+            @memcpy(buf[0..copy_len], s[0..copy_len]);
+            return copy_len;
+        }
+        c.PyErr_Clear();
+        return 0;
+    }
+
+    const str_obj = c.PyObject_Str(item) orelse return 0;
+    defer c.Py_DecRef(str_obj);
+    if (c.PyUnicode_AsUTF8(str_obj)) |cs| {
+        const s = std.mem.span(cs);
+        const copy_len = @min(s.len, 255);
+        @memcpy(buf[0..copy_len], s[0..copy_len]);
+        return copy_len;
+    }
+    c.PyErr_Clear();
+    return 0;
+}
+
+fn execManyMultiValues(sql: []const u8, py_rows: *c.PyObject, max_rows: usize, cols_per_row: usize) ?i64 {
+    const values_storage = allocator.alloc([256]u8, max_rows * cols_per_row) catch return null;
+    defer allocator.free(values_storage);
+    const row_views = allocator.alloc([][]const u8, max_rows) catch return null;
+    defer allocator.free(row_views);
+    const cell_views = allocator.alloc([]const u8, max_rows * cols_per_row) catch return null;
+    defer allocator.free(cell_views);
+
+    for (0..max_rows) |ri| {
+        const row_obj = c.PyList_GetItem(py_rows, @intCast(ri)) orelse return null;
+        const row_len: usize = @intCast(c.PyObject_Length(row_obj));
+        if (row_len < cols_per_row) return null;
+
+        row_views[ri] = cell_views[ri * cols_per_row ..][0..cols_per_row];
+        for (0..cols_per_row) |ci| {
+            const item = if (c.PyTuple_Check(row_obj) != 0)
+                c.PyTuple_GetItem(row_obj, @intCast(ci))
+            else
+                c.PyList_GetItem(row_obj, @intCast(ci));
+            if (item == null) return null;
+
+            const cell_idx = ri * cols_per_row + ci;
+            const len = encodePySqlValue(item.?, &values_storage[cell_idx]);
+            row_views[ri][ci] = values_storage[cell_idx][0..len];
+        }
+    }
+
+    const sql_owned = buildMultiInsertSql(sql, row_views[0..max_rows]) orelse return null;
+    defer allocator.free(sql_owned);
+
+    const gil_state = py_gil_save();
+    const conn = acquireConn() orelse {
+        py_gil_restore(gil_state);
+        return null;
+    };
+    defer {
+        releaseConn(conn);
+        py_gil_restore(gil_state);
+    }
+
+    return conn.exec(sql_owned, .{}) catch null;
+}
+
+fn execManyDynamicProtocol(sql: []const u8, py_rows: *c.PyObject, max_rows: usize, cols_per_row: usize) ?i64 {
+    const max_cells = max_rows * cols_per_row;
+    const text_storage = allocator.alloc([256]u8, max_cells) catch return null;
+    defer allocator.free(text_storage);
+    const dynamic_cells = allocator.alloc(pg.DynamicValue, max_cells) catch return null;
+    defer allocator.free(dynamic_cells);
+
+    for (0..max_rows) |ri| {
+        const row_obj = c.PyList_GetItem(py_rows, @intCast(ri)) orelse return null;
+        const row_len: usize = @intCast(c.PyObject_Length(row_obj));
+        if (row_len < cols_per_row) return null;
+
+        for (0..cols_per_row) |ci| {
+            const cell_idx = ri * cols_per_row + ci;
+            const item = if (c.PyTuple_Check(row_obj) != 0)
+                c.PyTuple_GetItem(row_obj, @intCast(ci))
+            else
+                c.PyList_GetItem(row_obj, @intCast(ci));
+            if (item == null) {
+                dynamic_cells[cell_idx] = .null;
+                continue;
+            }
+
+            const py_item = item.?;
+            if (py.isNone(py_item)) {
+                dynamic_cells[cell_idx] = .null;
+                continue;
+            }
+            if (c.PyBool_Check(py_item) != 0) {
+                dynamic_cells[cell_idx] = .{ .bool = py_item == @as(*c.PyObject, @ptrCast(&c._Py_TrueStruct)) };
+                continue;
+            }
+            if (c.PyLong_Check(py_item) != 0) {
+                const v = c.PyLong_AsLongLong(py_item);
+                if (c.PyErr_Occurred() != null) {
+                    c.PyErr_Clear();
+                } else {
+                    dynamic_cells[cell_idx] = .{ .i64 = v };
+                    continue;
+                }
+            }
+            if (c.PyFloat_Check(py_item) != 0) {
+                const v = c.PyFloat_AsDouble(py_item);
+                if (c.PyErr_Occurred() != null) {
+                    c.PyErr_Clear();
+                } else {
+                    dynamic_cells[cell_idx] = .{ .f64 = v };
+                    continue;
+                }
+            }
+
+            var text_len: usize = 0;
+            if (c.PyUnicode_Check(py_item) != 0) {
+                if (c.PyUnicode_AsUTF8(py_item)) |cs| {
+                    const s = std.mem.span(cs);
+                    text_len = @min(s.len, 255);
+                    @memcpy(text_storage[cell_idx][0..text_len], s[0..text_len]);
+                } else {
+                    c.PyErr_Clear();
+                }
+            } else {
+                const str_obj = c.PyObject_Str(py_item) orelse {
+                    dynamic_cells[cell_idx] = .null;
+                    continue;
+                };
+                defer c.Py_DecRef(str_obj);
+                if (c.PyUnicode_AsUTF8(str_obj)) |cs| {
+                    const s = std.mem.span(cs);
+                    text_len = @min(s.len, 255);
+                    @memcpy(text_storage[cell_idx][0..text_len], s[0..text_len]);
+                } else {
+                    c.PyErr_Clear();
+                }
+            }
+            dynamic_cells[cell_idx] = .{ .text = text_storage[cell_idx][0..text_len] };
+        }
+    }
+
+    const row_slices = allocator.alloc([]const pg.DynamicValue, max_rows) catch return null;
+    defer allocator.free(row_slices);
+    for (0..max_rows) |ri| {
+        row_slices[ri] = dynamic_cells[ri * cols_per_row ..][0..cols_per_row];
+    }
+
+    const gil_state = py_gil_save();
+    const conn = acquireConn() orelse {
+        py_gil_restore(gil_state);
+        return null;
+    };
+    defer {
+        releaseConn(conn);
+        py_gil_restore(gil_state);
+    }
+
+    return conn.execManyDynamic(sql, row_slices[0..max_rows], .{
+        .cache_name = "db_exec_many_raw",
+        .column_names = false,
+    }) catch null;
+}
+
 // ── Python C API functions ───────────────────────────────────────────────────
 
 pub fn db_configure(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
@@ -824,6 +1136,7 @@ pub fn db_configure(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
 
     const uri_str = std.mem.span(conn_str);
     const size: u16 = if (pool_size > 0 and pool_size <= 128) @intCast(pool_size) else 16;
+    configureExecManyModeFromEnv();
 
     // Parse postgres://user:pass@host:port/database
     const uri = std.Uri.parse(uri_str) catch {
@@ -1265,6 +1578,52 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     }
 
     return py_list;
+}
+
+pub fn db_exec_many_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var sql_ptr: [*c]const u8 = null;
+    var rows_obj: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "sO", &sql_ptr, &rows_obj) == 0) return null;
+
+    const sql = std.mem.span(sql_ptr);
+    if (db_pool == null) {
+        py.setError("Database not configured. Call configure_db() first.", .{});
+        return null;
+    }
+
+    const py_rows = rows_obj orelse {
+        py.setError("rows must be a list", .{});
+        return null;
+    };
+    if (c.PyList_Check(py_rows) == 0) {
+        py.setError("rows must be a list", .{});
+        return null;
+    }
+
+    const row_count_py: usize = @intCast(c.PyList_Size(py_rows));
+    if (row_count_py == 0) return c.PyLong_FromLongLong(0);
+    const max_rows = @min(row_count_py, 10000);
+
+    const first_row = c.PyList_GetItem(py_rows, 0) orelse {
+        py.setError("rows must contain sequences", .{});
+        return null;
+    };
+    if (c.PyList_Check(first_row) == 0 and c.PyTuple_Check(first_row) == 0) {
+        py.setError("rows must contain sequences", .{});
+        return null;
+    }
+
+    const cols_per_row: usize = @min(@as(usize, @intCast(c.PyObject_Length(first_row))), 8);
+    if (cols_per_row == 0) return c.PyLong_FromLongLong(0);
+
+    const total_rows = switch (exec_many_mode) {
+        .multi_values => execManyMultiValues(sql, py_rows, max_rows, cols_per_row),
+        .dynamic_protocol => execManyDynamicProtocol(sql, py_rows, max_rows, cols_per_row),
+    } orelse {
+        py.setError("Batch execution failed: {s}", .{sql});
+        return null;
+    };
+    return c.PyLong_FromLongLong(total_rows);
 }
 
 // ── COPY FROM STDIN API (bulk insert from Python) ─────────────────────────────

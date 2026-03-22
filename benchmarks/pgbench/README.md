@@ -30,15 +30,17 @@ MagicStack's pgbench measures raw driver throughput (queries/sec, latency percen
 | psycopg3-async | Python 3.11 + asyncio | asyncio (single-threaded) |
 | turbopg (pg.zig) | Python 3.14t + Zig | ThreadPoolExecutor (GIL released) |
 
-## Replicated 3-run medians (Postgres 18, Docker, concurrency=10, 30s)
+## Current clean rerun (Postgres 18, Docker, concurrency=10, 30s)
 
 | Query | asyncpg | psycopg3-async | turbopg (pg.zig) |
 |-------|---------|----------------|------------------|
-| SELECT 1+1 | 90,752 q/s | 34,333 q/s | **125,755 q/s (1.39x)** |
-| pg_type (619 rows) | 5,827 q/s | 2,309 q/s | **6,749 q/s (1.16x)** |
-| generate_series (1000) | 8,265 q/s | 4,222 q/s | **21,212 q/s (2.57x)** |
+| SELECT 1+1 | 92,715 q/s | 33,726 q/s | **99,431 q/s (1.07x)** |
+| pg_type (619 rows) | 5,450 q/s | 2,273 q/s | **7,152 q/s (1.31x)** |
+| generate_series (1000) | 8,282 q/s | 3,992 q/s | **21,173 q/s (2.56x)** |
+| COPY FROM (10k rows/op) | **516 q/s** | 111 q/s | 313 q/s |
+| batch INSERT (1k rows) | **1,101 q/s** | 34 q/s | 1,021 q/s |
 
-See [BENCHMARKS.md](BENCHMARKS.md) for the full 7-query median table, validation ranges, and raw-artifact workflow.
+See [BENCHMARKS.md](BENCHMARKS.md) for the full 7-query table, notes on the runner fixes, and the older superseded validation tables.
 
 ## Architecture
 

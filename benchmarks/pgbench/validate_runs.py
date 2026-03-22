@@ -23,6 +23,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 COMPOSE_FILE = ROOT / "docker-compose.yml"
+EXPECTED_QUERIES = {
+    "7-oneplusone",
+    "1-pg_type",
+    "2-generate_series",
+    "3-large_object",
+    "4-arrays",
+    "5-copyfrom",
+    "6-batch",
+}
 
 QUERY_RE = re.compile(r"^pgbench-1\s+\|\s+=== Query: (?P<query>.+) ===$")
 DRIVER_RE = re.compile(r"^pgbench-1\s+\|\s+--- (?P<driver>.+) \(concurrency=10, duration=30s\) ---$")
@@ -112,6 +121,25 @@ def parse_log(text: str) -> dict[str, dict[str, Metric]]:
                 metric.error = " ".join(pending_error[-4:])
 
     return results
+
+
+def validate_run_output(
+    run_idx: int,
+    up: subprocess.CompletedProcess[str],
+    parsed: dict[str, dict[str, Metric]],
+    log_path: Path,
+) -> None:
+    if up.returncode != 0:
+        raise RuntimeError(
+            f"run {run_idx} failed with exit code {up.returncode}; see {log_path}"
+        )
+    if not parsed:
+        raise RuntimeError(f"run {run_idx} produced no parsed benchmark results; see {log_path}")
+    missing_queries = sorted(EXPECTED_QUERIES - set(parsed))
+    if missing_queries:
+        raise RuntimeError(
+            f"run {run_idx} is missing expected queries {missing_queries}; see {log_path}"
+        )
 
 
 def summarize(runs: list[dict[str, dict[str, Metric]]]) -> dict[str, dict[str, dict[str, float | int | str | None]]]:
@@ -224,6 +252,7 @@ def main() -> int:
         log_path.write_text(run_log)
 
         parsed = parse_log(up.stdout + "\n" + up.stderr)
+        validate_run_output(run_idx, up, parsed, log_path)
         all_runs.append(parsed)
 
     summary = summarize(all_runs)
