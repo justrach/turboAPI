@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 
 LOCALSTACK = "http://localhost:4566"
 BUCKET = "turbo-vs-fast"
@@ -89,6 +90,32 @@ app.native_route("GET", "/s3/list-buckets", r"{NATIVE_HANDLER_LIB}", "handle_s3_
 app.native_route("GET", "/s3/bucket-location", r"{NATIVE_HANDLER_LIB}", "handle_s3_bucket_location")
 app.native_route("DELETE", "/s3/delete/{{key}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_delete")
 app.native_route("PUT", "/s3/copy/{{src}}/{{dst}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_copy")
+app.run(host="127.0.0.1", port={TURBO_PORT})
+"""
+
+TURBO_HYBRID_BEST_APP = f"""
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import faster_boto3 as boto3
+from turboapi import TurboAPI
+
+s3 = boto3.client('s3', endpoint_url='{LOCALSTACK}', region_name='{REGION}',
+                  aws_access_key_id='test', aws_secret_access_key='testing')
+
+app = TurboAPI(title="TurboHybridBestBench")
+app.static_route("GET", "/health", '{{"status":"ok"}}')
+app.native_route("GET", "/s3/head/{{key}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_head")
+
+@app.get("/s3/get/{{key}}")
+def s3_get(key: str):
+    resp = s3.get_object(Bucket='{BUCKET}', Key=key)
+    return {{"key": key, "size": resp["ContentLength"]}}
+
+@app.get("/s3/list")
+def s3_list():
+    resp = s3.list_objects_v2(Bucket='{BUCKET}', MaxKeys=20)
+    return {{"count": resp.get("KeyCount", 0)}}
+
 app.run(host="127.0.0.1", port={TURBO_PORT})
 """
 
@@ -225,6 +252,24 @@ def wait_for_server(port, timeout=15):
     return False
 
 
+def fetch_json(port, path):
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def verify_server_outputs(port):
+    checks = [
+        ("/s3/get/bench-1k", {"key": "bench-1k", "size": 1024}),
+        ("/s3/get/bench-10k", {"key": "bench-10k", "size": 10240}),
+        ("/s3/head/bench-1k", {"key": "bench-1k", "size": 1024}),
+        ("/s3/list", {"count": 20}),
+    ]
+    for path, expected in checks:
+        got = fetch_json(port, path)
+        if got != expected:
+            raise RuntimeError(f"unexpected response for {path}: got {got!r}, expected {expected!r}")
+
+
 def setup_s3():
     """Create test bucket and objects."""
     import boto3
@@ -260,7 +305,7 @@ def main():
     parser.add_argument("--duration", type=int, default=WRK_DURATION)
     parser.add_argument("--threads", type=int, default=WRK_THREADS)
     parser.add_argument("--connections", type=int, default=WRK_CONNECTIONS)
-    parser.add_argument("--turbo-mode", choices=("python", "native-ffi"), default="python")
+    parser.add_argument("--turbo-mode", choices=("python", "native-ffi", "hybrid-best"), default="python")
     args = parser.parse_args()
 
     # Check LocalStack
@@ -273,11 +318,16 @@ def main():
 
     setup_s3()
 
-    if args.turbo_mode == "native-ffi":
+    if args.turbo_mode in {"native-ffi", "hybrid-best"}:
         build_native_handler()
 
     # Start servers
-    turbo_code = TURBO_NATIVE_FFI_APP if args.turbo_mode == "native-ffi" else TURBO_APP
+    if args.turbo_mode == "native-ffi":
+        turbo_code = TURBO_NATIVE_FFI_APP
+    elif args.turbo_mode == "hybrid-best":
+        turbo_code = TURBO_HYBRID_BEST_APP
+    else:
+        turbo_code = TURBO_APP
     turbo_proc, turbo_file = start_server(turbo_code, "turbo")
     fast_proc, fast_file = start_server(FAST_APP, "fast")
 
@@ -291,6 +341,23 @@ def main():
             print("ERROR: FastAPI server failed to start", file=sys.stderr)
             stderr = fast_proc.stderr.read().decode() if fast_proc.stderr else ""
             print(stderr[:500], file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            verify_server_outputs(TURBO_PORT)
+        except Exception as exc:
+            print(f"ERROR: TurboAPI output verification failed: {exc}", file=sys.stderr)
+            stderr = turbo_proc.stderr.read().decode() if turbo_proc.stderr else ""
+            if stderr:
+                print(stderr[:1000], file=sys.stderr)
+            sys.exit(1)
+        try:
+            verify_server_outputs(FAST_PORT)
+        except Exception as exc:
+            print(f"ERROR: FastAPI output verification failed: {exc}", file=sys.stderr)
+            stderr = fast_proc.stderr.read().decode() if fast_proc.stderr else ""
+            if stderr:
+                print(stderr[:1000], file=sys.stderr)
             sys.exit(1)
 
         tests = [
@@ -328,7 +395,12 @@ def main():
         else:
             print()
             print(f"  Load: wrk -t{args.threads} -c{args.connections} -d{args.duration}s")
-            turbo_label = "TurboAPI + native FFI S3" if args.turbo_mode == "native-ffi" else "TurboAPI + faster-boto3"
+            if args.turbo_mode == "native-ffi":
+                turbo_label = "TurboAPI + native FFI S3"
+            elif args.turbo_mode == "hybrid-best":
+                turbo_label = "TurboAPI + hybrid best-path S3"
+            else:
+                turbo_label = "TurboAPI + faster-boto3"
             print(f"  {turbo_label}  vs  FastAPI + boto3")
             print("  " + "═" * 66)
             fmt = "  {:<25} {:>10} {:>10} {:>8} {:>8}"
