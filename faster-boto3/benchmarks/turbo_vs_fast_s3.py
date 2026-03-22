@@ -20,7 +20,6 @@ import argparse
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 import tempfile
@@ -40,12 +39,12 @@ WRK_DURATION = 5
 
 # ── Server apps (written to temp files, run as subprocesses) ─────────────────
 
-TURBO_APP = """
+TURBO_APP = f"""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import faster_boto3 as boto3
 
-s3 = boto3.client('s3', endpoint_url='{endpoint}', region_name='{region}',
+s3 = boto3.client('s3', endpoint_url='{LOCALSTACK}', region_name='{REGION}',
                   aws_access_key_id='test', aws_secret_access_key='testing')
 
 from turboapi import TurboAPI
@@ -57,28 +56,28 @@ def health():
 
 @app.get("/s3/get/{{key}}")
 def s3_get(key: str):
-    resp = s3.get_object(Bucket='{bucket}', Key=key)
+    resp = s3.get_object(Bucket='{BUCKET}', Key=key)
     return {{"key": key, "size": resp["ContentLength"]}}
 
 @app.get("/s3/head/{{key}}")
 def s3_head(key: str):
-    resp = s3.head_object(Bucket='{bucket}', Key=key)
+    resp = s3.head_object(Bucket='{BUCKET}', Key=key)
     return {{"key": key, "size": resp["ContentLength"]}}
 
 @app.get("/s3/list")
 def s3_list():
-    resp = s3.list_objects_v2(Bucket='{bucket}', MaxKeys=20)
+    resp = s3.list_objects_v2(Bucket='{BUCKET}', MaxKeys=20)
     return {{"count": resp.get("KeyCount", 0)}}
 
-app.run(host="127.0.0.1", port={port})
-""".format(endpoint=LOCALSTACK, region=REGION, bucket=BUCKET, port=TURBO_PORT)
+app.run(host="127.0.0.1", port={TURBO_PORT})
+"""
 
-FAST_APP = """
+FAST_APP = f"""
 import boto3
 from fastapi import FastAPI
 import uvicorn
 
-s3 = boto3.client('s3', endpoint_url='{endpoint}', region_name='{region}',
+s3 = boto3.client('s3', endpoint_url='{LOCALSTACK}', region_name='{REGION}',
                   aws_access_key_id='test', aws_secret_access_key='testing')
 
 app = FastAPI()
@@ -89,22 +88,22 @@ def health():
 
 @app.get("/s3/get/{{key}}")
 def s3_get(key: str):
-    resp = s3.get_object(Bucket='{bucket}', Key=key)
+    resp = s3.get_object(Bucket='{BUCKET}', Key=key)
     body = resp["Body"].read()
     return {{"key": key, "size": len(body)}}
 
 @app.get("/s3/head/{{key}}")
 def s3_head(key: str):
-    resp = s3.head_object(Bucket='{bucket}', Key=key)
+    resp = s3.head_object(Bucket='{BUCKET}', Key=key)
     return {{"key": key, "size": resp["ContentLength"]}}
 
 @app.get("/s3/list")
 def s3_list():
-    resp = s3.list_objects_v2(Bucket='{bucket}', MaxKeys=20)
+    resp = s3.list_objects_v2(Bucket='{BUCKET}', MaxKeys=20)
     return {{"count": resp.get("KeyCount", 0)}}
 
-uvicorn.run(app, host="127.0.0.1", port={port}, log_level="warning")
-""".format(endpoint=LOCALSTACK, region=REGION, bucket=BUCKET, port=FAST_PORT)
+uvicorn.run(app, host="127.0.0.1", port={FAST_PORT}, log_level="warning")
+"""
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -177,6 +176,11 @@ def start_server(code, name):
         os.path.join(parent_root, "python"),   # turboAPI/python/
     ]
     env["PYTHONPATH"] = ":".join(paths) + ":" + env.get("PYTHONPATH", "")
+    if name == "turbo":
+        # Free-threaded CPython will silently re-enable the GIL for subprocesses
+        # unless the interpreter is launched with PYTHON_GIL=0. That completely
+        # changes TurboAPI throughput under load, so force the intended runtime.
+        env.setdefault("PYTHON_GIL", "0")
     proc = subprocess.Popen(
         [sys.executable, f.name],
         stdout=subprocess.DEVNULL,
@@ -230,6 +234,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--duration", type=int, default=WRK_DURATION)
+    parser.add_argument("--threads", type=int, default=WRK_THREADS)
+    parser.add_argument("--connections", type=int, default=WRK_CONNECTIONS)
     args = parser.parse_args()
 
     # Check LocalStack
@@ -267,8 +273,20 @@ def main():
 
         results = []
         for name, path in tests:
-            turbo_r = run_wrk(TURBO_PORT, path, duration=args.duration)
-            fast_r = run_wrk(FAST_PORT, path, duration=args.duration)
+            turbo_r = run_wrk(
+                TURBO_PORT,
+                path,
+                duration=args.duration,
+                threads=args.threads,
+                connections=args.connections,
+            )
+            fast_r = run_wrk(
+                FAST_PORT,
+                path,
+                duration=args.duration,
+                threads=args.threads,
+                connections=args.connections,
+            )
             speedup = turbo_r["rps"] / fast_r["rps"] if fast_r["rps"] > 0 else 0
             results.append({
                 "name": name,
@@ -281,6 +299,7 @@ def main():
             print(json.dumps({"results": results}, indent=2))
         else:
             print()
+            print(f"  Load: wrk -t{args.threads} -c{args.connections} -d{args.duration}s")
             print("  TurboAPI + faster-boto3  vs  FastAPI + boto3")
             print("  " + "═" * 66)
             fmt = "  {:<25} {:>10} {:>10} {:>8} {:>8}"

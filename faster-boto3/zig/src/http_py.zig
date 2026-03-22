@@ -9,8 +9,24 @@ const http = std.http;
 
 const c = @cImport({
     @cDefine("PY_SSIZE_T_CLEAN", {});
+    @cDefine("Py_GIL_DISABLED", "1");
     @cInclude("Python.h");
 });
+
+const module_base = c.PyModuleDef_Base{
+    .ob_base = .{
+        .ob_tid = 0,
+        .ob_flags = c._Py_STATICALLY_ALLOCATED_FLAG,
+        .ob_mutex = std.mem.zeroes(c.PyMutex),
+        .ob_gc_bits = 0,
+        .ob_ref_local = c._Py_IMMORTAL_REFCNT_LOCAL,
+        .ob_ref_shared = 0,
+        .ob_type = null,
+    },
+    .m_init = null,
+    .m_index = 0,
+    .m_copy = null,
+};
 
 // ── Persistent client (connection pooling across calls) ─────────────────────
 
@@ -435,23 +451,26 @@ var methods = [_]c.PyMethodDef{
     .{ .ml_name = "reset", .ml_meth = @ptrCast(&py_reset_client), .ml_flags = c.METH_NOARGS, .ml_doc = "Reset persistent HTTP client" },
     .{ .ml_name = null, .ml_meth = null, .ml_flags = 0, .ml_doc = null },
 };
-var module_slots = [_]c.PyModuleDef_Slot{
-    .{ .slot = c.Py_mod_gil, .value = c.Py_MOD_GIL_NOT_USED },
-    .{ .slot = 0, .value = null },
-};
-
 var module_def = c.PyModuleDef{
-    .m_base = std.mem.zeroes(c.PyModuleDef_Base),
+    .m_base = module_base,
     .m_name = "_http_accel",
     .m_doc = "Zig-accelerated HTTP client for faster-boto3 (nanobrew pattern)",
-    .m_size = 0,
+    .m_size = -1,
     .m_methods = &methods,
-    .m_slots = &module_slots,
+    .m_slots = null,
     .m_traverse = null,
     .m_clear = null,
     .m_free = null,
 };
 
 pub export fn PyInit__http_accel() ?*c.PyObject {
-    return c.PyModuleDef_Init(&module_def);
+    const module = c.PyModule_Create(&module_def);
+    if (module == null) return null;
+    if (@hasDecl(c, "PyUnstable_Module_SetGIL")) {
+        if (c.PyUnstable_Module_SetGIL(module, c.Py_MOD_GIL_USED) < 0) {
+            c.Py_DecRef(module);
+            return null;
+        }
+    }
+    return module;
 }

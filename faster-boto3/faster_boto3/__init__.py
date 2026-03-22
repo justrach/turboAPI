@@ -15,6 +15,8 @@ Usage:
 
 __version__ = "0.1.0"
 
+import os
+
 import boto3 as _boto3
 
 from ._patch import patch_all as _patch_all
@@ -23,7 +25,8 @@ from .session import Session
 
 # ── Apply Zig patches before re-exporting boto3 ─────────────────────────────
 
-_patch_all()
+if os.getenv("FASTER_BOTO3_AUTOPATCH", "1").lower() not in {"0", "false", "no"}:
+    _patch_all()
 
 
 def patch():

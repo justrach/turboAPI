@@ -13,6 +13,15 @@ LIBS = {
 }
 
 
+def ad_hoc_codesign(path: Path) -> None:
+    subprocess.run(
+        ["codesign", "--force", "--sign", "-", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def build():
     py_include = sysconfig.get_path("include")
     py_libdir = sysconfig.get_config_var("LIBDIR")
@@ -47,6 +56,8 @@ def build():
 
                 shutil.copy2(f, local_so)
                 print(f"  Installed: {local_so}")
+                ad_hoc_codesign(local_so)
+                print(f"  Signed:     {local_so}")
 
                 if import_target.exists() or import_target.is_symlink():
                     import_target.unlink()

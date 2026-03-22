@@ -184,6 +184,73 @@ than the older read-and-hash approach.
 - Real AWS measurements are still needed before treating these upload numbers as
   the final shape of the optimization.
 
+## Full-Stack Throughput Snapshot
+
+The end-to-end `TurboAPI + faster-boto3` benchmark is sensitive to runtime
+mode. On free-threaded CPython 3.14, the Turbo subprocess must be launched with
+`PYTHON_GIL=0`, otherwise the interpreter silently re-enables the GIL when the
+native modules load and the throughput numbers collapse.
+
+The benchmark harness in [benchmarks/turbo_vs_fast_s3.py](benchmarks/turbo_vs_fast_s3.py)
+now forces `PYTHON_GIL=0` for the Turbo subprocess so the measured path matches
+the intended runtime.
+
+### Default load
+
+Command:
+
+```bash
+TURBO_DISABLE_CACHE=1 \
+TURBO_DISABLE_DB_CACHE=1 \
+TURBO_DISABLE_RATE_LIMITING=1 \
+FASTER_BOTO3_AUTOPATCH=0 \
+FASTER_BOTO3_NATIVE=native \
+python benchmarks/turbo_vs_fast_s3.py --duration 5
+```
+
+Load: `wrk -t4 -c50 -d5s`
+
+| Operation | Turbo RPS | Fast RPS | Speedup | Turbo p99 |
+|---|---:|---:|---:|---:|
+| `S3 GetObject (1KB)` | 1331 | 1096 | 1.21x | 33.4 ms |
+| `S3 GetObject (10KB)` | 1209 | 935 | 1.29x | 46.2 ms |
+| `S3 HeadObject` | 982 | 1113 | 0.88x | 57.8 ms |
+| `S3 ListObjects (20)` | 760 | 592 | 1.28x | 71.2 ms |
+
+### Higher load
+
+Command:
+
+```bash
+TURBO_DISABLE_CACHE=1 \
+TURBO_DISABLE_DB_CACHE=1 \
+TURBO_DISABLE_RATE_LIMITING=1 \
+FASTER_BOTO3_AUTOPATCH=0 \
+FASTER_BOTO3_NATIVE=native \
+python benchmarks/turbo_vs_fast_s3.py --duration 5 --threads 8 --connections 200
+```
+
+Load: `wrk -t8 -c200 -d5s`
+
+| Operation | Turbo RPS | Fast RPS | Speedup | Turbo p99 |
+|---|---:|---:|---:|---:|
+| `S3 GetObject (1KB)` | 1527 | 1254 | 1.22x | 27.5 ms |
+| `S3 GetObject (10KB)` | 1423 | 1224 | 1.16x | 42.6 ms |
+| `S3 HeadObject` | 1436 | 1465 | 0.98x | 48.1 ms |
+| `S3 ListObjects (20)` | 1100 | 741 | 1.49x | 46.7 ms |
+
+### Notes
+
+- The earlier “Turbo slower than FastAPI” throughput runs were mostly measuring
+  the wrong runtime mode. Once the Turbo subprocess stayed on the intended
+  `PYTHON_GIL=0` path, the `get` and `list` lanes flipped back in favor of the
+  native stack.
+- `HeadObject` is still the clear outlier because the current native
+  implementation is on a stability workaround in `native_s3.py`: it uses a
+  signed byte-range `GET` instead of a true native `HEAD` transport path.
+- These are still LocalStack numbers. They are useful for relative comparisons
+  inside this repo, but not a substitute for real AWS measurements.
+
 ## What Gets Checked
 
 For each migrated operation, store:

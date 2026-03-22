@@ -28,8 +28,13 @@ pub const HttpError = error{
 
 fn readResponseBody(
     allocator: Allocator,
+    method: http.Method,
     response: anytype,
 ) HttpError![]u8 {
+    if (method == .HEAD) {
+        response.request.reader.state = .ready;
+        return allocator.dupe(u8, "") catch return HttpError.OutOfMemory;
+    }
     const status = response.head.status;
     if (status == .no_content or status == .not_modified) {
         response.request.reader.state = .ready;
@@ -72,7 +77,7 @@ pub fn doRequest(
     var req = client.request(method, uri, .{
         .redirect_behavior = @enumFromInt(5),
         .extra_headers = extra_headers,
-        .keep_alive = true,
+        .keep_alive = method != .HEAD,
     }) catch return HttpError.ConnectionFailed;
 
     // Send request
@@ -107,7 +112,7 @@ pub fn doRequest(
     const status_int: u16 = @intFromEnum(response.head.status);
 
     // Stream response body into allocated buffer
-    const resp_body = readResponseBody(allocator, &response) catch |err| {
+    const resp_body = readResponseBody(allocator, method, &response) catch |err| {
         req.deinit();
         return err;
     };
@@ -169,7 +174,7 @@ pub fn doRequestFromFd(
     var req = client.request(method, uri, .{
         .redirect_behavior = @enumFromInt(5),
         .extra_headers = extra_headers,
-        .keep_alive = true,
+        .keep_alive = method != .HEAD,
     }) catch return HttpError.ConnectionFailed;
 
     req.transfer_encoding = .{ .content_length = length };
@@ -208,7 +213,7 @@ pub fn doRequestFromFd(
 
     const status_int: u16 = @intFromEnum(response.head.status);
 
-    const resp_body = readResponseBody(allocator, &response) catch |err| {
+    const resp_body = readResponseBody(allocator, method, &response) catch |err| {
         req.deinit();
         return err;
     };

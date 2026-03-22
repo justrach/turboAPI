@@ -612,11 +612,25 @@ class NativeS3Client:
     def _native_head_object(self, *, Bucket, Key):
         path, query, url = self._build_url(Bucket, Key)
         payload_hash = _sigv4_accel_module().sha256_hex(b"")
-        headers = self._signed_headers("HEAD", path, query, payload_hash, body=None)
-        status, resp_headers, resp_body = _http_accel_module().request("HEAD", url, headers, None)
+        # The Zig HEAD transport path is still unstable on 3.14t against LocalStack.
+        # Use a byte-range GET so we stay on the native wire path without crashing.
+        headers = self._signed_headers(
+            "GET",
+            path,
+            query,
+            payload_hash,
+            body=None,
+            extra_headers=[("range", "bytes=0-0")],
+        )
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
         parsed_headers = _parse_headers(resp_headers)
         self._raise_for_error("HeadObject", status, parsed_headers, resp_body)
         out = self._metadata_from_headers(parsed_headers)
+        content_range = parsed_headers.get("content-range")
+        if content_range and "/" in content_range:
+            total_size = content_range.rsplit("/", 1)[1]
+            if total_size.isdigit():
+                out["ContentLength"] = int(total_size)
         out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
         return out
 
@@ -1328,6 +1342,29 @@ class NativeS3Client:
                 current["LastModified"] = _parse_fast_timestamp(value)
         if current is not None:
             out["Contents"].append(current)
+        out.setdefault("KeyCount", len(out["Contents"]))
+        if out["Contents"] or b"<Contents>" not in body:
+            return out
+        return self._parse_list_objects_v2_xml(body)
+
+    def _parse_list_objects_v2_xml(self, body: bytes):
+        root = ET.fromstring(body)
+        out = {"Contents": []}
+        for child in root:
+            tag = _strip_ns(child.tag)
+            text = child.text
+            if tag in {"Name", "Prefix", "StartAfter", "ContinuationToken", "NextContinuationToken", "Delimiter", "EncodingType"} and text is not None:
+                out[tag] = text
+            elif tag in {"KeyCount", "MaxKeys"} and text:
+                out[tag] = int(text)
+            elif tag in {"IsTruncated"} and text is not None:
+                out[tag] = text.lower() == "true"
+            elif tag == "Contents":
+                out["Contents"].append(self._parse_list_object_entry(child))
+            elif tag == "CommonPrefixes":
+                prefix = self._parse_text_xml_field(ET.tostring(child, encoding="utf-8"), "Prefix")
+                if prefix is not None:
+                    out.setdefault("CommonPrefixes", []).append({"Prefix": prefix})
         out.setdefault("KeyCount", len(out["Contents"]))
         return out
 
