@@ -101,7 +101,12 @@ def _parity_summary() -> dict:
     service_model = make_s3().meta.service_model
     operation_names = set(service_model.operation_names)
     implemented = {
+        "HeadBucket",
         "HeadObject",
+        "CreateBucket",
+        "DeleteBucket",
+        "ListBuckets",
+        "ListObjects",
         "GetObject",
         "PutObject",
         "ListObjectsV2",

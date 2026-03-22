@@ -56,6 +56,23 @@ def test_returns_native_client(native_s3):
     assert type(native_s3).__name__ == "NativeS3Client"
 
 
+def test_native_bucket_ops(native_s3):
+    extra_bucket = f"native-s3-extra-{os.getpid()}-{os.urandom(4).hex()}"
+    create = native_s3.create_bucket(Bucket=extra_bucket)
+    assert create["ResponseMetadata"]["HTTPStatusCode"] == 200
+
+    head = native_s3.head_bucket(Bucket=extra_bucket)
+    assert head["ResponseMetadata"]["HTTPStatusCode"] == 200
+
+    buckets = native_s3.list_buckets()
+    names = {item["Name"] for item in buckets["Buckets"]}
+    assert BUCKET in names
+    assert extra_bucket in names
+
+    deleted = native_s3.delete_bucket(Bucket=extra_bucket)
+    assert deleted["ResponseMetadata"]["HTTPStatusCode"] == 204
+
+
 def test_native_head_and_get(native_s3):
     head = native_s3.head_object(Bucket=BUCKET, Key="hello.txt")
     body = native_s3.get_object(Bucket=BUCKET, Key="hello.txt")["Body"].read()
@@ -65,8 +82,10 @@ def test_native_head_and_get(native_s3):
 def test_native_put_and_list(native_s3):
     native_s3.put_object(Bucket=BUCKET, Key="native-put", Body=b"native-data", Metadata={"m": "1"})
     head = native_s3.head_object(Bucket=BUCKET, Key="native-put")
+    listing_v1 = native_s3.list_objects(Bucket=BUCKET, Prefix="list/")
     listing = native_s3.list_objects_v2(Bucket=BUCKET, Prefix="list/")
     assert head["Metadata"]["m"] == "1"
+    assert [item["Key"] for item in listing_v1["Contents"]] == [f"list/item-{i:03d}" for i in range(5)]
     assert listing["KeyCount"] == 5
 
 

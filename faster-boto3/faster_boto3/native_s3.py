@@ -139,6 +139,15 @@ class NativeS3Client:
             return self._fallback.head_object(Bucket=Bucket, Key=Key)
         return self._run_mode("head_object", native, fallback)
 
+    def head_bucket(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.head_bucket(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_head_bucket(Bucket=Bucket)
+        def fallback():
+            return self._fallback.head_bucket(Bucket=Bucket)
+        return self._run_mode("head_bucket", native, fallback)
+
     def get_object(self, *, Bucket, Key, **kwargs):
         if kwargs:
             return self._fallback.get_object(Bucket=Bucket, Key=Key, **kwargs)
@@ -163,6 +172,71 @@ class NativeS3Client:
                 fallback_kwargs["Metadata"] = Metadata
             return self._fallback.put_object(**fallback_kwargs)
         return self._run_mode("put_object", native, fallback)
+
+    def create_bucket(self, *, Bucket, CreateBucketConfiguration=None, **kwargs):
+        if kwargs:
+            return self._fallback.create_bucket(
+                Bucket=Bucket,
+                CreateBucketConfiguration=CreateBucketConfiguration,
+                **kwargs,
+            )
+        def native():
+            return self._native_create_bucket(Bucket=Bucket, CreateBucketConfiguration=CreateBucketConfiguration)
+        def fallback():
+            fallback_kwargs = {"Bucket": Bucket}
+            if CreateBucketConfiguration is not None:
+                fallback_kwargs["CreateBucketConfiguration"] = CreateBucketConfiguration
+            return self._fallback.create_bucket(**fallback_kwargs)
+        return self._run_mode("create_bucket", native, fallback)
+
+    def delete_bucket(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.delete_bucket(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_delete_bucket(Bucket=Bucket)
+        def fallback():
+            return self._fallback.delete_bucket(Bucket=Bucket)
+        return self._run_mode("delete_bucket", native, fallback)
+
+    def list_buckets(self, **kwargs):
+        if kwargs:
+            return self._fallback.list_buckets(**kwargs)
+        def native():
+            return self._native_list_buckets()
+        def fallback():
+            return self._fallback.list_buckets()
+        return self._run_mode("list_buckets", native, fallback)
+
+    def list_objects(self, *, Bucket, Prefix=None, Marker=None, MaxKeys=None, Delimiter=None, **kwargs):
+        if kwargs:
+            return self._fallback.list_objects(
+                Bucket=Bucket,
+                Prefix=Prefix,
+                Marker=Marker,
+                MaxKeys=MaxKeys,
+                Delimiter=Delimiter,
+                **kwargs,
+            )
+        def native():
+            return self._native_list_objects(
+                Bucket=Bucket,
+                Prefix=Prefix,
+                Marker=Marker,
+                MaxKeys=MaxKeys,
+                Delimiter=Delimiter,
+            )
+        def fallback():
+            fallback_kwargs = {"Bucket": Bucket}
+            if Prefix is not None:
+                fallback_kwargs["Prefix"] = Prefix
+            if Marker is not None:
+                fallback_kwargs["Marker"] = Marker
+            if MaxKeys is not None:
+                fallback_kwargs["MaxKeys"] = MaxKeys
+            if Delimiter is not None:
+                fallback_kwargs["Delimiter"] = Delimiter
+            return self._fallback.list_objects(**fallback_kwargs)
+        return self._run_mode("list_objects", native, fallback)
 
     def list_objects_v2(self, *, Bucket, Prefix=None, MaxKeys=None, **kwargs):
         if kwargs:
@@ -423,6 +497,15 @@ class NativeS3Client:
         out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
         return out
 
+    def _native_head_bucket(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None)
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("HEAD", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("HEAD", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("HeadBucket", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
     def _native_get_object(self, *, Bucket, Key):
         path, query, url = self._build_url(Bucket, Key)
         payload_hash = _sigv4_accel_module().sha256_hex(b"")
@@ -472,6 +555,42 @@ class NativeS3Client:
         out = {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
         if "etag" in parsed_headers:
             out["ETag"] = parsed_headers["etag"]
+        return out
+
+    def _native_create_bucket(self, *, Bucket, CreateBucketConfiguration=None):
+        path, query, url = self._build_url(Bucket, None)
+        body = b""
+        if CreateBucketConfiguration is not None:
+            body = self._encode_create_bucket_xml(CreateBucketConfiguration)
+        payload_hash = _sigv4_accel_module().sha256_hex(body)
+        headers = self._signed_headers("PUT", path, query, payload_hash, body=body)
+        status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, body)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("CreateBucket", status, parsed_headers, resp_body)
+        out = {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+        location = parsed_headers.get("location") or self._parse_text_xml_field(resp_body, "Location")
+        if location:
+            out["Location"] = location
+        return out
+
+    def _native_delete_bucket(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None)
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("DELETE", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("DELETE", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("DeleteBucket", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
+    def _native_list_buckets(self):
+        path, query, url = self._build_service_url()
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("ListBuckets", status, parsed_headers, resp_body)
+        out = self._parse_list_buckets(resp_body)
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
         return out
 
     def _native_multipart_put_object(self, *, Bucket, Key, Body, Metadata, fd_request, multipart_cfg):
@@ -576,6 +695,26 @@ class NativeS3Client:
         parsed_headers = _parse_headers(resp_headers)
         self._raise_for_error("ListObjectsV2", status, parsed_headers, resp_body)
         parsed = self._parse_list_objects(resp_body)
+        parsed["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return parsed
+
+    def _native_list_objects(self, *, Bucket, Prefix=None, Marker=None, MaxKeys=None, Delimiter=None):
+        params = {}
+        if Prefix is not None:
+            params["prefix"] = Prefix
+        if Marker is not None:
+            params["marker"] = Marker
+        if MaxKeys is not None:
+            params["max-keys"] = MaxKeys
+        if Delimiter is not None:
+            params["delimiter"] = Delimiter
+        path, query, url = self._build_url(Bucket, None, params=params)
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("ListObjects", status, parsed_headers, resp_body)
+        parsed = self._parse_list_objects_v1(resp_body)
         parsed["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
         return parsed
 
@@ -825,6 +964,13 @@ class NativeS3Client:
         url = urllib.parse.urlunsplit((base_parts.scheme, base_parts.netloc, path, query, ""))
         return path, query, url
 
+    def _build_service_url(self, params: dict | None = None):
+        base_parts = urllib.parse.urlsplit(self._endpoint_url)
+        path = base_parts.path.rstrip("/") or "/"
+        query = _encode_query(params or {})
+        url = urllib.parse.urlunsplit((base_parts.scheme, base_parts.netloc, path, query, ""))
+        return path, query, url
+
     def _format_copy_source(self, copy_source):
         if isinstance(copy_source, str):
             return copy_source.lstrip("/")
@@ -946,6 +1092,64 @@ class NativeS3Client:
         out.setdefault("KeyCount", len(out["Contents"]))
         return out
 
+    def _parse_list_objects_v1(self, body: bytes):
+        if not body:
+            return {"Contents": []}
+        root = ET.fromstring(body)
+        out = {"Contents": []}
+        for child in root:
+            tag = _strip_ns(child.tag)
+            text = child.text
+            if tag in {"Name", "Prefix", "Marker", "NextMarker", "Delimiter", "EncodingType"} and text is not None:
+                out[tag] = text
+            elif tag == "MaxKeys" and text:
+                out[tag] = int(text)
+            elif tag == "IsTruncated" and text is not None:
+                out[tag] = text.lower() == "true"
+            elif tag == "Contents":
+                out["Contents"].append(self._parse_list_object_entry(child))
+            elif tag == "CommonPrefixes":
+                prefix = self._parse_text_xml_field(ET.tostring(child, encoding="utf-8"), "Prefix")
+                if prefix is not None:
+                    out.setdefault("CommonPrefixes", []).append({"Prefix": prefix})
+        return out
+
+    def _parse_list_object_entry(self, node):
+        out = {}
+        for child in node:
+            tag = _strip_ns(child.tag)
+            text = child.text
+            if tag == "Size" and text:
+                out["Size"] = int(text)
+            elif tag == "LastModified" and text:
+                out["LastModified"] = _parse_fast_timestamp(text)
+            elif tag in {"Owner", "Initiator"}:
+                out[tag] = self._parse_person(child)
+            elif text is not None:
+                out[tag] = text
+        return out
+
+    def _parse_list_buckets(self, body: bytes):
+        if not body:
+            return {"Buckets": []}
+        root = ET.fromstring(body)
+        out = {"Buckets": []}
+        owner = root.find(".//{*}Owner")
+        if owner is not None:
+            out["Owner"] = self._parse_person(owner)
+        buckets = root.find(".//{*}Buckets")
+        if buckets is not None:
+            for bucket in buckets.findall("{*}Bucket"):
+                item = {}
+                for child in bucket:
+                    tag = _strip_ns(child.tag)
+                    if tag == "CreationDate" and child.text:
+                        item[tag] = _parse_fast_timestamp(child.text)
+                    elif child.text is not None:
+                        item[tag] = child.text
+                out["Buckets"].append(item)
+        return out
+
     def _parse_copy_object(self, body: bytes):
         if not body:
             return {}
@@ -1008,6 +1212,13 @@ class NativeS3Client:
             part_el = ET.SubElement(root, "Part")
             ET.SubElement(part_el, "PartNumber").text = str(part["PartNumber"])
             ET.SubElement(part_el, "ETag").text = part["ETag"]
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    def _encode_create_bucket_xml(self, config):
+        root = ET.Element("CreateBucketConfiguration")
+        location = config.get("LocationConstraint")
+        if location is not None:
+            ET.SubElement(root, "LocationConstraint").text = str(location)
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     def _encode_delete_objects_xml(self, delete):
@@ -1187,6 +1398,14 @@ def _results_equal(operation_name: str, native_result, fallback_result) -> bool:
         native_keys = [item.get("Key") for item in native_result.get("Contents", [])]
         fallback_keys = [item.get("Key") for item in fallback_result.get("Contents", [])]
         return native_keys == fallback_keys and native_result.get("KeyCount") == fallback_result.get("KeyCount")
+    if operation_name == "list_objects":
+        native_keys = [item.get("Key") for item in native_result.get("Contents", [])]
+        fallback_keys = [item.get("Key") for item in fallback_result.get("Contents", [])]
+        return native_keys == fallback_keys
+    if operation_name == "list_buckets":
+        native_buckets = [item.get("Name") for item in native_result.get("Buckets", [])]
+        fallback_buckets = [item.get("Name") for item in fallback_result.get("Buckets", [])]
+        return native_buckets == fallback_buckets
     if operation_name == "delete_objects":
         native_deleted = [item.get("Key") for item in native_result.get("Deleted", [])]
         fallback_deleted = [item.get("Key") for item in fallback_result.get("Deleted", [])]
@@ -1200,7 +1419,10 @@ def _results_equal(operation_name: str, native_result, fallback_result) -> bool:
         fallback_uploads = [(item.get("Key"), item.get("UploadId")) for item in fallback_result.get("Uploads", [])]
         return native_uploads == fallback_uploads
     if operation_name in {
+        "head_bucket",
         "head_object",
+        "create_bucket",
+        "delete_bucket",
         "put_object",
         "delete_object",
         "copy_object",
