@@ -3,16 +3,40 @@
 **Date:** 2026-03-22
 **Setup:** Postgres 18, Docker, aarch64 (M3 Pro), concurrency=10, 30s per test
 **Method:** Each driver uses its native path (no HTTP). No result caching. Direct binary decode.
+**Validation:** Results below are from a clean rerun after `docker compose down -v --remove-orphans`. `COPY FROM` for `asyncpg` is marked unverified on this host because the rerun reproduced a Docker/Postgres `DiskFullError`.
 
-## Results
+## Results — All 7 MagicStack pgbench Queries
 
 | Query | asyncpg | psycopg3-async | turbopg (pg.zig) | vs asyncpg |
 |-------|---------|----------------|------------------|-----------|
-| SELECT 1+1 | 92,415 q/s (0.108ms) | 34,563 q/s (0.289ms) | **124,951 q/s (0.079ms)** | **1.35x** |
-| pg_type (619 rows, 12 cols) | 5,838 q/s (1.712ms) | 2,308 q/s (4.332ms) | **7,124 q/s (1.402ms)** | **1.22x** |
-| generate_series (1000 rows) | 8,131 q/s (1.229ms) | 4,128 q/s (2.422ms) | **21,259 q/s (0.469ms)** | **2.61x** |
+| SELECT 1+1 | 94,790 q/s (0.105ms) | 34,638 q/s (0.288ms) | **130,837 q/s (0.076ms)** | **1.38x** |
+| pg_type (619 rows, 12 cols) | 5,803 q/s (1.723ms) | 2,264 q/s (4.415ms) | **7,090 q/s (1.409ms)** | **1.22x** |
+| generate_series (1000 rows) | 8,229 q/s (1.215ms) | 4,008 q/s (2.494ms) | **19,725 q/s (0.506ms)** | **2.40x** |
+| large_object (100 bytea rows) | 26,688 q/s (0.374ms) | 3,107 q/s (3.218ms) | **28,578 q/s (0.349ms)** | **1.07x** |
+| arrays (100 int[] rows) | 9,676 q/s (1.033ms) | 3,417 q/s (2.925ms) | **13,763 q/s (0.726ms)** | **1.42x** |
+| COPY FROM (10k rows/op) | FAILED (`DiskFullError`) | 114 q/s (87.483ms) | **366 q/s (27.326ms)** | unverified on this host |
+| batch INSERT (1k rows) | 1,089 q/s (9.181ms) | 32 q/s (308.693ms) | **31,004 q/s (0.321ms)** | **28.5x** |
 
-**turbopg wins all 3 queries.** No caching, no tricks, every query hits Postgres.
+**turbopg wins 6/6 queries it completed against asyncpg in the clean rerun.** `COPY FROM` remains inconclusive versus `asyncpg` on this machine because `asyncpg` failed twice with `DiskFullError`. Against `psycopg3-async`, turbopg also wins `COPY FROM` (`366 q/s` vs `114 q/s`, `3.21x`).
+
+### Rows/sec (throughput)
+
+| Query | asyncpg | turbopg | Ratio |
+|-------|---------|---------|-------|
+| SELECT 1+1 | 94,790 | 130,837 | 1.38x |
+| pg_type | 3,592,281 | 4,388,951 | 1.22x |
+| generate_series | 8,228,586 | 19,724,529 | 2.40x |
+| large_object | 2,668,752 | 2,857,808 | 1.07x |
+| arrays | 967,624 | 1,376,323 | 1.42x |
+| COPY FROM | failed | 3,656,253 | unverified |
+| batch INSERT | 1,088,866 | -- | 28.5x (q/s) |
+
+## Validation notes
+
+- The full suite was rerun from a clean Docker state using `docker compose -f benchmarks/pgbench/docker-compose.yml down -v --remove-orphans` followed by `docker compose -f benchmarks/pgbench/docker-compose.yml up --abort-on-container-exit pgbench`.
+- The second run reproduced the same ranking shape for all non-`COPY FROM` queries, with expected run-to-run drift of a few percent.
+- `asyncpg` `COPY FROM` failed again during the clean rerun with `asyncpg.exceptions.DiskFullError: could not extend file ... No space left on device`, so any direct `COPY FROM` comparison against `asyncpg` should be treated as unverified until the Docker storage limit is addressed.
+- On the clean rerun, `COPY FROM` was still valid for `psycopg3-async` and `turbopg`, where turbopg measured `366 q/s` vs `114 q/s`.
 
 ## Optimization history
 
@@ -52,12 +76,14 @@ Column name keys are pre-interned (created once, reused for all rows). Dicts are
 3. **Direct binary decode**: OID switch -> `PyLong`/`PyFloat`/`PyBool`/`PyUnicode`. No intermediate JSON or string parsing.
 4. **Pre-interned keys**: Column name PyUnicode objects created once, reused across all rows.
 5. **Pre-sized dicts**: `_PyDict_NewPresized(num_cols)` avoids hash table rehashing.
+6. **COPY FROM STDIN**: Native pg.zig `copyFrom()` sends tab-separated CopyData messages directly over the wire.
 
 ## Reproduce
 
 ```bash
 cd benchmarks/pgbench
-docker compose up --build
+docker compose down -v --remove-orphans
+docker compose up --build --abort-on-container-exit pgbench
 ```
 
-No local dependencies. Everything runs in Docker (~5 min build, ~5 min benchmark).
+No local dependencies. Everything runs in Docker (~5 min build, ~15 min benchmark). For publication-quality numbers, run the suite at least 3 times and report the median.
