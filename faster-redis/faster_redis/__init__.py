@@ -21,6 +21,12 @@ Usage:
 
 __version__ = "0.1.0"
 
-from ._parity import ParityScenario, compare_scenario, core_parity_scenarios, run_parity_matrix
+from ._parity import (
+    ParityScenario,
+    compare_scenario,
+    core_parity_scenarios,
+    non_core_parity_scenarios,
+    run_parity_matrix,
+)
 from ._client import Redis, Pipeline
 from ._shadow import NativeShadowMismatch, ShadowRedis, native_compare, native_shadow

@@ -52,6 +52,19 @@ def run_parity_matrix(scenarios, **kwargs):
 def core_parity_scenarios():
     """Starter scenario corpus for measuring client parity."""
 
+    def normalize_stream_entries(entries):
+        if not isinstance(entries, list):
+            return entries
+        normalized = []
+        for item in entries:
+            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], dict):
+                normalized.append(("<stream-id>", item[1]))
+            elif isinstance(item, list) and len(item) == 2 and isinstance(item[1], list):
+                normalized.append([item[0], normalize_stream_entries(item[1])])
+            else:
+                normalized.append(item)
+        return normalized
+
     return [
         ParityScenario("get-missing", lambda c: c.get("missing"), tags=("read", "string")),
         ParityScenario("set-basic", lambda c: c.set("k", "v"), tags=("write", "string")),
@@ -94,6 +107,7 @@ def core_parity_scenarios():
             "xrange",
             lambda c: (c.flushdb(), c.xadd("stream", {"field": "value"}), c.xrange("stream"))[-1],
             tags=("stream",),
+            normalize=normalize_stream_entries,
         ),
         ParityScenario(
             "xgroup-read",
@@ -104,5 +118,35 @@ def core_parity_scenarios():
                 c.xreadgroup("g1", "c1", {"stream": ">"}, count=1),
             )[-1],
             tags=("stream", "group"),
+            normalize=normalize_stream_entries,
+        ),
+    ]
+
+
+def non_core_parity_scenarios():
+    """Volatile or environment-sensitive parity scenarios kept outside the core score."""
+
+    def normalize_client_list(rows):
+        if not isinstance(rows, list):
+            return rows
+        normalized = []
+        for row in rows:
+            normalized.append(
+                {
+                    "db": row.get("db", ""),
+                    "lib-name": row.get("lib-name", ""),
+                    "lib-ver": row.get("lib-ver", ""),
+                }
+            )
+        normalized.sort(key=lambda item: (item["db"], item["lib-name"], item["lib-ver"]))
+        return normalized
+
+    return [
+        ParityScenario(
+            "client-list-normalized",
+            lambda c: (c.flushdb(), c.client_list())[-1],
+            tags=("server", "non-core"),
+            normalize=normalize_client_list,
+            metadata={"reason": "volatile connection telemetry"},
         ),
     ]
