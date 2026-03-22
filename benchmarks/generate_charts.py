@@ -7,9 +7,6 @@ Charts are saved to assets/ directory for README embedding.
 
 Usage:
     python benchmarks/generate_charts.py
-
-    # Or with fresh benchmark data:
-    PYTHON_GIL=0 python benchmarks/generate_charts.py --run-benchmarks
 """
 
 import argparse
@@ -424,9 +421,6 @@ def generate_architecture_diagram(output_path: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate TurboAPI benchmark charts")
-    parser.add_argument(
-        "--run-benchmarks", action="store_true", help="Run benchmarks before generating charts"
-    )
     parser.add_argument("--output-dir", default="assets", help="Output directory for charts")
     args = parser.parse_args()
 
@@ -439,19 +433,7 @@ def main():
     print("TurboAPI Benchmark Chart Generator")
     print("=" * 60)
 
-    # Use default results or run benchmarks
     data = DEFAULT_RESULTS
-
-    if args.run_benchmarks:
-        print("\nRunning benchmarks (this may take a few minutes)...")
-        try:
-            from run_benchmarks import run_benchmarks
-
-            results, avg_speedup = run_benchmarks()
-            # TODO: Convert results to data format
-        except Exception as e:
-            print(f"  Benchmark error: {e}")
-            print("  Using default benchmark data")
 
     print("\nGenerating charts...")
 

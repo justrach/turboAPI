@@ -9,151 +9,19 @@ on:
 
 jobs:
   db-bench:
-    name: "TurboAPI + pg.zig vs FastAPI + SQLAlchemy"
+    name: "TurboAPI + pg.zig vs FastAPI + asyncpg / SQLAlchemy"
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:18-alpine
-        env:
-          POSTGRES_USER: turbo
-          POSTGRES_PASSWORD: turbo
-          POSTGRES_DB: turbotest
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U turbo"
-          --health-interval 2s
-          --health-timeout 5s
-          --health-retries 10
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.14t (free-threaded)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.14t'
-          allow-prereleases: true
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-
-      - name: Install wrk
-        run: sudo apt-get update && sudo apt-get install -y wrk
-
-      - name: Build turbonet
-        run: python zig/build_turbonet.py --install --release
-
-      - name: Install Python deps
-        run: |
-          pip install -e .
-          pip install fastapi uvicorn sqlalchemy psycopg2-binary requests
-
-      - name: Seed database
-        run: |
-          python -c "
-          import psycopg2
-          conn = psycopg2.connect('postgres://turbo:turbo@127.0.0.1:5432/turbotest')
-          cur = conn.cursor()
-          cur.execute('CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, age INTEGER NOT NULL)')
-          cur.execute(\"INSERT INTO users (name,email,age) SELECT 'user_' || i, 'user' || i || '@test.com', 20 + (i % 50) FROM generate_series(1, 100) AS s(i)\")
-          conn.commit()
-          conn.close()
-          print('Seeded 100 users')
-          "
-
       - name: Run DB benchmark
         id: bench
         run: |
-          python benchmarks/db_bench_ci.py | tee bench_output.txt
-          # Extract key metrics for regression check
-          python -c "
-          import json, re
-          with open('bench_output.txt') as f:
-              text = f.read()
-          metrics = {}
-          for line in text.splitlines():
-              m = re.match(r'\s*([\w_]+)\s*:\s*([\d.]+)\s*req/s', line)
-              if m:
-                  metrics[m.group(1)] = float(m.group(2))
-          with open('bench_results.json', 'w') as f:
-              json.dump(metrics, f, indent=2)
-          print(json.dumps(metrics, indent=2))
-          "
+          docker compose -f benchmarks/postgres/docker-compose.yml up --build --abort-on-container-exit bench | tee bench_output.txt
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
           name: db-benchmark-results
-          path: |
-            bench_results.json
-            bench_output.txt
-
-      - name: Regression check against baseline
-        if: github.event_name == 'pull_request'
-        continue-on-error: true
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-
-            // Load current results
-            const current = JSON.parse(fs.readFileSync('bench_results.json', 'utf8'));
-
-            // Try to load baseline from main branch artifact
-            let baseline = null;
-            try {
-              const artifacts = await github.rest.actions.listArtifactsForRepo({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                name: 'db-benchmark-results',
-                per_page: 5,
-              });
-              // Find latest from main
-              const mainArtifact = artifacts.data.artifacts.find(
-                a => a.workflow_run?.head_branch === 'main'
-              );
-              if (mainArtifact) {
-                const download = await github.rest.actions.downloadArtifact({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  artifact_id: mainArtifact.id,
-                  archive_format: 'zip',
-                });
-                // Parse baseline from downloaded artifact
-                // For now, skip baseline comparison on first run
-              }
-            } catch (e) {
-              console.log('No baseline found (first run)');
-            }
-
-            // Build comment
-            const output = fs.readFileSync('bench_output.txt', 'utf8');
-            let body = `## ⚡ DB Benchmark Results (Postgres 18)\n\n\`\`\`\n${output}\n\`\`\`\n`;
-
-            if (baseline) {
-              body += '\n### Regression Check\n\n';
-              for (const [key, val] of Object.entries(current)) {
-                const base = baseline[key];
-                if (base) {
-                  const pct = ((val - base) / base * 100).toFixed(1);
-                  const icon = val >= base * 0.9 ? '✅' : '❌';
-                  body += `${icon} **${key}**: ${val.toFixed(0)} req/s (${pct > 0 ? '+' : ''}${pct}% vs baseline ${base.toFixed(0)})\n`;
-                }
-              }
-            } else {
-              body += '\n*No baseline available yet — this will be the baseline after merge.*\n';
-            }
-
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body,
-            });
-
-      - name: Save baseline on main
-        if: github.ref == 'refs/heads/main'
-        run: echo "Baseline saved as artifact for future regression checks"
+          path: bench_output.txt

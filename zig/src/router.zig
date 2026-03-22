@@ -12,6 +12,8 @@ pub const MAX_ROUTE_PARAMS = 16;
 pub const RouteParam = struct {
     key: []const u8,
     value: []const u8,
+    int_value: i64 = 0,
+    has_int_value: bool = false,
 };
 
 /// Zero-alloc route params — fixed-size stack array instead of HashMap.
@@ -27,9 +29,27 @@ pub const RouteParams = struct {
         return null;
     }
 
+    pub fn getInt(self: *const RouteParams, key: []const u8) ?i64 {
+        for (self.items_buf[0..self.len]) |p| {
+            if (std.mem.eql(u8, p.key, key) and p.has_int_value) return p.int_value;
+        }
+        return null;
+    }
+
     pub fn put(self: *RouteParams, key: []const u8, value: []const u8) void {
         if (self.len < MAX_ROUTE_PARAMS) {
-            self.items_buf[self.len] = .{ .key = key, .value = value };
+            var int_value: i64 = 0;
+            var has_int_value = false;
+            if (std.fmt.parseInt(i64, value, 10)) |n| {
+                int_value = n;
+                has_int_value = true;
+            } else |_| {}
+            self.items_buf[self.len] = .{
+                .key = key,
+                .value = value,
+                .int_value = int_value,
+                .has_int_value = has_int_value,
+            };
             self.len += 1;
         } else {
             std.debug.print("[WARN] Route has >{d} params — excess dropped: {s}\n", .{ MAX_ROUTE_PARAMS, key });

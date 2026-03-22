@@ -392,14 +392,15 @@ class ZigIntegratedTurboAPI(TurboAPI):
         self._db_config = (conn_string, pool_size)
         print(f"{CHECK_MARK} DB configured: pool_size={pool_size}")
 
-    def db_get(self, path: str, *, table: str, pk: str = "id"):
+    def db_get(self, path: str, *, table: str, pk: str = "id", columns: list[str] | None = None):
         """Zig-native SELECT by primary key. No Python, no GIL."""
         import re
 
         params = re.findall(r"\{([^}]+)\}", path)
         pk_param = params[0] if params else pk
+        column_str = ",".join(columns) if columns else ""
         self._db_routes = getattr(self, "_db_routes", [])
-        self._db_routes.append(("GET", path, "select_one", table, pk, pk_param, ""))
+        self._db_routes.append(("GET", path, "select_one", table, pk, pk_param, column_str))
         print(f"{CHECK_MARK} [db:select_one] GET {path} -> {table}.{pk}")
 
         def decorator(func):
@@ -407,10 +408,11 @@ class ZigIntegratedTurboAPI(TurboAPI):
 
         return decorator
 
-    def db_list(self, path: str, *, table: str):
+    def db_list(self, path: str, *, table: str, columns: list[str] | None = None):
         """Zig-native SELECT * with ?limit=N&offset=M. No Python, no GIL."""
+        column_str = ",".join(columns) if columns else ""
         self._db_routes = getattr(self, "_db_routes", [])
-        self._db_routes.append(("GET", path, "select_list", table, "", "", ""))
+        self._db_routes.append(("GET", path, "select_list", table, "", "", column_str))
         print(f"{CHECK_MARK} [db:select_list] GET {path} -> {table}")
 
         def decorator(func):

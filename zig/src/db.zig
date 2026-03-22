@@ -22,6 +22,7 @@ pub const DbRouteEntry = struct {
     op: DbOp,
     table: []const u8,
     columns: []const []const u8,
+    json_key_parts: []const []const u8,
     pk_column: ?[]const u8,
     pk_param: ?[]const u8,
     select_sql: []const u8,
@@ -264,12 +265,55 @@ fn isValidIdentifier(name: []const u8) bool {
     return true;
 }
 
-fn buildSelectOneSql(table: []const u8, pk_column: []const u8) []const u8 {
-    return std.fmt.allocPrint(allocator, "SELECT * FROM {s} WHERE {s} = $1", .{ table, pk_column }) catch "";
+fn buildSelectOneSql(table: []const u8, pk_column: []const u8, columns: []const []const u8) []const u8 {
+    var col_buf: [2048]u8 = undefined;
+    var col_pos: usize = 0;
+
+    if (columns.len == 0) {
+        return std.fmt.allocPrint(allocator, "SELECT * FROM {s} WHERE {s} = $1 LIMIT 1", .{ table, pk_column }) catch "";
+    }
+
+    for (columns, 0..) |col, i| {
+        if (i > 0) {
+            col_buf[col_pos] = ',';
+            col_pos += 1;
+            col_buf[col_pos] = ' ';
+            col_pos += 1;
+        }
+        @memcpy(col_buf[col_pos..][0..col.len], col);
+        col_pos += col.len;
+    }
+
+    return std.fmt.allocPrint(allocator, "SELECT {s} FROM {s} WHERE {s} = $1 LIMIT 1", .{
+        col_buf[0..col_pos],
+        table,
+        pk_column,
+    }) catch "";
 }
 
-fn buildSelectListSql(table: []const u8) []const u8 {
-    return std.fmt.allocPrint(allocator, "SELECT * FROM {s} LIMIT $1 OFFSET $2", .{table}) catch "";
+fn buildSelectListSql(table: []const u8, columns: []const []const u8) []const u8 {
+    var col_buf: [2048]u8 = undefined;
+    var col_pos: usize = 0;
+
+    if (columns.len == 0) {
+        return std.fmt.allocPrint(allocator, "SELECT * FROM {s} LIMIT $1 OFFSET $2", .{table}) catch "";
+    }
+
+    for (columns, 0..) |col, i| {
+        if (i > 0) {
+            col_buf[col_pos] = ',';
+            col_pos += 1;
+            col_buf[col_pos] = ' ';
+            col_pos += 1;
+        }
+        @memcpy(col_buf[col_pos..][0..col.len], col);
+        col_pos += col.len;
+    }
+
+    return std.fmt.allocPrint(allocator, "SELECT {s} FROM {s} LIMIT $1 OFFSET $2", .{
+        col_buf[0..col_pos],
+        table,
+    }) catch "";
 }
 
 fn buildInsertSql(table: []const u8, columns: []const []const u8) []const u8 {
@@ -315,6 +359,28 @@ fn serializeRow(row: anytype, col_names: []const []const u8, buf: []u8) ![]const
     if (len == 0) return error.SerializationFailed;
     return buf[0..len];
 }
+
+fn serializeFixedSchemaRow(row: anytype, json_key_parts: []const []const u8, buf: []u8) ![]const u8 {
+    var pos: usize = 0;
+    buf[pos] = '{';
+    pos += 1;
+
+    const ncols = @min(json_key_parts.len, row.values.len);
+    for (0..ncols) |i| {
+        if (i > 0) {
+            buf[pos] = ',';
+            pos += 1;
+        }
+        const key_part = json_key_parts[i];
+        @memcpy(buf[pos..][0..key_part.len], key_part);
+        pos += key_part.len;
+        pos += row.writeJsonValue(i, buf[pos..]);
+    }
+
+    buf[pos] = '}';
+    pos += 1;
+    return buf[0..pos];
+}
 // ── Request dispatch (called from server.zig fast-exit path) ─────────────────
 
 pub fn handleDbRoute(
@@ -328,44 +394,71 @@ pub fn handleDbRoute(
     switch (entry.op) {
         .select_one => {
             const pk_param = entry.pk_param orelse "id";
-            const pk_val = params.get(pk_param) orelse {
+            const first_param: ?router_mod.RouteParam = if (params.len == 1) params.items_buf[0] else null;
+            const pk_val_opt = if (first_param) |p|
+                if (std.mem.eql(u8, p.key, pk_param)) p.value else params.get(pk_param)
+            else
+                params.get(pk_param);
+            const pk_val = pk_val_opt orelse {
                 sendResponseFn(stream, 400, "application/json", "{\"error\": \"Missing primary key\"}");
                 return;
             };
+            const pk_int = if (first_param) |p|
+                if (std.mem.eql(u8, p.key, pk_param) and p.has_int_value) p.int_value else params.getInt(pk_param)
+            else
+                params.getInt(pk_param);
+            const cache_enabled = isDbCacheEnabled();
 
             // Cache check — build cache key from table + pk value
             var cache_key_buf: [256]u8 = undefined;
-            const cache_key = std.fmt.bufPrint(&cache_key_buf, "GET:{s}:{s}", .{ entry.table, pk_val }) catch "";
-            if (cache_key.len > 0) {
-                if (cacheGet(cache_key)) |cached_body| {
-                    sendResponseFn(stream, 200, "application/json", cached_body);
-                    return;
+            var cache_key: []const u8 = "";
+            if (cache_enabled) {
+                cache_key = std.fmt.bufPrint(&cache_key_buf, "GET:{s}:{s}", .{ entry.table, pk_val }) catch "";
+                if (cache_key.len > 0) {
+                    if (cacheGet(cache_key)) |cached_body| {
+                        sendResponseFn(stream, 200, "application/json", cached_body);
+                        return;
+                    }
                 }
             }
 
-            const conn = acquireConn() orelse {
+            const pool = getPool() orelse {
                 sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database connection unavailable\"}");
                 return;
             };
-            defer releaseConn(conn);
 
-            var result = conn.queryOpts(entry.select_sql, .{pk_val}, .{ .column_names = true, .cache_name = entry.cache_name }) catch {
-                sendResponseFn(stream, 500, "application/json", "{\"error\": \"Query failed\"}");
-                return;
+            const known_columns = entry.columns.len > 0;
+            const opts = pg.Conn.QueryOpts{ .column_names = !known_columns, .cache_name = entry.cache_name };
+            var query_row = blk: {
+                // Fast path for integer primary keys: router already parsed them when possible.
+                if (pk_int) |pk_num| {
+                    break :blk pool.rowOpts(entry.select_sql, .{pk_num}, opts) catch {
+                        sendResponseFn(stream, 500, "application/json", "{\"error\": \"Query failed\"}");
+                        return;
+                    };
+                }
+
+                break :blk pool.rowOpts(entry.select_sql, .{pk_val}, opts) catch {
+                    sendResponseFn(stream, 500, "application/json", "{\"error\": \"Query failed\"}");
+                    return;
+                };
             };
-            defer result.deinit();
-
-            if (result.next() catch null) |row| {
+            if (query_row) |*qr| {
+                defer qr.deinit() catch {};
                 var json_buf: [8192]u8 = undefined;
-                const json = serializeRow(row, result.column_names, &json_buf) catch {
+                const json = if (known_columns)
+                    serializeFixedSchemaRow(qr.row, entry.json_key_parts, &json_buf)
+                else
+                    serializeRow(qr.row, qr.result.column_names, &json_buf);
+                const json_value = json catch {
                     sendResponseFn(stream, 500, "application/json", "{\"error\": \"Serialization failed\"}");
                     return;
                 };
                 // Cache the response
-                if (cache_key.len > 0) {
-                    cachePut(cache_key, json, entry.table);
+                if (cache_enabled and cache_key.len > 0) {
+                    cachePut(cache_key, json_value, entry.table);
                 }
-                sendResponseFn(stream, 200, "application/json", json);
+                sendResponseFn(stream, 200, "application/json", json_value);
             } else {
                 sendResponseFn(stream, 404, "application/json", "{\"error\": \"Not found\"}");
             }
@@ -386,13 +479,17 @@ pub fn handleDbRoute(
                 }
             }
 
+            const cache_enabled = isDbCacheEnabled();
             // Cache check for list queries
             var cache_key_buf: [256]u8 = undefined;
-            const cache_key = std.fmt.bufPrint(&cache_key_buf, "LIST:{s}:{s}:{s}", .{ entry.table, limit, offset }) catch "";
-            if (cache_key.len > 0) {
-                if (cacheGet(cache_key)) |cached_body| {
-                    sendResponseFn(stream, 200, "application/json", cached_body);
-                    return;
+            var cache_key: []const u8 = "";
+            if (cache_enabled) {
+                cache_key = std.fmt.bufPrint(&cache_key_buf, "LIST:{s}:{s}:{s}", .{ entry.table, limit, offset }) catch "";
+                if (cache_key.len > 0) {
+                    if (cacheGet(cache_key)) |cached_body| {
+                        sendResponseFn(stream, 200, "application/json", cached_body);
+                        return;
+                    }
                 }
             }
 
@@ -402,7 +499,8 @@ pub fn handleDbRoute(
             };
             defer releaseConn(conn);
 
-            var result = conn.queryOpts(entry.select_sql, .{ limit, offset }, .{ .column_names = true, .cache_name = entry.cache_name }) catch {
+            const known_columns = entry.columns.len > 0;
+            var result = conn.queryOpts(entry.select_sql, .{ limit, offset }, .{ .column_names = !known_columns, .cache_name = entry.cache_name }) catch {
                 sendResponseFn(stream, 500, "application/json", "{\"error\": \"Query failed\"}");
                 return;
             };
@@ -425,7 +523,11 @@ pub fn handleDbRoute(
                     out_pos += 1;
                 }
                 var row_buf: [8192]u8 = undefined;
-                const row_json = serializeRow(row, result.column_names, &row_buf) catch break;
+                const row_json_result = if (known_columns)
+                    serializeFixedSchemaRow(row, entry.json_key_parts, &row_buf)
+                else
+                    serializeRow(row, result.column_names, &row_buf);
+                const row_json = row_json_result catch break;
                 if (out_pos + row_json.len + 2 > out_buf.len) break;
                 @memcpy(out_buf[out_pos..][0..row_json.len], row_json);
                 out_pos += row_json.len;
@@ -436,7 +538,7 @@ pub fn handleDbRoute(
             out_pos += 1;
 
             const response_body = out_buf[0..out_pos];
-            if (cache_key.len > 0) {
+            if (cache_enabled and cache_key.len > 0) {
                 cachePut(cache_key, response_body, entry.table);
             }
             sendResponseFn(stream, 200, "application/json", response_body);
@@ -554,11 +656,13 @@ pub fn handleDbRoute(
             // Collect params: path params first, then query string params
             var param_values: [16][]const u8 = undefined;
             var param_count: usize = 0;
+            var param_ints: [16]?i64 = [_]?i64{null} ** 16;
 
             for (entry.param_names) |pname| {
                 if (param_count >= 16) break;
                 if (params.get(pname)) |v| {
                     param_values[param_count] = v;
+                    param_ints[param_count] = params.getInt(pname);
                     param_count += 1;
                 } else {
                     // Try query string
@@ -569,6 +673,7 @@ pub fn handleDbRoute(
                             const eq = std.mem.indexOf(u8, pair, "=") orelse continue;
                             if (std.mem.eql(u8, pair[0..eq], pname)) {
                                 param_values[param_count] = pair[eq + 1 ..];
+                                param_ints[param_count] = std.fmt.parseInt(i64, pair[eq + 1 ..], 10) catch null;
                                 param_count += 1;
                                 found = true;
                                 break;
@@ -577,60 +682,85 @@ pub fn handleDbRoute(
                     }
                     if (!found) {
                         param_values[param_count] = "";
+                        param_ints[param_count] = null;
                         param_count += 1;
                     }
                 }
             }
 
+            const cache_enabled = isDbCacheEnabled();
             // Cache check
             var cache_key_buf: [512]u8 = undefined;
-            var ck_pos: usize = 0;
-            const prefix = "Q:";
-            @memcpy(cache_key_buf[ck_pos..][0..prefix.len], prefix);
-            ck_pos += prefix.len;
-            const sql_key_len = @min(entry.custom_sql.len, 64);
-            @memcpy(cache_key_buf[ck_pos..][0..sql_key_len], entry.custom_sql[0..sql_key_len]);
-            ck_pos += sql_key_len;
-            for (param_values[0..param_count]) |v| {
-                cache_key_buf[ck_pos] = ':';
-                ck_pos += 1;
-                const vlen = @min(v.len, 32);
-                @memcpy(cache_key_buf[ck_pos..][0..vlen], v[0..vlen]);
-                ck_pos += vlen;
-            }
-            const cache_key = cache_key_buf[0..ck_pos];
-
-            if (isDbCacheEnabled()) {
+            var cache_key: []const u8 = "";
+            if (cache_enabled) {
+                var ck_pos: usize = 0;
+                const prefix = "Q:";
+                @memcpy(cache_key_buf[ck_pos..][0..prefix.len], prefix);
+                ck_pos += prefix.len;
+                const sql_key_len = @min(entry.custom_sql.len, 64);
+                @memcpy(cache_key_buf[ck_pos..][0..sql_key_len], entry.custom_sql[0..sql_key_len]);
+                ck_pos += sql_key_len;
+                for (param_values[0..param_count]) |v| {
+                    cache_key_buf[ck_pos] = ':';
+                    ck_pos += 1;
+                    const vlen = @min(v.len, 32);
+                    @memcpy(cache_key_buf[ck_pos..][0..vlen], v[0..vlen]);
+                    ck_pos += vlen;
+                }
+                cache_key = cache_key_buf[0..ck_pos];
                 if (cacheGet(cache_key)) |cached_body| {
                     sendResponseFn(stream, 200, "application/json", cached_body);
                     return;
                 }
             }
 
-            const conn = acquireConn() orelse {
-                sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database connection unavailable\"}");
-                return;
-            };
-            defer releaseConn(conn);
-
-            const result_opt = execWithParams(conn, entry.custom_sql, param_values[0..param_count], entry.cache_name);
-            if (result_opt) |result| {
-                defer result.deinit();
-
-                if (entry.op == .custom_query_single) {
-                    // Single row
-                    if (result.next() catch null) |row| {
-                        var json_buf: [8192]u8 = undefined;
-                        const json = serializeRow(row, result.column_names, &json_buf) catch {
-                            sendResponseFn(stream, 500, "application/json", "{\"error\": \"Serialization failed\"}");
-                            return;
-                        };
-                        cachePut(cache_key, json, entry.table);
-                        sendResponseFn(stream, 200, "application/json", json);
-                    } else {
-                        sendResponseFn(stream, 404, "application/json", "{\"error\": \"Not found\"}");
+            if (entry.op == .custom_query_single) {
+                const pool = getPool() orelse {
+                    sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database connection unavailable\"}");
+                    return;
+                };
+                const opts = pg.Conn.QueryOpts{ .column_names = true, .cache_name = entry.cache_name };
+                const query_row = blk: {
+                    if (param_count == 0) {
+                        break :blk pool.rowOpts(entry.custom_sql, .{}, opts) catch null;
+                    } else if (param_count == 1) {
+                        if (param_ints[0]) |n| {
+                            break :blk pool.rowOpts(entry.custom_sql, .{n}, opts) catch null;
+                        }
+                        break :blk pool.rowOpts(entry.custom_sql, .{param_values[0]}, opts) catch null;
+                    } else if (param_count == 2) {
+                        if (param_ints[0]) |n0| {
+                            break :blk pool.rowOpts(entry.custom_sql, .{ n0, param_values[1] }, opts) catch null;
+                        }
+                        break :blk pool.rowOpts(entry.custom_sql, .{ param_values[0], param_values[1] }, opts) catch null;
                     }
+                    break :blk null;
+                };
+
+                if (query_row) |qr_value| {
+                    var qr = qr_value;
+                    defer qr.deinit() catch {};
+                    var json_buf: [8192]u8 = undefined;
+                    const json = serializeRow(qr.row, qr.result.column_names, &json_buf) catch {
+                        sendResponseFn(stream, 500, "application/json", "{\"error\": \"Serialization failed\"}");
+                        return;
+                    };
+                    if (cache_enabled and cache_key.len > 0) cachePut(cache_key, json, entry.table);
+                    sendResponseFn(stream, 200, "application/json", json);
                 } else {
+                    sendResponseFn(stream, 404, "application/json", "{\"error\": \"Not found\"}");
+                }
+            } else {
+                const conn = acquireConn() orelse {
+                    sendResponseFn(stream, 503, "application/json", "{\"error\": \"Database connection unavailable\"}");
+                    return;
+                };
+                defer releaseConn(conn);
+
+                const result_opt = execWithParams(conn, entry.custom_sql, param_values[0..param_count], entry.cache_name);
+                if (result_opt) |result| {
+                    defer result.deinit();
+
                     // Multi-row — JSON array
                     var out_buf = allocator.alloc(u8, 65536) catch {
                         sendResponseFn(stream, 500, "application/json", "{\"error\": \"Out of memory\"}");
@@ -660,11 +790,11 @@ pub fn handleDbRoute(
                     out_pos += 1;
 
                     const resp = out_buf[0..out_pos];
-                    cachePut(cache_key, resp, entry.table);
+                    if (cache_enabled and cache_key.len > 0) cachePut(cache_key, resp, entry.table);
                     sendResponseFn(stream, 200, "application/json", resp);
+                } else {
+                    sendResponseFn(stream, 500, "application/json", "{\"error\": \"Query failed\"}");
                 }
-            } else {
-                sendResponseFn(stream, 500, "application/json", "{\"error\": \"Query failed\"}");
             }
         },
     }
@@ -814,6 +944,11 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     }
 
     const columns_owned = allocator.dupe([]const u8, cols[0..ncols]) catch return null;
+    var json_key_parts_buf: [16][]const u8 = undefined;
+    for (cols[0..ncols], 0..) |col, i| {
+        json_key_parts_buf[i] = std.fmt.allocPrint(allocator, "\"{s}\":", .{col}) catch return null;
+    }
+    const json_key_parts_owned = allocator.dupe([]const u8, json_key_parts_buf[0..ncols]) catch return null;
     const pk_col = if (pk_col_s.len > 0) allocator.dupe(u8, pk_col_s) catch return null else null;
     const pk_param = if (pk_param_s.len > 0) allocator.dupe(u8, pk_param_s) catch return null else null;
     const table = allocator.dupe(u8, table_s) catch return null;
@@ -847,9 +982,10 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         .op = op,
         .table = table,
         .columns = columns_owned,
+        .json_key_parts = json_key_parts_owned,
         .pk_column = pk_col,
         .pk_param = pk_param,
-        .select_sql = if (pk_col) |pk| buildSelectOneSql(table, pk) else buildSelectListSql(table),
+        .select_sql = if (pk_col) |pk| buildSelectOneSql(table, pk, columns_owned) else buildSelectListSql(table, columns_owned),
         .insert_sql = if (ncols > 0 and op == .insert) buildInsertSql(table, columns_owned) else "",
         .delete_sql = if (pk_col) |pk| buildDeleteSql(table, pk) else "",
         .custom_sql = custom_sql,
@@ -1129,4 +1265,218 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     }
 
     return py_list;
+}
+
+// ── COPY FROM STDIN API (bulk insert from Python) ─────────────────────────────
+
+pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var table_ptr: [*c]const u8 = null;
+    var cols_obj: ?*c.PyObject = null;
+    var rows_obj: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "sOO", &table_ptr, &cols_obj, &rows_obj) == 0) return null;
+
+    // Copy table name to owned storage
+    const table_raw = std.mem.span(table_ptr);
+    var table_storage: [128]u8 = undefined;
+    const tlen = @min(table_raw.len, 127);
+    @memcpy(table_storage[0..tlen], table_raw[0..tlen]);
+    const table = table_storage[0..tlen];
+
+    if (db_pool == null) {
+        py.setError("Database not configured. Call configure_db() first.", .{});
+        return null;
+    }
+
+    const col_list = cols_obj orelse {
+        py.setError("columns must be a list", .{});
+        return null;
+    };
+    const row_list = rows_obj orelse {
+        py.setError("rows must be a list", .{});
+        return null;
+    };
+
+    if (c.PyList_Check(col_list) == 0 or c.PyList_Check(row_list) == 0) {
+        py.setError("columns and rows must be lists", .{});
+        return null;
+    }
+
+    const num_cols_i: isize = c.PyList_Size(col_list);
+    const num_rows_i: isize = c.PyList_Size(row_list);
+    if (num_cols_i <= 0 or num_rows_i <= 0) return c.PyLong_FromLongLong(0);
+    const num_cols: usize = @intCast(num_cols_i);
+    const num_rows: usize = @intCast(num_rows_i);
+    const cols_to_use = @min(num_cols, 32);
+    const max_rows = @min(num_rows, 10000);
+
+    // Column names (stack)
+    var col_storage: [32][64]u8 = undefined;
+    var col_slices: [32][]const u8 = undefined;
+    for (0..cols_to_use) |i| {
+        const item = c.PyList_GetItem(col_list, @intCast(i)) orelse continue;
+        const str_obj = c.PyObject_Str(item) orelse continue;
+        defer c.Py_DecRef(str_obj);
+        if (c.PyUnicode_AsUTF8(str_obj)) |cs| {
+            const s = std.mem.span(cs);
+            const copy_len = @min(s.len, 63);
+            @memcpy(col_storage[i][0..copy_len], s[0..copy_len]);
+            col_slices[i] = col_storage[i][0..copy_len];
+        }
+    }
+
+    // Check if all rows are the same Python object (common: [row] * N)
+    const first_row_obj = c.PyList_GetItem(row_list, 0);
+    var all_same = true;
+    for (1..@min(max_rows, 3)) |i| {
+        if (c.PyList_GetItem(row_list, @intCast(i)) != first_row_obj) {
+            all_same = false;
+            break;
+        }
+    }
+
+    if (all_same and first_row_obj != null) {
+        // Optimization: extract one row, repeat it for copyFrom
+        var one_row_storage: [32][256]u8 = undefined;
+        var one_row_slices: [32][]const u8 = undefined;
+
+        const row_obj = first_row_obj.?;
+        const row_len: usize = @intCast(c.PyObject_Length(row_obj));
+        for (0..@min(row_len, cols_to_use)) |ci| {
+            const item = if (c.PyTuple_Check(row_obj) != 0)
+                c.PyTuple_GetItem(row_obj, @intCast(ci))
+            else
+                c.PyList_GetItem(row_obj, @intCast(ci));
+            if (item) |it| {
+                const str_obj = c.PyObject_Str(it) orelse {
+                    one_row_slices[ci] = one_row_storage[ci][0..0];
+                    continue;
+                };
+                defer c.Py_DecRef(str_obj);
+                if (c.PyUnicode_AsUTF8(str_obj)) |cs| {
+                    const s = std.mem.span(cs);
+                    const copy_len = @min(s.len, 255);
+                    @memcpy(one_row_storage[ci][0..copy_len], s[0..copy_len]);
+                    one_row_slices[ci] = one_row_storage[ci][0..copy_len];
+                } else {
+                    one_row_slices[ci] = one_row_storage[ci][0..0];
+                }
+            } else {
+                one_row_slices[ci] = one_row_storage[ci][0..0];
+            }
+        }
+
+        // Build row_slices: all pointing to the same one_row_slices
+        const row_slices = allocator.alloc([]const []const u8, max_rows) catch {
+            py.setError("Out of memory for COPY row slices", .{});
+            return null;
+        };
+        defer allocator.free(row_slices);
+
+        // Each row_slices[i] must be a separate slice of []const u8
+        // But they can all point to the same underlying data
+        const cell_slices = allocator.alloc([]const u8, cols_to_use) catch {
+            py.setError("Out of memory for COPY cell slices", .{});
+            return null;
+        };
+        defer allocator.free(cell_slices);
+        for (0..cols_to_use) |ci| {
+            cell_slices[ci] = one_row_slices[ci];
+        }
+        for (0..max_rows) |ri| {
+            row_slices[ri] = cell_slices[0..cols_to_use];
+        }
+
+        // Release GIL, do COPY I/O
+        const gil_state = py_gil_save();
+        const conn = acquireConn() orelse {
+            py_gil_restore(gil_state);
+            py.setError("Failed to acquire database connection", .{});
+            return null;
+        };
+
+        const row_count = conn.copyFrom(table, col_slices[0..cols_to_use], row_slices[0..max_rows]) catch {
+            releaseConn(conn);
+            py_gil_restore(gil_state);
+            py.setError("COPY FROM failed for table: {s}", .{table});
+            return null;
+        };
+
+        releaseConn(conn);
+        py_gil_restore(gil_state);
+        return c.PyLong_FromLongLong(row_count);
+    }
+
+    // General case: different rows — extract all
+    const max_cells = max_rows * cols_to_use;
+    const val_storage = allocator.alloc([256]u8, max_cells) catch {
+        py.setError("Out of memory for COPY row buffer", .{});
+        return null;
+    };
+    defer allocator.free(val_storage);
+    const val_lens = allocator.alloc(usize, max_cells) catch {
+        py.setError("Out of memory for COPY len buffer", .{});
+        return null;
+    };
+    defer allocator.free(val_lens);
+
+    for (0..max_rows) |ri| {
+        const row_obj = c.PyList_GetItem(row_list, @intCast(ri)) orelse continue;
+        if (c.PyList_Check(row_obj) == 0 and c.PyTuple_Check(row_obj) == 0) continue;
+        const row_len: usize = @intCast(c.PyObject_Length(row_obj));
+        for (0..@min(row_len, cols_to_use)) |ci| {
+            const cell_idx = ri * cols_to_use + ci;
+            const item = if (c.PyTuple_Check(row_obj) != 0)
+                c.PyTuple_GetItem(row_obj, @intCast(ci))
+            else
+                c.PyList_GetItem(row_obj, @intCast(ci));
+            if (item == null) { val_lens[cell_idx] = 0; continue; }
+            const str_obj = c.PyObject_Str(item.?) orelse { val_lens[cell_idx] = 0; continue; };
+            defer c.Py_DecRef(str_obj);
+            if (c.PyUnicode_AsUTF8(str_obj)) |cs| {
+                const s = std.mem.span(cs);
+                const copy_len = @min(s.len, 255);
+                @memcpy(val_storage[cell_idx][0..copy_len], s[0..copy_len]);
+                val_lens[cell_idx] = copy_len;
+            } else {
+                val_lens[cell_idx] = 0;
+            }
+        }
+    }
+
+    const row_slices = allocator.alloc([]const []const u8, max_rows) catch {
+        py.setError("Out of memory for COPY row slices", .{});
+        return null;
+    };
+    defer allocator.free(row_slices);
+    const cell_slices = allocator.alloc([]const u8, max_cells) catch {
+        py.setError("Out of memory for COPY cell slices", .{});
+        return null;
+    };
+    defer allocator.free(cell_slices);
+
+    for (0..max_rows) |ri| {
+        for (0..cols_to_use) |ci| {
+            const cell_idx = ri * cols_to_use + ci;
+            cell_slices[cell_idx] = val_storage[cell_idx][0..val_lens[cell_idx]];
+        }
+        row_slices[ri] = cell_slices[ri * cols_to_use ..][0..cols_to_use];
+    }
+
+    const gil_state = py_gil_save();
+    const conn = acquireConn() orelse {
+        py_gil_restore(gil_state);
+        py.setError("Failed to acquire database connection", .{});
+        return null;
+    };
+
+    const row_count = conn.copyFrom(table, col_slices[0..cols_to_use], row_slices[0..max_rows]) catch {
+        releaseConn(conn);
+        py_gil_restore(gil_state);
+        py.setError("COPY FROM failed for table: {s}", .{table});
+        return null;
+    };
+
+    releaseConn(conn);
+    py_gil_restore(gil_state);
+    return c.PyLong_FromLongLong(row_count);
 }

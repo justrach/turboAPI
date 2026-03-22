@@ -1,9 +1,11 @@
-# MagicStack pgbench Preliminary Results -- Native Driver Comparison
+# MagicStack pgbench Preliminary Results -- Driver-Only Native Postgres Comparison
 
 **Date:** 2026-03-22
 **Setup:** Postgres 18, Docker, aarch64 (M3 Pro), concurrency=10, 30s per test
-**Method:** Each driver uses its native path (no HTTP). No result caching. Direct binary decode.
+**Method:** Each driver uses its native path only, with no HTTP server involved. No result caching. Direct binary decode.
 **Validation:** Primary results below are 3-run medians from clean reruns using `python3 benchmarks/pgbench/validate_runs.py --runs 3 --skip-build`. Raw logs and `summary.json` were written to `benchmarks/pgbench/artifacts/`. `COPY FROM` for `asyncpg` remains unverified on this host because all 3 validation runs reproduced a Docker/Postgres `DiskFullError`.
+
+This file is intentionally driver-only. If you want end-to-end web stack numbers, use `benchmarks/postgres/BENCHMARKS.md` instead.
 
 ## Replicated Results — 3-Run Medians
 
@@ -19,7 +21,7 @@
 | COPY FROM (10k rows/op) | FAILED in 3/3 runs (`DiskFullError`) | 116 q/s (86.276ms) | **375 q/s (26.646ms)** | unverified on this host |
 | batch INSERT (1k rows) | 1,064 q/s (9.391ms) | 33 q/s (303.807ms) | **30,668 q/s (0.324ms)** | **28.8x** |
 
-**Current evidence:** across 3 clean reruns, turbopg wins 6/6 queries it completed against asyncpg. `COPY FROM` remains inconclusive versus `asyncpg` on this machine because `asyncpg` failed in all 3 validation runs with `DiskFullError`. Against `psycopg3-async`, turbopg also wins `COPY FROM` (`375 q/s` vs `116 q/s`, `3.23x`).
+**Current evidence:** across 3 clean reruns, turbopg wins 6/6 driver-only queries it completed against asyncpg. `COPY FROM` remains inconclusive versus `asyncpg` on this machine because `asyncpg` failed in all 3 validation runs with `DiskFullError`. Against `psycopg3-async`, turbopg also wins `COPY FROM` (`375 q/s` vs `116 q/s`, `3.23x`).
 
 ### Validation summary
 

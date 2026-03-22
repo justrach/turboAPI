@@ -1,4 +1,4 @@
-# Benchmark runner: Python 3.14t + Zig + wrk + asyncpg
+# Benchmark runner: Python 3.14t + Zig + wrk + web/db clients
 FROM python:3.14-bookworm AS builder
 
 # Install Zig
@@ -34,7 +34,8 @@ COPY . .
 RUN python3 zig/build_turbonet.py --install --release
 
 # Install deps
-RUN pip3 install --no-cache-dir -e . && pip3 install --no-cache-dir asyncpg requests
+RUN pip3 install --no-cache-dir -e . && \
+    pip3 install --no-cache-dir asyncpg fastapi uvicorn sqlalchemy psycopg2-binary requests
 
 COPY benchmarks/postgres/bench.py /app/bench.py
 COPY benchmarks/postgres/varying_ids.lua /app/varying_ids.lua
