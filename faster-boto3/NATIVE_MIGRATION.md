@@ -251,6 +251,49 @@ Load: `wrk -t8 -c200 -d5s`
 - These are still LocalStack numbers. They are useful for relative comparisons
   inside this repo, but not a substitute for real AWS measurements.
 
+## Native FFI Route Spike
+
+To test what happens when the S3 route hot path moves out of Python entirely,
+the benchmark harness now also supports a `native-ffi` mode. In that mode,
+TurboAPI serves the S3 endpoints from a Zig FFI handler library instead of a
+Python route function.
+
+This is a spike, not a parity-complete backend. It currently focuses on the
+fully native `GET` and `ListObjectsV2` path. `HeadObject` is intentionally
+excluded from the FFI throughput table because the LocalStack `HEAD` lane is
+still unstable in this route-level experiment.
+
+Command:
+
+```bash
+PYTHON_GIL=0 \
+python benchmarks/turbo_vs_fast_s3.py \
+  --duration 3 \
+  --threads 8 \
+  --connections 200 \
+  --turbo-mode native-ffi
+```
+
+Load: `wrk -t8 -c200 -d3s`
+
+| Operation | Turbo RPS | Fast RPS | Speedup | Turbo p99 |
+|---|---:|---:|---:|---:|
+| `S3 GetObject (1KB)` | 5707 | 1213 | 4.71x | 9.5 ms |
+| `S3 GetObject (10KB)` | 5545 | 1200 | 4.62x | 9.6 ms |
+| `S3 ListObjects (20)` | 5285 | 772 | 6.84x | 9.9 ms |
+
+### Notes
+
+- The first native-ffi run looked artificially terrible because the handler
+  still had per-request debug logging enabled. Once the hot-path logging was
+  removed, the benchmark reflected the actual route execution cost.
+- These numbers are materially higher than the `TurboAPI + faster-boto3`
+  Python-route benchmark because this spike bypasses Python route dispatch and
+  Python-side response shaping entirely.
+- The FFI handler still creates a fresh Zig HTTP client per request. That means
+  there is still meaningful headroom left if this path graduates from spike to
+  a real runtime backend.
+
 ## What Gets Checked
 
 For each migrated operation, store:

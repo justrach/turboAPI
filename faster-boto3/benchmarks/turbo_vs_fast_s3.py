@@ -35,6 +35,8 @@ FAST_PORT = 9200
 WRK_THREADS = 4
 WRK_CONNECTIONS = 50
 WRK_DURATION = 5
+HERE = os.path.dirname(os.path.abspath(__file__))
+NATIVE_HANDLER_LIB = os.path.join(HERE, "libnative_s3_handler.dylib")
 
 
 # ── Server apps (written to temp files, run as subprocesses) ─────────────────
@@ -69,6 +71,19 @@ def s3_list():
     resp = s3.list_objects_v2(Bucket='{BUCKET}', MaxKeys=20)
     return {{"count": resp.get("KeyCount", 0)}}
 
+app.run(host="127.0.0.1", port={TURBO_PORT})
+"""
+
+TURBO_NATIVE_FFI_APP = f"""
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from turboapi import TurboAPI
+
+app = TurboAPI(title="TurboNativeFFIBench")
+app.static_route("GET", "/health", '{{"status":"ok"}}')
+app.native_route("GET", "/s3/get/{{key}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_get")
+app.native_route("GET", "/s3/head/{{key}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_head")
+app.native_route("GET", "/s3/list", r"{NATIVE_HANDLER_LIB}", "handle_s3_list")
 app.run(host="127.0.0.1", port={TURBO_PORT})
 """
 
@@ -188,6 +203,10 @@ def start_server(code, name):
         env=env,
     )
     return proc, f.name
+
+
+def build_native_handler():
+    subprocess.run([sys.executable, os.path.join(HERE, "build_native_s3_handler.py")], check=True)
 def wait_for_server(port, timeout=15):
     """Wait for server to be ready."""
     import urllib.request
@@ -236,6 +255,7 @@ def main():
     parser.add_argument("--duration", type=int, default=WRK_DURATION)
     parser.add_argument("--threads", type=int, default=WRK_THREADS)
     parser.add_argument("--connections", type=int, default=WRK_CONNECTIONS)
+    parser.add_argument("--turbo-mode", choices=("python", "native-ffi"), default="python")
     args = parser.parse_args()
 
     # Check LocalStack
@@ -248,8 +268,12 @@ def main():
 
     setup_s3()
 
+    if args.turbo_mode == "native-ffi":
+        build_native_handler()
+
     # Start servers
-    turbo_proc, turbo_file = start_server(TURBO_APP, "turbo")
+    turbo_code = TURBO_NATIVE_FFI_APP if args.turbo_mode == "native-ffi" else TURBO_APP
+    turbo_proc, turbo_file = start_server(turbo_code, "turbo")
     fast_proc, fast_file = start_server(FAST_APP, "fast")
 
     try:
@@ -270,6 +294,11 @@ def main():
             ("S3 HeadObject", "/s3/head/bench-1k"),
             ("S3 ListObjects (20)", "/s3/list"),
         ]
+        if args.turbo_mode == "native-ffi":
+            # The FFI spike is meant to test the fully native GET/list hot path.
+            # HEAD is still unstable against LocalStack on this route and would
+            # just dominate the benchmark with a known transport-specific miss.
+            tests = [item for item in tests if item[0] != "S3 HeadObject"]
 
         results = []
         for name, path in tests:
@@ -300,7 +329,8 @@ def main():
         else:
             print()
             print(f"  Load: wrk -t{args.threads} -c{args.connections} -d{args.duration}s")
-            print("  TurboAPI + faster-boto3  vs  FastAPI + boto3")
+            turbo_label = "TurboAPI + native FFI S3" if args.turbo_mode == "native-ffi" else "TurboAPI + faster-boto3"
+            print(f"  {turbo_label}  vs  FastAPI + boto3")
             print("  " + "═" * 66)
             fmt = "  {:<25} {:>10} {:>10} {:>8} {:>8}"
             print(fmt.format("Operation", "Turbo RPS", "Fast RPS", "Speedup", "p99 lat"))
