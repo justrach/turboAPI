@@ -70,6 +70,45 @@ def test_native_put_and_list(native_s3):
     assert listing["KeyCount"] == 5
 
 
+def test_native_delete_existing_and_missing(native_s3):
+    native_s3.put_object(Bucket=BUCKET, Key="delete-me", Body=b"bye")
+    resp = native_s3.delete_object(Bucket=BUCKET, Key="delete-me")
+    assert resp["ResponseMetadata"]["HTTPStatusCode"] == 204
+
+    resp = native_s3.delete_object(Bucket=BUCKET, Key="never-existed")
+    assert resp["ResponseMetadata"]["HTTPStatusCode"] == 204
+
+
+def test_native_copy_object(native_s3):
+    native_s3.put_object(Bucket=BUCKET, Key="copy-src", Body=b"copy-data")
+    resp = native_s3.copy_object(
+        Bucket=BUCKET,
+        Key="copy-dst",
+        CopySource={"Bucket": BUCKET, "Key": "copy-src"},
+    )
+    assert resp["CopyObjectResult"]["ETag"]
+    copied = native_s3.get_object(Bucket=BUCKET, Key="copy-dst")["Body"].read()
+    assert copied == b"copy-data"
+
+
+def test_native_missing_key_errors(native_s3):
+    import botocore.exceptions
+
+    with pytest.raises(botocore.exceptions.ClientError) as exc:
+        native_s3.get_object(Bucket=BUCKET, Key="does-not-exist")
+    assert exc.value.response["Error"]["Code"] == "NoSuchKey"
+    assert exc.value.response["Error"]["Key"] == "does-not-exist"
+
+    with pytest.raises(botocore.exceptions.ClientError) as exc:
+        native_s3.copy_object(
+            Bucket=BUCKET,
+            Key="copy-missing",
+            CopySource={"Bucket": BUCKET, "Key": "does-not-exist"},
+        )
+    assert exc.value.response["Error"]["Code"] == "NoSuchKey"
+    assert exc.value.response["Error"]["Key"] == "does-not-exist"
+
+
 def test_native_file_upload_uses_fd_path(native_s3):
     import faster_boto3.native_s3 as native_mod
 

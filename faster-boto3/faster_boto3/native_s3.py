@@ -8,6 +8,7 @@ import email.utils
 import hashlib
 import importlib
 import io
+import logging
 import os
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -15,6 +16,8 @@ import zlib
 
 from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
+
+logger = logging.getLogger("faster_boto3.native_s3")
 
 
 def _http_accel_module():
@@ -78,6 +81,7 @@ class NativeS3Client:
         access_key: str,
         secret_key: str,
         session_token: str | None,
+        mode: str,
     ):
         self._fallback = fallback
         self._endpoint_url = endpoint_url.rstrip("/")
@@ -85,10 +89,11 @@ class NativeS3Client:
         self._access_key = access_key
         self._secret_key = secret_key
         self._session_token = session_token
+        self._mode = mode
         self.meta = fallback.meta
 
     @classmethod
-    def from_botocore_client(cls, fallback):
+    def from_botocore_client(cls, fallback, *, mode: str):
         creds = fallback._request_signer._credentials.get_frozen_credentials()
         return cls(
             fallback=fallback,
@@ -97,11 +102,105 @@ class NativeS3Client:
             access_key=creds.access_key,
             secret_key=creds.secret_key,
             session_token=creds.token,
+            mode=mode,
         )
 
     def head_object(self, *, Bucket, Key, **kwargs):
         if kwargs:
             return self._fallback.head_object(Bucket=Bucket, Key=Key, **kwargs)
+        def native():
+            return self._native_head_object(Bucket=Bucket, Key=Key)
+        def fallback():
+            return self._fallback.head_object(Bucket=Bucket, Key=Key)
+        return self._run_mode("head_object", native, fallback)
+
+    def get_object(self, *, Bucket, Key, **kwargs):
+        if kwargs:
+            return self._fallback.get_object(Bucket=Bucket, Key=Key, **kwargs)
+        def native():
+            return self._native_get_object(Bucket=Bucket, Key=Key)
+        def fallback():
+            return self._fallback.get_object(Bucket=Bucket, Key=Key)
+        return self._run_mode("get_object", native, fallback)
+
+    def put_object(self, *, Bucket, Key, Body=b"", Metadata=None, **kwargs):
+        if kwargs:
+            return self._fallback.put_object(Bucket=Bucket, Key=Key, Body=Body, Metadata=Metadata, **kwargs)
+        def native():
+            return self._native_put_object(Bucket=Bucket, Key=Key, Body=Body, Metadata=Metadata)
+        def fallback():
+            fallback_kwargs = {
+                "Bucket": Bucket,
+                "Key": Key,
+                "Body": Body,
+            }
+            if Metadata is not None:
+                fallback_kwargs["Metadata"] = Metadata
+            return self._fallback.put_object(**fallback_kwargs)
+        return self._run_mode("put_object", native, fallback)
+
+    def list_objects_v2(self, *, Bucket, Prefix=None, MaxKeys=None, **kwargs):
+        if kwargs:
+            return self._fallback.list_objects_v2(Bucket=Bucket, Prefix=Prefix, MaxKeys=MaxKeys, **kwargs)
+        def native():
+            return self._native_list_objects_v2(Bucket=Bucket, Prefix=Prefix, MaxKeys=MaxKeys)
+        def fallback():
+            fallback_kwargs = {"Bucket": Bucket}
+            if Prefix is not None:
+                fallback_kwargs["Prefix"] = Prefix
+            if MaxKeys is not None:
+                fallback_kwargs["MaxKeys"] = MaxKeys
+            return self._fallback.list_objects_v2(**fallback_kwargs)
+        return self._run_mode("list_objects_v2", native, fallback)
+
+    def delete_object(self, *, Bucket, Key, **kwargs):
+        if kwargs:
+            return self._fallback.delete_object(Bucket=Bucket, Key=Key, **kwargs)
+        def native():
+            return self._native_delete_object(Bucket=Bucket, Key=Key)
+        def fallback():
+            return self._fallback.delete_object(Bucket=Bucket, Key=Key)
+        return self._run_mode("delete_object", native, fallback)
+
+    def copy_object(self, *, Bucket, Key, CopySource, **kwargs):
+        if kwargs:
+            return self._fallback.copy_object(Bucket=Bucket, Key=Key, CopySource=CopySource, **kwargs)
+        def native():
+            return self._native_copy_object(Bucket=Bucket, Key=Key, CopySource=CopySource)
+        def fallback():
+            return self._fallback.copy_object(Bucket=Bucket, Key=Key, CopySource=CopySource)
+        return self._run_mode("copy_object", native, fallback)
+
+    def _run_mode(self, operation_name: str, native_call, fallback_call):
+        if self._mode == "native":
+            return native_call()
+        if self._mode == "native_shadow":
+            native_result = native_exc = None
+            fallback_result = fallback_exc = None
+            try:
+                native_result = native_call()
+            except Exception as exc:  # pragma: no cover
+                native_exc = exc
+            try:
+                fallback_result = fallback_call()
+            except Exception as exc:
+                fallback_exc = exc
+            self._log_shadow_result(operation_name, native_result, native_exc, fallback_result, fallback_exc)
+            if fallback_exc is not None:
+                raise fallback_exc
+            return fallback_result
+        return fallback_call()
+
+    def _log_shadow_result(self, operation_name, native_result, native_exc, fallback_result, fallback_exc):
+        if type(native_exc) is not type(fallback_exc):
+            logger.warning("native_shadow mismatch for %s: native_exc=%r fallback_exc=%r", operation_name, native_exc, fallback_exc)
+            return
+        if native_exc is not None:
+            return
+        if not _results_equal(operation_name, native_result, fallback_result):
+            logger.warning("native_shadow mismatch for %s", operation_name)
+
+    def _native_head_object(self, *, Bucket, Key):
         path, query, url = self._build_url(Bucket, Key)
         payload_hash = _sigv4_accel_module().sha256_hex(b"")
         headers = self._signed_headers("HEAD", path, query, payload_hash, body=None)
@@ -112,9 +211,7 @@ class NativeS3Client:
         out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
         return out
 
-    def get_object(self, *, Bucket, Key, **kwargs):
-        if kwargs:
-            return self._fallback.get_object(Bucket=Bucket, Key=Key, **kwargs)
+    def _native_get_object(self, *, Bucket, Key):
         path, query, url = self._build_url(Bucket, Key)
         payload_hash = _sigv4_accel_module().sha256_hex(b"")
         headers = self._signed_headers("GET", path, query, payload_hash, body=None)
@@ -126,9 +223,7 @@ class NativeS3Client:
         out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
         return out
 
-    def put_object(self, *, Bucket, Key, Body=b"", Metadata=None, **kwargs):
-        if kwargs:
-            return self._fallback.put_object(Bucket=Bucket, Key=Key, Body=Body, Metadata=Metadata, **kwargs)
+    def _native_put_object(self, *, Bucket, Key, Body=b"", Metadata=None):
         path, query, url = self._build_url(Bucket, Key)
         body_bytes, fd_request = self._prepare_body(Body)
         payload_hash = _sigv4_accel_module().sha256_hex(body_bytes)
@@ -137,26 +232,12 @@ class NativeS3Client:
         if Metadata:
             for key, value in Metadata.items():
                 extra_headers.append((f"x-amz-meta-{key}", str(value)))
-        extra_headers.extend(
-            [
-                ("x-amz-checksum-crc32", checksum_crc32),
-                ("x-amz-sdk-checksum-algorithm", "CRC32"),
-            ]
-        )
-        headers = self._signed_headers(
-            "PUT",
-            path,
-            query,
-            payload_hash,
-            body=body_bytes,
-            extra_headers=extra_headers,
-        )
-
+        extra_headers.extend([("x-amz-checksum-crc32", checksum_crc32), ("x-amz-sdk-checksum-algorithm", "CRC32")])
+        headers = self._signed_headers("PUT", path, query, payload_hash, body=body_bytes, extra_headers=extra_headers)
         if fd_request is not None:
             status, resp_headers, resp_body = _http_accel_module().request_fd("PUT", url, headers, *fd_request)
         else:
             status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, body_bytes)
-
         parsed_headers = _parse_headers(resp_headers)
         self._raise_for_error("PutObject", status, parsed_headers, resp_body)
         out = {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
@@ -164,9 +245,7 @@ class NativeS3Client:
             out["ETag"] = parsed_headers["etag"]
         return out
 
-    def list_objects_v2(self, *, Bucket, Prefix=None, MaxKeys=None, **kwargs):
-        if kwargs:
-            return self._fallback.list_objects_v2(Bucket=Bucket, Prefix=Prefix, MaxKeys=MaxKeys, **kwargs)
+    def _native_list_objects_v2(self, *, Bucket, Prefix=None, MaxKeys=None):
         params = {"list-type": 2}
         if Prefix is not None:
             params["prefix"] = Prefix
@@ -181,6 +260,29 @@ class NativeS3Client:
         parsed = self._parse_list_objects(resp_body)
         parsed["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
         return parsed
+
+    def _native_delete_object(self, *, Bucket, Key):
+        path, query, url = self._build_url(Bucket, Key)
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("DELETE", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("DELETE", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("DeleteObject", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
+    def _native_copy_object(self, *, Bucket, Key, CopySource):
+        path, query, url = self._build_url(Bucket, Key)
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        extra_headers = [("x-amz-copy-source", self._format_copy_source(CopySource))]
+        headers = self._signed_headers("PUT", path, query, payload_hash, body=None, extra_headers=extra_headers)
+        status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("CopyObject", status, parsed_headers, resp_body)
+        out = self._parse_copy_object(resp_body)
+        if "x-amz-server-side-encryption" in parsed_headers:
+            out["ServerSideEncryption"] = parsed_headers["x-amz-server-side-encryption"]
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
 
     def _prepare_body(self, body):
         if body is None:
@@ -230,6 +332,13 @@ class NativeS3Client:
         query = _encode_query(params or {})
         url = urllib.parse.urlunsplit((base_parts.scheme, base_parts.netloc, path, query, ""))
         return path, query, url
+
+    def _format_copy_source(self, copy_source):
+        if isinstance(copy_source, str):
+            return copy_source.lstrip("/")
+        bucket = copy_source["Bucket"]
+        key = copy_source["Key"]
+        return f"{bucket}/{_escape_key(key)}"
 
     def _signed_headers(
         self,
@@ -341,6 +450,23 @@ class NativeS3Client:
         out.setdefault("KeyCount", len(out["Contents"]))
         return out
 
+    def _parse_copy_object(self, body: bytes):
+        if not body:
+            return {}
+        root = ET.fromstring(body)
+        result = {}
+        copy_result = {}
+        for child in root:
+            tag = _strip_ns(child.tag)
+            if tag == "ETag" and child.text is not None:
+                copy_result["ETag"] = child.text
+            elif tag == "LastModified" and child.text:
+                copy_result["LastModified"] = datetime.datetime.fromisoformat(child.text.replace("Z", "+00:00"))
+            elif tag.startswith("Checksum") and child.text is not None:
+                copy_result[tag] = child.text
+        result["CopyObjectResult"] = copy_result
+        return result
+
     def _response_metadata(self, status, headers):
         return {
             "HTTPStatusCode": status,
@@ -351,8 +477,7 @@ class NativeS3Client:
     def _raise_for_error(self, operation_name, status, headers, body: bytes):
         if status < 300:
             return
-        code = str(status)
-        message = body.decode("utf-8", "replace")
+        error = {"Code": str(status), "Message": body.decode("utf-8", "replace")}
         if body:
             try:
                 root = ET.fromstring(body)
@@ -362,12 +487,12 @@ class NativeS3Client:
                 for child in root:
                     tag = _strip_ns(child.tag)
                     if tag == "Code" and child.text:
-                        code = child.text
-                    elif tag == "Message" and child.text:
-                        message = child.text
+                        error["Code"] = child.text
+                    elif child.text is not None:
+                        error[tag] = child.text
         raise ClientError(
             {
-                "Error": {"Code": code, "Message": message},
+                "Error": error,
                 "ResponseMetadata": self._response_metadata(status, headers),
             },
             operation_name,
@@ -380,3 +505,21 @@ class NativeS3Client:
 def _base64_crc32(data: bytes) -> str:
     crc = zlib.crc32(data) & 0xFFFFFFFF
     return base64.b64encode(crc.to_bytes(4, "big")).decode("ascii")
+
+
+def _results_equal(operation_name: str, native_result, fallback_result) -> bool:
+    if operation_name == "get_object":
+        native_body = native_result["Body"].read()
+        fallback_body = fallback_result["Body"].read()
+        return (
+            native_body == fallback_body
+            and native_result.get("ContentLength") == fallback_result.get("ContentLength")
+            and native_result.get("ETag") == fallback_result.get("ETag")
+        )
+    if operation_name == "list_objects_v2":
+        native_keys = [item.get("Key") for item in native_result.get("Contents", [])]
+        fallback_keys = [item.get("Key") for item in fallback_result.get("Contents", [])]
+        return native_keys == fallback_keys and native_result.get("KeyCount") == fallback_result.get("KeyCount")
+    if operation_name in {"head_object", "put_object", "delete_object", "copy_object"}:
+        return native_result == fallback_result or native_result.get("ResponseMetadata", {}).get("HTTPStatusCode") == fallback_result.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return True
