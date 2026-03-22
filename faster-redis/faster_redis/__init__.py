@@ -22,3 +22,4 @@ Usage:
 __version__ = "0.1.0"
 
 from ._client import Redis, Pipeline
+from ._shadow import NativeShadowMismatch, ShadowRedis, native_compare, native_shadow
