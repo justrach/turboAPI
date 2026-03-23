@@ -66,17 +66,21 @@ class ClientFallbackTests(unittest.TestCase):
 
     def test_pooled_redis_supports_parallel_checkouts(self):
         pool = PooledRedis(size=2)
-        seen = set()
+        seen = []
         try:
-            with pool.connection() as c1:
-                with pool.connection() as c2:
-                    seen.add(c1.client_id())
-                    seen.add(c2.client_id())
-                    self.assertIs(c1.ping(), True)
-                    self.assertIs(c2.ping(), True)
+            def worker():
+                with pool.connection() as client:
+                    seen.append(client.client_id())
+                    self.assertIs(client.ping(), True)
+
+            threads = [threading.Thread(target=worker) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
         finally:
             pool.close()
-        self.assertEqual(len(seen), 2)
+        self.assertEqual(len(set(seen)), 2)
 
     def test_pipeline_multiword_command_mapping(self):
         with self.faster.pipeline() as pipe:

@@ -12,8 +12,10 @@ from faster_redis._redis_accel import (
     connect_pool as _connect_pool,
     execute as _execute,
     execute_pooled as _execute_pooled,
+    execute_pooled_slot as _execute_pooled_slot,
     execute_pipeline as _execute_pipeline,
     execute_pipeline_pooled as _execute_pipeline_pooled,
+    execute_pipeline_pooled_slot as _execute_pipeline_pooled_slot,
 )
 
 
@@ -587,6 +589,9 @@ class PooledRedis(Redis):
         self._decode = decode_responses
         self._size = size
         self._pool = _connect_pool(host, port, size)
+        self._local = threading.local()
+        self._slot_lock = threading.Lock()
+        self._next_slot = 0
         if password:
             for _ in range(size):
                 self._exec('AUTH', password)
@@ -600,10 +605,25 @@ class PooledRedis(Redis):
         yield self
 
     def _execute_raw(self, args):
-        return _execute_pooled(self._pool, args)
+        slot = self._slot()
+        if slot is None:
+            return _execute_pooled(self._pool, args)
+        return _execute_pooled_slot(self._pool, slot, args)
 
     def _execute_pipeline_raw(self, cmd_lists):
-        return _execute_pipeline_pooled(self._pool, cmd_lists)
+        slot = self._slot()
+        if slot is None:
+            return _execute_pipeline_pooled(self._pool, cmd_lists)
+        return _execute_pipeline_pooled_slot(self._pool, slot, cmd_lists)
+
+    def _slot(self):
+        slot = getattr(self._local, 'slot', None)
+        if slot is None:
+            with self._slot_lock:
+                slot = self._next_slot % self._size
+                self._next_slot += 1
+            self._local.slot = slot
+        return slot
 
     def _exec(self, *args):
         result = self._dec(self._execute_raw([_coerce_command_arg(a) for a in args]))

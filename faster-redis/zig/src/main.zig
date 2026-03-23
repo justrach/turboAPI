@@ -92,6 +92,10 @@ fn selectPoolConnection(pool: *PoolState) *ConnectionState {
     return &pool.connections[idx % pool.connections.len];
 }
 
+fn selectPoolConnectionForSlot(pool: *PoolState, slot: usize) *ConnectionState {
+    return &pool.connections[slot % pool.connections.len];
+}
+
 fn initConnection(state: *ConnectionState, host: []const u8, port: u16) !void {
     state.* = .{
         .host = try std.heap.c_allocator.dupe(u8, host),
@@ -335,6 +339,53 @@ fn py_execute_pooled(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObj
     return respToPy(val);
 }
 
+fn py_execute_pooled_slot(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var pool_obj: ?*c.PyObject = null;
+    var slot_value: c.Py_ssize_t = 0;
+    var list_obj: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "OnO", &pool_obj, &slot_value, &list_obj) == 0) return null;
+
+    const pool = poolFromCapsule(pool_obj) orelse return null;
+    const state = selectPoolConnectionForSlot(pool, @intCast(slot_value));
+    const py_list = list_obj orelse return null;
+    const n: usize = @intCast(c.PyList_Size(py_list));
+    if (n == 0) return c.Py_BuildValue("");
+    const allocator = std.heap.c_allocator;
+
+    const cmd_args = allocator.alloc([]const u8, n) catch return null;
+    defer allocator.free(cmd_args);
+    for (0..n) |i| {
+        const item = c.PyList_GetItem(py_list, @intCast(i)) orelse return null;
+        cmd_args[i] = pyArgSlice(item) orelse return null;
+    }
+
+    state.lock.lock();
+    defer state.lock.unlock();
+
+    ensureConnected(state) catch {
+        c.PyErr_SetString(c.PyExc_ConnectionError, "failed to connect");
+        return null;
+    };
+
+    const cmd_buf = resp.packCommandInto(allocator, &state.write_buf, cmd_args) catch {
+        c.PyErr_SetString(c.PyExc_MemoryError, "pack failed");
+        return null;
+    };
+
+    zigSend(state, cmd_buf) catch {
+        c.PyErr_SetString(c.PyExc_ConnectionError, "send failed");
+        return null;
+    };
+
+    const val = zigRecvResponse(state, allocator) catch {
+        c.PyErr_SetString(c.PyExc_ConnectionError, "recv/parse failed");
+        return null;
+    };
+    defer freeRespValue(allocator, val);
+
+    return respToPy(val);
+}
+
 fn py_execute_pipeline(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var capsule_obj: ?*c.PyObject = null;
     var list_obj: ?*c.PyObject = null;
@@ -402,6 +453,68 @@ fn py_execute_pipeline_pooled(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) 
 
     const pool = poolFromCapsule(pool_obj) orelse return null;
     const state = selectPoolConnection(pool);
+    const py_list = list_obj orelse return null;
+    const num_cmds: usize = @intCast(c.PyList_Size(py_list));
+    const allocator = std.heap.c_allocator;
+
+    const cmd_lists = allocator.alloc([]const []const u8, num_cmds) catch return null;
+    defer allocator.free(cmd_lists);
+    for (0..num_cmds) |ci| {
+        const cmd_list = c.PyList_GetItem(py_list, @intCast(ci)) orelse return null;
+        const nargs: usize = @intCast(c.PyList_Size(cmd_list));
+        const cmd_args = allocator.alloc([]const u8, nargs) catch return null;
+        errdefer allocator.free(cmd_args);
+        for (0..nargs) |i| {
+            const item = c.PyList_GetItem(cmd_list, @intCast(i)) orelse return null;
+            cmd_args[i] = pyArgSlice(item) orelse return null;
+        }
+        cmd_lists[ci] = cmd_args;
+    }
+    defer {
+        for (cmd_lists) |cmd_args| {
+            allocator.free(cmd_args);
+        }
+    }
+
+    state.lock.lock();
+    defer state.lock.unlock();
+
+    ensureConnected(state) catch {
+        c.PyErr_SetString(c.PyExc_ConnectionError, "failed to connect");
+        return null;
+    };
+
+    const pipeline_buf = resp.packPipelineInto(allocator, &state.write_buf, cmd_lists) catch {
+        c.PyErr_SetString(c.PyExc_MemoryError, "pipeline pack failed");
+        return null;
+    };
+
+    zigSend(state, pipeline_buf) catch {
+        c.PyErr_SetString(c.PyExc_ConnectionError, "pipeline send failed");
+        return null;
+    };
+
+    const py_result = c.PyList_New(@intCast(num_cmds)) orelse return null;
+    for (0..num_cmds) |i| {
+        const val = zigRecvResponse(state, allocator) catch {
+            c.PyErr_SetString(c.PyExc_ConnectionError, "pipeline recv failed");
+            return null;
+        };
+        defer freeRespValue(allocator, val);
+        const py_val = respToPy(val) orelse return null;
+        _ = c.PyList_SetItem(py_result, @intCast(i), py_val);
+    }
+    return py_result;
+}
+
+fn py_execute_pipeline_pooled_slot(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var pool_obj: ?*c.PyObject = null;
+    var slot_value: c.Py_ssize_t = 0;
+    var list_obj: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "OnO", &pool_obj, &slot_value, &list_obj) == 0) return null;
+
+    const pool = poolFromCapsule(pool_obj) orelse return null;
+    const state = selectPoolConnectionForSlot(pool, @intCast(slot_value));
     const py_list = list_obj orelse return null;
     const num_cmds: usize = @intCast(c.PyList_Size(py_list));
     const allocator = std.heap.c_allocator;
@@ -532,8 +645,10 @@ var methods = [_]c.PyMethodDef{
     .{ .ml_name = "connect_pool", .ml_meth = @ptrCast(&py_connect_pool), .ml_flags = c.METH_VARARGS, .ml_doc = "Connect to Redis and return a native pool handle" },
     .{ .ml_name = "execute", .ml_meth = @ptrCast(&py_execute), .ml_flags = c.METH_VARARGS, .ml_doc = "Execute command on a native handle" },
     .{ .ml_name = "execute_pooled", .ml_meth = @ptrCast(&py_execute_pooled), .ml_flags = c.METH_VARARGS, .ml_doc = "Execute command on a native pool handle" },
+    .{ .ml_name = "execute_pooled_slot", .ml_meth = @ptrCast(&py_execute_pooled_slot), .ml_flags = c.METH_VARARGS, .ml_doc = "Execute command on a specific native pool slot" },
     .{ .ml_name = "execute_pipeline", .ml_meth = @ptrCast(&py_execute_pipeline), .ml_flags = c.METH_VARARGS, .ml_doc = "Pipeline execute on a native handle" },
     .{ .ml_name = "execute_pipeline_pooled", .ml_meth = @ptrCast(&py_execute_pipeline_pooled), .ml_flags = c.METH_VARARGS, .ml_doc = "Pipeline execute on a native pool handle" },
+    .{ .ml_name = "execute_pipeline_pooled_slot", .ml_meth = @ptrCast(&py_execute_pipeline_pooled_slot), .ml_flags = c.METH_VARARGS, .ml_doc = "Pipeline execute on a specific native pool slot" },
     .{ .ml_name = "close", .ml_meth = @ptrCast(&py_close), .ml_flags = c.METH_VARARGS, .ml_doc = "Close a native handle connection" },
     .{ .ml_name = "close_pool", .ml_meth = @ptrCast(&py_close_pool), .ml_flags = c.METH_VARARGS, .ml_doc = "Close a native pool handle" },
     .{ .ml_name = "parse_resp", .ml_meth = @ptrCast(&py_parse_resp), .ml_flags = c.METH_VARARGS, .ml_doc = "Parse RESP bytes" },
