@@ -8,6 +8,19 @@
 
 This file is intentionally driver-only. If you want end-to-end web stack numbers, use `benchmarks/postgres/BENCHMARKS.md` instead.
 
+For reference, the separate end-to-end HTTP + DB benchmark on this branch
+currently reports the following local 3-run medians:
+
+| Route | TurboAPI + pg.zig | FastAPI + asyncpg | FastAPI + SQLAlchemy |
+|---|---|---|---|
+| GET /health | **266,351/s** | 9,161/s | 5,010/s |
+| GET /users/{id} varying 1000 IDs | **80,791/s** | 5,203/s | 1,983/s |
+| GET /users?age_min=20 | **71,650/s** | 3,162/s | 1,427/s |
+| GET /search?q=user_42% | **13,245/s** | 3,915/s | 1,742/s |
+
+Those numbers come from `benchmarks/postgres/BENCHMARKS.md` and should not be
+mixed into the driver-only table below.
+
 These results are local to this Apple Silicon / Colima environment. The same
 suite in GitHub Actions runs on `ubuntu-latest` x86_64 inside Docker and shows
 different rankings. On the PR CI run, `turbopg` won `generate_series` and

@@ -36,6 +36,22 @@ MagicStack's pgbench measures raw driver throughput (queries/sec, latency percen
 | psycopg3-async | Python 3.11 + asyncio | asyncio (single-threaded) |
 | turbopg (pg.zig) | Python 3.14t + Zig | ThreadPoolExecutor (GIL released) |
 
+## Related end-to-end benchmark
+
+If you want TurboAPI vs FastAPI over HTTP with a real database behind it, use
+`benchmarks/postgres` instead of this directory.
+
+Current local 3-run median from that suite:
+
+| Route | TurboAPI + pg.zig | FastAPI + asyncpg | FastAPI + SQLAlchemy |
+|---|---|---|---|
+| GET /health | **266,351/s** | 9,161/s | 5,010/s |
+| GET /users/{id} varying 1000 IDs | **80,791/s** | 5,203/s | 1,983/s |
+| GET /users?age_min=20 | **71,650/s** | 3,162/s | 1,427/s |
+| GET /search?q=user_42% | **13,245/s** | 3,915/s | 1,742/s |
+
+That suite measures the full HTTP + DB stack. This `pgbench` suite does not.
+
 ## Current clean rerun (Postgres 18, Docker, concurrency=10, 30s)
 
 | Query | asyncpg | psycopg3-async | turbopg (pg.zig) |
