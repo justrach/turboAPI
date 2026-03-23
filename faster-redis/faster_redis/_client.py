@@ -623,6 +623,30 @@ class ThreadLocalRedis:
         return getattr(self.client(), name)
 
 
+class _PooledSlotRedis(Redis):
+    """Thread-bound view over a native pool slot."""
+
+    def __init__(self, pool, slot):
+        self._pool_owner = pool
+        self._pool = pool._pool
+        self._slot = slot
+        self._host = pool._host
+        self._port = pool._port
+        self._db = pool._db
+        self._password = pool._password
+        self._decode = pool._decode
+        self._conn = None
+
+    def _execute_raw(self, args):
+        return _execute_pooled_slot(self._pool, self._slot, args)
+
+    def _execute_pipeline_raw(self, cmd_lists):
+        return _execute_pipeline_pooled_slot(self._pool, self._slot, cmd_lists)
+
+    def close(self):
+        return None
+
+
 class PooledRedis(Redis):
     """Small fixed-size native pool of Redis connections."""
 
@@ -648,19 +672,7 @@ class PooledRedis(Redis):
     @contextmanager
     def connection(self, timeout=None):
         del timeout
-        yield self
-
-    def _execute_raw(self, args):
-        slot = self._slot()
-        if slot is None:
-            return _execute_pooled(self._pool, args)
-        return _execute_pooled_slot(self._pool, slot, args)
-
-    def _execute_pipeline_raw(self, cmd_lists):
-        slot = self._slot()
-        if slot is None:
-            return _execute_pipeline_pooled(self._pool, cmd_lists)
-        return _execute_pipeline_pooled_slot(self._pool, slot, cmd_lists)
+        yield self.client()
 
     def _slot(self):
         slot = getattr(self._local, 'slot', None)
@@ -671,17 +683,27 @@ class PooledRedis(Redis):
             self._local.slot = slot
         return slot
 
+    def client(self):
+        client = getattr(self._local, 'client', None)
+        if client is None:
+            client = _PooledSlotRedis(self, self._slot())
+            self._local.client = client
+        return client
+
+    def _execute_raw(self, args):
+        return self.client()._execute_raw(args)
+
+    def _execute_pipeline_raw(self, cmd_lists):
+        return self.client()._execute_pipeline_raw(cmd_lists)
+
     def _exec(self, *args):
-        result = self._dec(self._execute_raw([_coerce_command_arg(a) for a in args]))
-        fast_result, handled = _apply_response_fast(args, result)
-        if handled:
-            return fast_result
-        return self._apply_response_callback(args, result)
+        return self.client()._exec(*args)
 
     def close(self):
         if getattr(self, '_pool', None) is not None:
             _close_pool(self._pool)
             self._pool = None
+        self._local = threading.local()
 
     def __enter__(self):
         return self
@@ -690,4 +712,9 @@ class PooledRedis(Redis):
         self.close()
 
     def pipeline(self, transaction=False):
-        return Pipeline(self, transaction)
+        return self.client().pipeline(transaction=transaction)
+
+    def __getattr__(self, name):
+        if name.startswith('_'):
+            raise AttributeError(name)
+        return getattr(self.client(), name)
