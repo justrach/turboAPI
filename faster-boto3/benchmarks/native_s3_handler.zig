@@ -35,6 +35,7 @@ const Response = extern struct {
 
 const EnvConfig = struct {
     endpoint: []const u8,
+    host: []const u8,
     region: []const u8,
     access_key: []const u8,
     secret_key: []const u8,
@@ -43,11 +44,14 @@ const EnvConfig = struct {
 
 var global_cfg = EnvConfig{
     .endpoint = "http://localhost:4566",
+    .host = "localhost:4566",
     .region = "us-east-1",
     .access_key = "test",
     .secret_key = "testing",
     .bucket = "turbo-vs-fast",
 };
+var global_host_buf: [128]u8 = undefined;
+var global_cfg_loaded = false;
 
 threadlocal var tls_client: ?std.http.Client = null;
 threadlocal var tls_signing_cache = SigningCache{};
@@ -69,6 +73,24 @@ const SignedHeaders = struct {
     }
 };
 
+const FixedPath = struct {
+    buf: [512]u8 = undefined,
+    len: usize = 0,
+
+    fn slice(self: *const FixedPath) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+const FixedJson = struct {
+    buf: [128]u8 = undefined,
+    len: usize = 0,
+
+    fn slice(self: *const FixedJson) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
 fn getEnv(name: [:0]const u8, fallback: []const u8) []const u8 {
     const value = std.c.getenv(name);
     if (value) |ptr| return std.mem.span(ptr);
@@ -76,6 +98,24 @@ fn getEnv(name: [:0]const u8, fallback: []const u8) []const u8 {
 }
 
 fn loadConfig() EnvConfig {
+    if (!global_cfg_loaded) {
+        global_cfg.endpoint = getEnv("BENCH_S3_ENDPOINT", global_cfg.endpoint);
+        global_cfg.region = getEnv("AWS_REGION", global_cfg.region);
+        global_cfg.access_key = getEnv("AWS_ACCESS_KEY_ID", global_cfg.access_key);
+        global_cfg.secret_key = getEnv("AWS_SECRET_ACCESS_KEY", global_cfg.secret_key);
+        global_cfg.bucket = getEnv("BENCH_S3_BUCKET", global_cfg.bucket);
+
+        const uri = std.Uri.parse(global_cfg.endpoint) catch unreachable;
+        const hostname = switch (uri.host orelse unreachable) {
+            .raw => |h| h,
+            .percent_encoded => |h| h,
+        };
+        global_cfg.host = if (uri.port) |port|
+            std.fmt.bufPrint(&global_host_buf, "{s}:{d}", .{ hostname, port }) catch unreachable
+        else
+            hostname;
+        global_cfg_loaded = true;
+    }
     return global_cfg;
 }
 
@@ -255,19 +295,6 @@ fn buildSignedHeaders(
 ) !SignedHeaders {
     const now = utcNow();
 
-    var host_buf: [128]u8 = undefined;
-    const host = blk: {
-        const uri = try std.Uri.parse(cfg.endpoint);
-        const hostname = switch (uri.host orelse return error.InvalidUrl) {
-            .raw => |h| h,
-            .percent_encoded => |h| h,
-        };
-        if (uri.port) |port| {
-            break :blk try std.fmt.bufPrint(&host_buf, "{s}:{d}", .{ hostname, port });
-        }
-        break :blk hostname;
-    };
-
     const signed_headers = if (extra_headers.len == 0)
         "host;x-amz-content-sha256;x-amz-date"
     else if (std.mem.eql(u8, extra_headers[0][0], "range"))
@@ -282,13 +309,13 @@ fn buildSignedHeaders(
         try std.fmt.bufPrint(
             &canonical_headers_buf,
             "host:{s}\nx-amz-content-sha256:{s}\nx-amz-date:{s}\n",
-            .{ host, payload_hash, &now.amz_date },
+            .{ cfg.host, payload_hash, &now.amz_date },
         )
     else
         try std.fmt.bufPrint(
             &canonical_headers_buf,
             "host:{s}\n{s}:{s}\nx-amz-content-sha256:{s}\nx-amz-date:{s}\n",
-            .{ host, extra_headers[0][0], extra_headers[0][1], payload_hash, &now.amz_date },
+            .{ cfg.host, extra_headers[0][0], extra_headers[0][1], payload_hash, &now.amz_date },
         );
 
     var canonical_request_buf: [1024]u8 = undefined;
@@ -386,6 +413,12 @@ fn parseContentRangeTotal(headers: []const u8) ?usize {
     return null;
 }
 
+fn parseBatchCount(req: *const Request, fallback: usize) usize {
+    const raw = getParam(req, "count") orelse return fallback;
+    const parsed = std.fmt.parseInt(usize, raw, 10) catch return fallback;
+    return @max(@as(usize, 1), @min(parsed, 64));
+}
+
 fn countTag(body: []const u8, needle: []const u8) usize {
     var count: usize = 0;
     var idx: usize = 0;
@@ -400,21 +433,37 @@ fn makeUrl(cfg: EnvConfig, suffix: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}{s}", .{ cfg.endpoint, suffix });
 }
 
+fn makeObjectPath(cfg: EnvConfig, key: []const u8) !FixedPath {
+    var out = FixedPath{};
+    out.len = (try std.fmt.bufPrint(&out.buf, "/{s}/{s}", .{ cfg.bucket, key })).len;
+    return out;
+}
+
+fn makeObjectUrl(cfg: EnvConfig, path: []const u8) !FixedPath {
+    var out = FixedPath{};
+    out.len = (try std.fmt.bufPrint(&out.buf, "{s}{s}", .{ cfg.endpoint, path })).len;
+    return out;
+}
+
+fn makeKeySizeJson(key: []const u8, size: usize) !FixedJson {
+    var out = FixedJson{};
+    out.len = (try std.fmt.bufPrint(&out.buf, "{{\"key\":\"{s}\",\"size\":{d}}}", .{ key, size })).len;
+    return out;
+}
+
 export fn handle_s3_head(req: *const Request) callconv(.c) Response {
     const cfg = loadConfig();
     const key = getParam(req, "key") orelse return jsonResponse(400, "{\"error\":\"missing key\"}");
-    const canonical_uri = std.fmt.allocPrint(allocator, "/{s}/{s}", .{ cfg.bucket, key }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
-    defer allocator.free(canonical_uri);
-    const url = makeUrl(cfg, canonical_uri) catch return jsonResponse(500, "{\"error\":\"oom\"}");
-    defer allocator.free(url);
+    const canonical_uri = makeObjectPath(cfg, key) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    const url = makeObjectUrl(cfg, canonical_uri.slice()) catch return jsonResponse(500, "{\"error\":\"oom\"}");
 
-    const headers = buildSignedHeaders(cfg, "HEAD", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
-    var resp = doRequest(.HEAD, url, headers.slice()) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+    const headers = buildSignedHeaders(cfg, "HEAD", canonical_uri.slice(), "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
+    var resp = doRequest(.HEAD, url.slice(), headers.slice()) catch return jsonResponse(502, "{\"error\":\"s3\"}");
     defer resp.deinit();
     if (ensureOk(&resp)) |err_resp| return err_resp;
     const size = parseContentLength(resp.headers_buf) orelse resp.body.len;
-    const body = std.fmt.allocPrint(allocator, "{{\"key\":\"{s}\",\"size\":{d}}}", .{ key, size }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
-    return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
+    const body = makeKeySizeJson(key, size) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    return jsonResponse(200, body.slice());
 }
 
 export fn handle_s3_head_bucket(_: *const Request) callconv(.c) Response {
@@ -435,18 +484,16 @@ export fn handle_s3_head_bucket(_: *const Request) callconv(.c) Response {
 export fn handle_s3_get(req: *const Request) callconv(.c) Response {
     const cfg = loadConfig();
     const key = getParam(req, "key") orelse return jsonResponse(400, "{\"error\":\"missing key\"}");
-    const canonical_uri = std.fmt.allocPrint(allocator, "/{s}/{s}", .{ cfg.bucket, key }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
-    defer allocator.free(canonical_uri);
-    const url = makeUrl(cfg, canonical_uri) catch return jsonResponse(500, "{\"error\":\"oom\"}");
-    defer allocator.free(url);
+    const canonical_uri = makeObjectPath(cfg, key) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    const url = makeObjectUrl(cfg, canonical_uri.slice()) catch return jsonResponse(500, "{\"error\":\"oom\"}");
 
-    const headers = buildSignedHeaders(cfg, "GET", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
-    var resp = doRequest(.GET, url, headers.slice()) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+    const headers = buildSignedHeaders(cfg, "GET", canonical_uri.slice(), "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
+    var resp = doRequest(.GET, url.slice(), headers.slice()) catch return jsonResponse(502, "{\"error\":\"s3\"}");
     defer resp.deinit();
     if (ensureOk(&resp)) |err_resp| return err_resp;
     const size = parseContentLength(resp.headers_buf) orelse resp.body.len;
-    const body = std.fmt.allocPrint(allocator, "{{\"key\":\"{s}\",\"size\":{d}}}", .{ key, size }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
-    return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
+    const body = makeKeySizeJson(key, size) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    return jsonResponse(200, body.slice());
 }
 
 export fn handle_s3_list(_: *const Request) callconv(.c) Response {
@@ -465,6 +512,31 @@ export fn handle_s3_list(_: *const Request) callconv(.c) Response {
     if (ensureOk(&resp)) |err_resp| return err_resp;
     const count = countTag(resp.body, "<Contents>");
     const body = std.fmt.allocPrint(allocator, "{{\"count\":{d}}}", .{count}) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+    return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
+}
+
+export fn handle_s3_batch_head(req: *const Request) callconv(.c) Response {
+    const cfg = loadConfig();
+    const count = parseBatchCount(req, 8);
+    var total_size: usize = 0;
+    var index: usize = 0;
+
+    while (index < count) : (index += 1) {
+        const key = std.fmt.allocPrint(allocator, "batch/item-{d:0>3}", .{index}) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+        defer allocator.free(key);
+        const canonical_uri = std.fmt.allocPrint(allocator, "/{s}/{s}", .{ cfg.bucket, key }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+        defer allocator.free(canonical_uri);
+        const url = makeUrl(cfg, canonical_uri) catch return jsonResponse(500, "{\"error\":\"oom\"}");
+        defer allocator.free(url);
+
+        const headers = buildSignedHeaders(cfg, "HEAD", canonical_uri, "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &.{}) catch return jsonResponse(500, "{\"error\":\"sign\"}");
+        var resp = doRequest(.HEAD, url, headers.slice()) catch return jsonResponse(502, "{\"error\":\"s3\"}");
+        defer resp.deinit();
+        if (ensureOk(&resp)) |err_resp| return err_resp;
+        total_size += parseContentLength(resp.headers_buf) orelse resp.body.len;
+    }
+
+    const body = std.fmt.allocPrint(allocator, "{{\"count\":{d},\"total_size\":{d}}}", .{ count, total_size }) catch return jsonResponse(500, "{\"error\":\"oom\"}");
     return .{ .status_code = 200, .content_type = "application/json", .content_type_len = 16, .body = body.ptr, .body_len = body.len };
 }
 
@@ -537,11 +609,14 @@ export fn handle_s3_copy(req: *const Request) callconv(.c) Response {
 export fn turboapi_init() callconv(.c) c_int {
     global_cfg = .{
         .endpoint = getEnv("TURBO_S3_ENDPOINT", global_cfg.endpoint),
+        .host = global_cfg.host,
         .region = getEnv("AWS_DEFAULT_REGION", global_cfg.region),
         .access_key = getEnv("AWS_ACCESS_KEY_ID", global_cfg.access_key),
         .secret_key = getEnv("AWS_SECRET_ACCESS_KEY", global_cfg.secret_key),
         .bucket = getEnv("TURBO_S3_BUCKET", global_cfg.bucket),
     };
+    global_cfg_loaded = false;
+    _ = loadConfig();
     std.debug.print("[native_s3] init endpoint={s} bucket={s}\n", .{ global_cfg.endpoint, global_cfg.bucket });
     return 0;
 }

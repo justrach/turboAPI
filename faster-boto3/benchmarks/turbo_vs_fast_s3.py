@@ -72,6 +72,16 @@ def s3_list():
     resp = s3.list_objects_v2(Bucket='{BUCKET}', MaxKeys=20)
     return {{"count": resp.get("KeyCount", 0)}}
 
+@app.get("/s3/batch-head/{{count}}")
+def s3_batch_head(count: int):
+    count = max(1, min(count, 64))
+    total_size = 0
+    for i in range(count):
+        key = f"batch/item-{{i:03d}}"
+        resp = s3.head_object(Bucket='{BUCKET}', Key=key)
+        total_size += resp["ContentLength"]
+    return {{"count": count, "total_size": total_size}}
+
 app.run(host="127.0.0.1", port={TURBO_PORT})
 """
 
@@ -86,6 +96,7 @@ app.native_route("GET", "/s3/get/{{key}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_g
 app.native_route("GET", "/s3/head/{{key}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_head")
 app.native_route("GET", "/s3/head-bucket", r"{NATIVE_HANDLER_LIB}", "handle_s3_head_bucket")
 app.native_route("GET", "/s3/list", r"{NATIVE_HANDLER_LIB}", "handle_s3_list")
+app.native_route("GET", "/s3/batch-head/{{count}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_batch_head")
 app.native_route("GET", "/s3/list-buckets", r"{NATIVE_HANDLER_LIB}", "handle_s3_list_buckets")
 app.native_route("GET", "/s3/bucket-location", r"{NATIVE_HANDLER_LIB}", "handle_s3_bucket_location")
 app.native_route("DELETE", "/s3/delete/{{key}}", r"{NATIVE_HANDLER_LIB}", "handle_s3_delete")
@@ -115,6 +126,16 @@ def s3_get(key: str):
 def s3_list():
     resp = s3.list_objects_v2(Bucket='{BUCKET}', MaxKeys=20)
     return {{"count": resp.get("KeyCount", 0)}}
+
+@app.get("/s3/batch-head/{{count}}")
+def s3_batch_head(count: int):
+    count = max(1, min(count, 64))
+    total_size = 0
+    for i in range(count):
+        key = f"batch/item-{{i:03d}}"
+        resp = s3.head_object(Bucket='{BUCKET}', Key=key)
+        total_size += resp["ContentLength"]
+    return {{"count": count, "total_size": total_size}}
 
 app.run(host="127.0.0.1", port={TURBO_PORT})
 """
@@ -148,6 +169,16 @@ def s3_head(key: str):
 def s3_list():
     resp = s3.list_objects_v2(Bucket='{BUCKET}', MaxKeys=20)
     return {{"count": resp.get("KeyCount", 0)}}
+
+@app.get("/s3/batch-head/{{count}}")
+def s3_batch_head(count: int):
+    count = max(1, min(count, 64))
+    total_size = 0
+    for i in range(count):
+        key = f"batch/item-{{i:03d}}"
+        resp = s3.head_object(Bucket='{BUCKET}', Key=key)
+        total_size += resp["ContentLength"]
+    return {{"count": count, "total_size": total_size}}
 
 uvicorn.run(app, host="127.0.0.1", port={FAST_PORT}, log_level="warning")
 """
@@ -209,7 +240,7 @@ def run_wrk(port, path, duration=WRK_DURATION, threads=WRK_THREADS, connections=
         return {"rps": 0, "lat_avg_ms": 0, "lat_p99_ms": 0, "errors": -1}
 
 
-def start_server(code, name):
+def start_server(code, name, turbo_thread_pool_size=None):
     """Write server code to temp file and start as subprocess."""
     f = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, prefix=f'{name}_')
     f.write(code)
@@ -228,6 +259,8 @@ def start_server(code, name):
         # unless the interpreter is launched with PYTHON_GIL=0. That completely
         # changes TurboAPI throughput under load, so force the intended runtime.
         env.setdefault("PYTHON_GIL", "0")
+        if turbo_thread_pool_size:
+            env["TURBO_THREAD_POOL_SIZE"] = str(turbo_thread_pool_size)
     proc = subprocess.Popen(
         [sys.executable, f.name],
         stdout=subprocess.DEVNULL,
@@ -263,6 +296,7 @@ def verify_server_outputs(port):
         ("/s3/get/bench-10k", {"key": "bench-10k", "size": 10240}),
         ("/s3/head/bench-1k", {"key": "bench-1k", "size": 1024}),
         ("/s3/list", {"count": 20}),
+        ("/s3/batch-head/8", {"count": 8, "total_size": 8192}),
     ]
     for path, expected in checks:
         got = fetch_json(port, path)
@@ -270,101 +304,29 @@ def verify_server_outputs(port):
             raise RuntimeError(f"unexpected response for {path}: got {got!r}, expected {expected!r}")
 
 
-def setup_s3():
-    """Create test bucket and objects."""
-    import boto3
-    s3 = boto3.client('s3', endpoint_url=LOCALSTACK, region_name=REGION, **CREDS)
-    try:
-        s3.create_bucket(Bucket=BUCKET)
-    except Exception:
-        pass
-    s3.put_object(Bucket=BUCKET, Key="bench-1k", Body=os.urandom(1024))
-    s3.put_object(Bucket=BUCKET, Key="bench-10k", Body=os.urandom(10240))
-    for i in range(20):
-        s3.put_object(Bucket=BUCKET, Key=f"list/item-{i:03d}", Body=f"data-{i}".encode())
-
-
-def cleanup_s3():
-    import boto3
-    s3 = boto3.client('s3', endpoint_url=LOCALSTACK, region_name=REGION, **CREDS)
-    try:
-        paginator = s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=BUCKET):
-            for obj in page.get("Contents", []):
-                s3.delete_object(Bucket=BUCKET, Key=obj["Key"])
-        s3.delete_bucket(Bucket=BUCKET)
-    except Exception:
-        pass
-
-
-# ── Main ─────────────────────────────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--json", action="store_true")
-    parser.add_argument("--duration", type=int, default=WRK_DURATION)
-    parser.add_argument("--threads", type=int, default=WRK_THREADS)
-    parser.add_argument("--connections", type=int, default=WRK_CONNECTIONS)
-    parser.add_argument("--turbo-mode", choices=("python", "native-ffi", "hybrid-best"), default="python")
-    args = parser.parse_args()
-
-    # Check LocalStack
-    try:
-        import urllib.request
-        urllib.request.urlopen(f"{LOCALSTACK}/_localstack/health", timeout=2)
-    except Exception:
-        print("ERROR: LocalStack not running. Start with: docker compose up -d", file=sys.stderr)
-        sys.exit(1)
-
-    setup_s3()
-
-    if args.turbo_mode in {"native-ffi", "hybrid-best"}:
-        build_native_handler()
-
-    # Start servers
-    if args.turbo_mode == "native-ffi":
-        turbo_code = TURBO_NATIVE_FFI_APP
-    elif args.turbo_mode == "hybrid-best":
-        turbo_code = TURBO_HYBRID_BEST_APP
-    else:
-        turbo_code = TURBO_APP
-    turbo_proc, turbo_file = start_server(turbo_code, "turbo")
+def run_benchmark_suite(args, turbo_code):
+    turbo_proc, turbo_file = start_server(
+        turbo_code,
+        "turbo",
+        turbo_thread_pool_size=args.turbo_thread_pool_size,
+    )
     fast_proc, fast_file = start_server(FAST_APP, "fast")
 
     try:
         if not wait_for_server(TURBO_PORT):
-            print("ERROR: TurboAPI server failed to start", file=sys.stderr)
-            stderr = turbo_proc.stderr.read().decode() if turbo_proc.stderr else ""
-            print(stderr[:500], file=sys.stderr)
-            sys.exit(1)
+            raise RuntimeError("TurboAPI server failed to start", turbo_proc)
         if not wait_for_server(FAST_PORT):
-            print("ERROR: FastAPI server failed to start", file=sys.stderr)
-            stderr = fast_proc.stderr.read().decode() if fast_proc.stderr else ""
-            print(stderr[:500], file=sys.stderr)
-            sys.exit(1)
+            raise RuntimeError("FastAPI server failed to start", fast_proc)
 
-        try:
-            verify_server_outputs(TURBO_PORT)
-        except Exception as exc:
-            print(f"ERROR: TurboAPI output verification failed: {exc}", file=sys.stderr)
-            stderr = turbo_proc.stderr.read().decode() if turbo_proc.stderr else ""
-            if stderr:
-                print(stderr[:1000], file=sys.stderr)
-            sys.exit(1)
-        try:
-            verify_server_outputs(FAST_PORT)
-        except Exception as exc:
-            print(f"ERROR: FastAPI output verification failed: {exc}", file=sys.stderr)
-            stderr = fast_proc.stderr.read().decode() if fast_proc.stderr else ""
-            if stderr:
-                print(stderr[:1000], file=sys.stderr)
-            sys.exit(1)
+        verify_server_outputs(TURBO_PORT)
+        verify_server_outputs(FAST_PORT)
 
         tests = [
             ("S3 GetObject (1KB)", "/s3/get/bench-1k"),
             ("S3 GetObject (10KB)", "/s3/get/bench-10k"),
             ("S3 HeadObject", "/s3/head/bench-1k"),
             ("S3 ListObjects (20)", "/s3/list"),
+            ("S3 BatchHead (8x1KB)", "/s3/batch-head/8"),
         ]
         results = []
         for name, path in tests:
@@ -389,12 +351,136 @@ def main():
                 "fastapi": fast_r,
                 "speedup": round(speedup, 2),
             })
+        return results
+    except RuntimeError as exc:
+        message = exc.args[0]
+        proc = exc.args[1] if len(exc.args) > 1 else None
+        print(f"ERROR: {message}", file=sys.stderr)
+        if proc and proc.stderr:
+            stderr = proc.stderr.read().decode()
+            if stderr:
+                print(stderr[:1000], file=sys.stderr)
+        sys.exit(1)
+    except Exception as exc:
+        print(f"ERROR: benchmark verification failed: {exc}", file=sys.stderr)
+        stderr = turbo_proc.stderr.read().decode() if turbo_proc.stderr else ""
+        if stderr:
+            print(stderr[:1000], file=sys.stderr)
+        sys.exit(1)
+    finally:
+        turbo_proc.terminate()
+        fast_proc.terminate()
+        turbo_proc.wait(timeout=5)
+        fast_proc.wait(timeout=5)
+        os.unlink(turbo_file)
+        os.unlink(fast_file)
 
+
+def setup_s3():
+    """Create test bucket and objects."""
+    import boto3
+    s3 = boto3.client('s3', endpoint_url=LOCALSTACK, region_name=REGION, **CREDS)
+    try:
+        s3.create_bucket(Bucket=BUCKET)
+    except Exception:
+        pass
+    s3.put_object(Bucket=BUCKET, Key="bench-1k", Body=os.urandom(1024))
+    s3.put_object(Bucket=BUCKET, Key="bench-10k", Body=os.urandom(10240))
+    for i in range(20):
+        s3.put_object(Bucket=BUCKET, Key=f"list/item-{i:03d}", Body=f"data-{i}".encode())
+    for i in range(64):
+        s3.put_object(Bucket=BUCKET, Key=f"batch/item-{i:03d}", Body=os.urandom(1024))
+
+
+def cleanup_s3():
+    import boto3
+    s3 = boto3.client('s3', endpoint_url=LOCALSTACK, region_name=REGION, **CREDS)
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=BUCKET):
+            for obj in page.get("Contents", []):
+                s3.delete_object(Bucket=BUCKET, Key=obj["Key"])
+        s3.delete_bucket(Bucket=BUCKET)
+    except Exception:
+        pass
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--duration", type=int, default=WRK_DURATION)
+    parser.add_argument("--threads", type=int, default=WRK_THREADS)
+    parser.add_argument("--connections", type=int, default=WRK_CONNECTIONS)
+    parser.add_argument("--turbo-mode", choices=("python", "native-ffi", "hybrid-best"), default="python")
+    parser.add_argument("--turbo-thread-pool-size", type=int, default=24)
+    parser.add_argument("--turbo-thread-pool-sweep")
+    args = parser.parse_args()
+
+    # Check LocalStack
+    try:
+        import urllib.request
+        urllib.request.urlopen(f"{LOCALSTACK}/_localstack/health", timeout=2)
+    except Exception:
+        print("ERROR: LocalStack not running. Start with: docker compose up -d", file=sys.stderr)
+        sys.exit(1)
+
+    setup_s3()
+
+    if args.turbo_mode in {"native-ffi", "hybrid-best"}:
+        build_native_handler()
+
+    if args.turbo_mode == "native-ffi":
+        turbo_code = TURBO_NATIVE_FFI_APP
+    elif args.turbo_mode == "hybrid-best":
+        turbo_code = TURBO_HYBRID_BEST_APP
+    else:
+        turbo_code = TURBO_APP
+    sweep_sizes = None
+    if args.turbo_thread_pool_sweep:
+        sweep_sizes = [
+            int(part.strip())
+            for part in args.turbo_thread_pool_sweep.split(",")
+            if part.strip()
+        ]
+
+    if sweep_sizes:
+        sweep = []
+        for size in sweep_sizes:
+            args.turbo_thread_pool_size = size
+            results = run_benchmark_suite(args, turbo_code)
+            sweep.append({
+                "turbo_thread_pool_size": size,
+                "results": results,
+            })
+        payload = {
+            "turbo_mode": args.turbo_mode,
+            "wrk": {
+                "duration_s": args.duration,
+                "threads": args.threads,
+                "connections": args.connections,
+            },
+            "sweep": sweep,
+        }
+    else:
+        results = run_benchmark_suite(args, turbo_code)
+        payload = {
+            "turbo_mode": args.turbo_mode,
+            "wrk": {
+                "duration_s": args.duration,
+                "threads": args.threads,
+                "connections": args.connections,
+            },
+            "turbo_thread_pool_size": args.turbo_thread_pool_size,
+            "results": results,
+        }
         if args.json:
-            print(json.dumps({"results": results}, indent=2))
+            print(json.dumps(payload, indent=2))
         else:
             print()
             print(f"  Load: wrk -t{args.threads} -c{args.connections} -d{args.duration}s")
+            print(f"  Turbo thread pool: {args.turbo_thread_pool_size}")
             if args.turbo_mode == "native-ffi":
                 turbo_label = "TurboAPI + native FFI S3"
             elif args.turbo_mode == "hybrid-best":
@@ -416,15 +502,25 @@ def main():
                     f'{t["lat_p99_ms"]:.1f}ms',
                 ))
             print()
+    if args.json and sweep_sizes:
+        print(json.dumps(payload, indent=2))
+    elif sweep_sizes:
+        print()
+        print(f"  Load: wrk -t{args.threads} -c{args.connections} -d{args.duration}s")
+        print("  Turbo thread-pool sweep")
+        print("  " + "═" * 72)
+        for row in payload["sweep"]:
+            size = row["turbo_thread_pool_size"]
+            print(f"  pool={size}")
+            for result in row["results"]:
+                print(
+                    f"    {result['name']:<22} "
+                    f"{result['turbo']['rps']:.0f} vs {result['fastapi']['rps']:.0f} "
+                    f"({result['speedup']:.2f}x)"
+                )
+        print()
 
-    finally:
-        turbo_proc.terminate()
-        fast_proc.terminate()
-        turbo_proc.wait(timeout=5)
-        fast_proc.wait(timeout=5)
-        os.unlink(turbo_file)
-        os.unlink(fast_file)
-        cleanup_s3()
+    cleanup_s3()
 
 
 if __name__ == "__main__":

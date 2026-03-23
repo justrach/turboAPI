@@ -278,10 +278,10 @@ Load: `wrk -t8 -c200 -d3s`
 
 | Operation | Turbo RPS | Fast RPS | Speedup | Turbo p99 |
 |---|---:|---:|---:|---:|
-| `S3 GetObject (1KB)` | 1313 | 1123 | 1.17x | 30.2 ms |
-| `S3 GetObject (10KB)` | 1309 | 1169 | 1.12x | 64.7 ms |
-| `S3 HeadObject` | 1591 | 1407 | 1.13x | 41.4 ms |
-| `S3 ListObjects (20)` | 826 | 641 | 1.29x | 55.4 ms |
+| `S3 GetObject (1KB)` | 1420 | 1113 | 1.28x | 33.7 ms |
+| `S3 GetObject (10KB)` | 1415 | 1133 | 1.25x | 30.1 ms |
+| `S3 HeadObject` | 1479 | 1343 | 1.10x | 55.1 ms |
+| `S3 ListObjects (20)` | 956 | 685 | 1.40x | 86.7 ms |
 
 ### Notes
 
@@ -291,9 +291,90 @@ Load: `wrk -t8 -c200 -d3s`
   real objects, these are the corrected numbers.
 - The current FFI handler now reuses a thread-local Zig `std.http.Client` and
   caches the derived SigV4 signing key by date per worker thread.
+- The handler also now caches the computed `Host` value at init time instead of
+  reparsing the endpoint URI on every request just to rebuild canonical
+  headers.
 - The common-path signer/header builder now uses fixed stack buffers instead of
   rebuilding maps and heap arrays per request.
 - `HeadObject` is back on a true `HEAD` request in the FFI spike.
+
+### Turbo thread-pool sweep
+
+To check whether the native S3 route is worker-starved inside Turbo itself, the
+benchmark harness now accepts `--turbo-thread-pool-size` and
+`--turbo-thread-pool-sweep`.
+
+Command:
+
+```bash
+TURBO_DISABLE_CACHE=1 \
+TURBO_DISABLE_DB_CACHE=1 \
+TURBO_DISABLE_RATE_LIMITING=1 \
+PYTHON_GIL=0 \
+python benchmarks/turbo_vs_fast_s3.py \
+  --duration 2 \
+  --threads 8 \
+  --connections 200 \
+  --turbo-mode native-ffi \
+  --turbo-thread-pool-sweep 12,24,48 \
+  --json
+```
+
+| Turbo pool | Get 1KB | Get 10KB | Head | List (20) |
+|---|---:|---:|---:|---:|
+| `12` | `1.36x` | `1.17x` | `1.13x` | `1.46x` |
+| `24` | `1.28x` | `1.13x` | `1.14x` | `1.47x` |
+| `48` | `1.29x` | `1.24x` | `1.16x` | `1.35x` |
+
+What this means:
+
+- Turbo's worker count is not the dominant bottleneck on this S3 slice.
+- The native route already scales well enough at `12` workers that pushing to
+  `24` or `48` mostly stays in the same band.
+- The remaining costs are inside the request path itself: LocalStack/network
+  time, fixed signing/request setup, and list parsing.
+- This is different from the DB path, where per-thread connections remove a
+  bigger source of lock/pool overhead. For S3 here, per-thread client reuse is
+  already in place and the next wins are more about reducing per-request work
+  than adding more server threads.
+
+### Batching signal
+
+The strongest next lever is batching/coalescing, not just shaving a few more
+microseconds off a single S3 call. To test that, the benchmark harness now has a
+`BatchHead` lane that performs 8 internal `HeadObject` calls behind one external
+HTTP request.
+
+Command:
+
+```bash
+TURBO_DISABLE_CACHE=1 \
+TURBO_DISABLE_DB_CACHE=1 \
+TURBO_DISABLE_RATE_LIMITING=1 \
+PYTHON_GIL=0 \
+python benchmarks/turbo_vs_fast_s3.py \
+  --duration 1 \
+  --threads 4 \
+  --connections 50 \
+  --turbo-mode native-ffi \
+  --json
+```
+
+Result from the short validation run:
+
+| Operation | Turbo RPS | Fast RPS | Speedup |
+|---|---:|---:|---:|
+| `S3 BatchHead (8x1KB)` | `182.47` | `104.15` | `1.75x` |
+
+Interpretation:
+
+- Single-op native S3 lanes are mostly in the `1.1x` to `1.5x` range.
+- Once 8 S3 operations are collapsed behind one route, the win grows because
+  route/framework overhead is amortized and the native handler keeps its shared
+  per-thread client/signing state hot.
+- This is the same basic reason `aws s3 sync` and transfer-manager style
+  orchestration often beat naive per-file upload loops: the scheduler and the
+  shared execution context matter as much as the single request path.
 
 ## Cost Model
 
