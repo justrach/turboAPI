@@ -238,10 +238,6 @@ class Redis:
         return _execute_pipeline(self._conn, cmd_lists)
 
     def _dec(self, result):
-        if result is None:
-            return None
-        if isinstance(result, list):
-            return [self._dec(x) for x in result]
         return result
 
     def _apply_response_callback(self, args, result):
