@@ -1,128 +1,195 @@
 // Python C extension for faster-redis.
-// The ENTIRE hot path runs in Zig: pack → TCP send → TCP recv → parse → return.
-// Python only calls execute() with args, gets back a Python value.
+// The ENTIRE hot path runs in Zig: pack -> TCP send -> TCP recv -> parse -> return.
+// Python holds a native connection handle per Redis instance.
 
 const std = @import("std");
 const net = std.net;
 const resp = @import("resp.zig");
 const Allocator = std.mem.Allocator;
 
-const c = @cImport({ @cDefine("PY_SSIZE_T_CLEAN", {}); @cInclude("Python.h"); });
+const c = @cImport({
+    @cDefine("PY_SSIZE_T_CLEAN", {});
+    @cInclude("Python.h");
+});
 
-// ── Persistent Zig TCP connection ───────────────────────────────────────────
+const capsule_name = "faster_redis.Connection";
 
-var zig_stream: ?net.Stream = null;
-var conn_lock: std.Thread.Mutex = .{};
-var read_buf: [65536]u8 = undefined;
-var read_pos: usize = 0;
-var read_len: usize = 0;
+const ConnectionState = struct {
+    host: []u8,
+    port: u16,
+    stream: ?net.Stream = null,
+    lock: std.Thread.Mutex = .{},
+    read_buf: [65536]u8 = undefined,
+    read_pos: usize = 0,
+    read_len: usize = 0,
+};
 
-fn ensureConnected(host: []const u8, port: u16) !void {
-    if (zig_stream != null) return;
-    const addr = try net.Address.resolveIp(host, port);
-    zig_stream = try net.tcpConnectToAddress(addr);
-    // TCP_NODELAY
-    if (zig_stream) |s| {
-        std.posix.setsockopt(s.handle, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1))) catch {};
+fn closeStream(state: *ConnectionState) void {
+    if (state.stream) |s| {
+        s.close();
+        state.stream = null;
     }
-    read_pos = 0;
-    read_len = 0;
+    state.read_pos = 0;
+    state.read_len = 0;
 }
 
-fn zigSend(data: []const u8) !void {
-    const s = zig_stream orelse return error.NotConnected;
+fn destroyConnection(state: *ConnectionState) void {
+    closeStream(state);
+    std.heap.c_allocator.free(state.host);
+    std.heap.c_allocator.destroy(state);
+}
+
+fn capsuleDestructor(capsule: ?*c.PyObject) callconv(.c) void {
+    const raw = c.PyCapsule_GetPointer(capsule, capsule_name) orelse {
+        c.PyErr_Clear();
+        return;
+    };
+    const state: *ConnectionState = @ptrCast(@alignCast(raw));
+    destroyConnection(state);
+}
+
+fn connectionFromCapsule(obj: ?*c.PyObject) ?*ConnectionState {
+    const raw = c.PyCapsule_GetPointer(obj, capsule_name) orelse return null;
+    return @ptrCast(@alignCast(raw));
+}
+
+fn ensureConnected(state: *ConnectionState) !void {
+    if (state.stream != null) return;
+    const addr = try net.Address.resolveIp(state.host, state.port);
+    state.stream = try net.tcpConnectToAddress(addr);
+    if (state.stream) |s| {
+        std.posix.setsockopt(
+            s.handle,
+            std.posix.IPPROTO.TCP,
+            std.posix.TCP.NODELAY,
+            &std.mem.toBytes(@as(c_int, 1)),
+        ) catch {};
+    }
+    state.read_pos = 0;
+    state.read_len = 0;
+}
+
+fn zigSend(state: *ConnectionState, data: []const u8) !void {
+    const s = state.stream orelse return error.NotConnected;
     var sent: usize = 0;
     while (sent < data.len) {
         sent += s.write(data[sent..]) catch return error.BrokenPipe;
     }
 }
 
-fn zigRecvResponse(allocator: Allocator) !resp.RespValue {
-    const s = zig_stream orelse return error.NotConnected;
+fn zigRecvResponse(state: *ConnectionState, allocator: Allocator) !resp.RespValue {
+    const s = state.stream orelse return error.NotConnected;
     while (true) {
-        if (read_len > read_pos) {
-            const buf = read_buf[read_pos..read_len];
+        if (state.read_len > state.read_pos) {
+            const buf = state.read_buf[state.read_pos..state.read_len];
             if (resp.parse(allocator, buf)) |result| {
-                read_pos += result.consumed;
-                if (read_pos > read_buf.len / 2) {
-                    const rem = read_len - read_pos;
-                    if (rem > 0) std.mem.copyForwards(u8, &read_buf, read_buf[read_pos..read_len]);
-                    read_len = rem;
-                    read_pos = 0;
+                state.read_pos += result.consumed;
+                if (state.read_pos > state.read_buf.len / 2) {
+                    const rem = state.read_len - state.read_pos;
+                    if (rem > 0) {
+                        std.mem.copyForwards(u8, &state.read_buf, state.read_buf[state.read_pos..state.read_len]);
+                    }
+                    state.read_len = rem;
+                    state.read_pos = 0;
                 }
                 return result.value;
             } else |err| {
                 if (err != resp.ParseError.Incomplete) return err;
             }
         }
-        if (read_len >= read_buf.len) {
-            const rem = read_len - read_pos;
-            if (rem > 0) std.mem.copyForwards(u8, &read_buf, read_buf[read_pos..read_len]);
-            read_len = rem;
-            read_pos = 0;
+        if (state.read_len >= state.read_buf.len) {
+            const rem = state.read_len - state.read_pos;
+            if (rem > 0) {
+                std.mem.copyForwards(u8, &state.read_buf, state.read_buf[state.read_pos..state.read_len]);
+            }
+            state.read_len = rem;
+            state.read_pos = 0;
         }
-        const n = s.read(read_buf[read_len..]) catch return error.BrokenPipe;
+        const n = s.read(state.read_buf[state.read_len..]) catch return error.BrokenPipe;
         if (n == 0) return error.EndOfStream;
-        read_len += n;
+        state.read_len += n;
     }
 }
 
-// ── Python API ──────────────────────────────────────────────────────────────
+fn pyArgSlice(item: ?*c.PyObject) ?[]const u8 {
+    const obj = item orelse return null;
 
-// connect(host, port)
+    var ptr: [*c]u8 = null;
+    var len: c.Py_ssize_t = 0;
+    if (c.PyBytes_AsStringAndSize(obj, &ptr, &len) == 0) {
+        return @as([*]const u8, @ptrCast(ptr))[0..@intCast(len)];
+    }
+    c.PyErr_Clear();
+
+    const unicode_ptr = c.PyUnicode_AsUTF8AndSize(obj, &len) orelse return null;
+    return unicode_ptr[0..@intCast(len)];
+}
+
 fn py_connect(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var host_ptr: [*c]const u8 = null;
     var port: c_int = 6379;
     if (c.PyArg_ParseTuple(args, "si", &host_ptr, &port) == 0) return null;
 
-    conn_lock.lock();
-    defer conn_lock.unlock();
+    const allocator = std.heap.c_allocator;
+    const state = allocator.create(ConnectionState) catch {
+        c.PyErr_SetString(c.PyExc_MemoryError, "failed to allocate connection state");
+        return null;
+    };
+    errdefer allocator.destroy(state);
 
-    if (zig_stream) |s| { s.close(); zig_stream = null; }
-    ensureConnected(std.mem.span(host_ptr), @intCast(port)) catch {
+    state.host = allocator.dupe(u8, std.mem.span(host_ptr)) catch {
+        c.PyErr_SetString(c.PyExc_MemoryError, "failed to copy host");
+        return null;
+    };
+    errdefer allocator.free(state.host);
+    state.port = @intCast(port);
+
+    ensureConnected(state) catch {
         c.PyErr_SetString(c.PyExc_ConnectionError, "failed to connect");
         return null;
     };
-    return c.Py_BuildValue("");
+
+    return c.PyCapsule_New(state, capsule_name, @ptrCast(&capsuleDestructor));
 }
 
-// execute(args_list) -> value — THE HOT PATH. One call does everything in Zig.
 fn py_execute(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var capsule_obj: ?*c.PyObject = null;
     var list_obj: ?*c.PyObject = null;
-    if (c.PyArg_ParseTuple(args, "O", &list_obj) == 0) return null;
+    if (c.PyArg_ParseTuple(args, "OO", &capsule_obj, &list_obj) == 0) return null;
+
+    const state = connectionFromCapsule(capsule_obj) orelse return null;
     const py_list = list_obj orelse return null;
     const n: usize = @intCast(c.PyList_Size(py_list));
     if (n == 0) return c.Py_BuildValue("");
     const allocator = std.heap.c_allocator;
 
-    // Extract string args from Python list
     const cmd_args = allocator.alloc([]const u8, n) catch return null;
     defer allocator.free(cmd_args);
     for (0..n) |i| {
         const item = c.PyList_GetItem(py_list, @intCast(i)) orelse return null;
-        var len: c.Py_ssize_t = 0;
-        const ptr = c.PyUnicode_AsUTF8AndSize(item, &len) orelse return null;
-        cmd_args[i] = ptr[0..@intCast(len)];
+        cmd_args[i] = pyArgSlice(item) orelse return null;
     }
 
-    conn_lock.lock();
-    defer conn_lock.unlock();
+    state.lock.lock();
+    defer state.lock.unlock();
 
-    // Pack command in Zig
+    ensureConnected(state) catch {
+        c.PyErr_SetString(c.PyExc_ConnectionError, "failed to connect");
+        return null;
+    };
+
     const cmd_buf = resp.packCommand(allocator, cmd_args) catch {
         c.PyErr_SetString(c.PyExc_MemoryError, "pack failed");
         return null;
     };
     defer allocator.free(cmd_buf);
 
-    // Send via Zig TCP
-    zigSend(cmd_buf) catch {
+    zigSend(state, cmd_buf) catch {
         c.PyErr_SetString(c.PyExc_ConnectionError, "send failed");
         return null;
     };
 
-    // Recv + parse via Zig
-    const val = zigRecvResponse(allocator) catch {
+    const val = zigRecvResponse(state, allocator) catch {
         c.PyErr_SetString(c.PyExc_ConnectionError, "recv/parse failed");
         return null;
     };
@@ -130,15 +197,16 @@ fn py_execute(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     return respToPy(val);
 }
 
-// execute_pipeline(list_of_arg_lists) -> list of values — batch in one Zig call
 fn py_execute_pipeline(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var capsule_obj: ?*c.PyObject = null;
     var list_obj: ?*c.PyObject = null;
-    if (c.PyArg_ParseTuple(args, "O", &list_obj) == 0) return null;
+    if (c.PyArg_ParseTuple(args, "OO", &capsule_obj, &list_obj) == 0) return null;
+
+    const state = connectionFromCapsule(capsule_obj) orelse return null;
     const py_list = list_obj orelse return null;
     const num_cmds: usize = @intCast(c.PyList_Size(py_list));
     const allocator = std.heap.c_allocator;
 
-    // Pack ALL commands into one buffer
     var total_buf: std.ArrayList(u8) = .empty;
     defer total_buf.deinit(allocator);
 
@@ -149,28 +217,29 @@ fn py_execute_pipeline(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyO
         defer allocator.free(cmd_args);
         for (0..nargs) |i| {
             const item = c.PyList_GetItem(cmd_list, @intCast(i)) orelse return null;
-            var len: c.Py_ssize_t = 0;
-            const ptr = c.PyUnicode_AsUTF8AndSize(item, &len) orelse return null;
-            cmd_args[i] = ptr[0..@intCast(len)];
+            cmd_args[i] = pyArgSlice(item) orelse return null;
         }
         const cmd_packed = resp.packCommand(allocator, cmd_args) catch return null;
         defer allocator.free(cmd_packed);
         total_buf.appendSlice(allocator, cmd_packed) catch return null;
     }
 
-    conn_lock.lock();
-    defer conn_lock.unlock();
+    state.lock.lock();
+    defer state.lock.unlock();
 
-    // One TCP send for all commands
-    zigSend(total_buf.items) catch {
+    ensureConnected(state) catch {
+        c.PyErr_SetString(c.PyExc_ConnectionError, "failed to connect");
+        return null;
+    };
+
+    zigSend(state, total_buf.items) catch {
         c.PyErr_SetString(c.PyExc_ConnectionError, "pipeline send failed");
         return null;
     };
 
-    // Read all responses
     const py_result = c.PyList_New(@intCast(num_cmds)) orelse return null;
     for (0..num_cmds) |i| {
-        const val = zigRecvResponse(allocator) catch {
+        const val = zigRecvResponse(state, allocator) catch {
             c.PyErr_SetString(c.PyExc_ConnectionError, "pipeline recv failed");
             return null;
         };
@@ -180,17 +249,17 @@ fn py_execute_pipeline(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyO
     return py_result;
 }
 
-// close()
-fn py_close(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
-    conn_lock.lock();
-    defer conn_lock.unlock();
-    if (zig_stream) |s| { s.close(); zig_stream = null; }
-    read_pos = 0;
-    read_len = 0;
+fn py_close(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var capsule_obj: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "O", &capsule_obj) == 0) return null;
+
+    const state = connectionFromCapsule(capsule_obj) orelse return null;
+    state.lock.lock();
+    defer state.lock.unlock();
+    closeStream(state);
     return c.Py_BuildValue("");
 }
 
-// parse_resp + pack_command kept for benchmarking
 fn py_parse_resp(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var data_ptr: [*c]const u8 = null;
     var data_len: c.Py_ssize_t = 0;
@@ -212,16 +281,12 @@ fn py_pack_command(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObjec
     defer allocator.free(cmd_args);
     for (0..n) |i| {
         const item = c.PyList_GetItem(py_list, @intCast(i)) orelse return null;
-        var len: c.Py_ssize_t = 0;
-        const ptr = c.PyUnicode_AsUTF8AndSize(item, &len) orelse return null;
-        cmd_args[i] = ptr[0..@intCast(len)];
+        cmd_args[i] = pyArgSlice(item) orelse return null;
     }
     const buf = resp.packCommand(allocator, cmd_args) catch return null;
     defer allocator.free(buf);
     return c.PyBytes_FromStringAndSize(@ptrCast(buf.ptr), @intCast(buf.len));
 }
-
-// ── RespValue -> PyObject ───────────────────────────────────────────────────
 
 fn respToPy(val: resp.RespValue) ?*c.PyObject {
     return switch (val.type) {
@@ -241,13 +306,11 @@ fn respToPy(val: resp.RespValue) ?*c.PyObject {
     };
 }
 
-// ── Module ──────────────────────────────────────────────────────────────────
-
 var methods = [_]c.PyMethodDef{
-    .{ .ml_name = "connect", .ml_meth = @ptrCast(&py_connect), .ml_flags = c.METH_VARARGS, .ml_doc = "Connect to Redis (Zig TCP)" },
-    .{ .ml_name = "execute", .ml_meth = @ptrCast(&py_execute), .ml_flags = c.METH_VARARGS, .ml_doc = "Execute command (full Zig hot path)" },
-    .{ .ml_name = "execute_pipeline", .ml_meth = @ptrCast(&py_execute_pipeline), .ml_flags = c.METH_VARARGS, .ml_doc = "Pipeline execute (one TCP write, N reads)" },
-    .{ .ml_name = "close", .ml_meth = @ptrCast(&py_close), .ml_flags = c.METH_NOARGS, .ml_doc = "Close connection" },
+    .{ .ml_name = "connect", .ml_meth = @ptrCast(&py_connect), .ml_flags = c.METH_VARARGS, .ml_doc = "Connect to Redis and return a native handle" },
+    .{ .ml_name = "execute", .ml_meth = @ptrCast(&py_execute), .ml_flags = c.METH_VARARGS, .ml_doc = "Execute command on a native handle" },
+    .{ .ml_name = "execute_pipeline", .ml_meth = @ptrCast(&py_execute_pipeline), .ml_flags = c.METH_VARARGS, .ml_doc = "Pipeline execute on a native handle" },
+    .{ .ml_name = "close", .ml_meth = @ptrCast(&py_close), .ml_flags = c.METH_VARARGS, .ml_doc = "Close a native handle connection" },
     .{ .ml_name = "parse_resp", .ml_meth = @ptrCast(&py_parse_resp), .ml_flags = c.METH_VARARGS, .ml_doc = "Parse RESP bytes" },
     .{ .ml_name = "pack_command", .ml_meth = @ptrCast(&py_pack_command), .ml_flags = c.METH_VARARGS, .ml_doc = "Pack command to RESP" },
     .{ .ml_name = null, .ml_meth = null, .ml_flags = 0, .ml_doc = null },

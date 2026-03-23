@@ -28,5 +28,5 @@ from ._parity import (
     non_core_parity_scenarios,
     run_parity_matrix,
 )
-from ._client import Redis, Pipeline
+from ._client import Pipeline, PooledRedis, Redis, ThreadLocalRedis
 from ._shadow import NativeShadowMismatch, ShadowRedis, native_compare, native_shadow

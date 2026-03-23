@@ -1,5 +1,9 @@
 """Python Redis client. Zig handles the entire hot path."""
 
+import threading
+from contextlib import contextmanager
+from queue import LifoQueue, Empty
+
 import redis as _redis_py
 
 from faster_redis._redis_accel import (
@@ -21,6 +25,16 @@ def _reject_unsupported_kwargs(name, kwargs):
             f"{name}() does not support keyword arguments in the raw-command fallback; "
             f"use execute_command(...) or an explicit method instead (got: {keys})"
         )
+
+
+def _coerce_command_arg(arg):
+    if isinstance(arg, (str, bytes)):
+        return arg
+    if isinstance(arg, bytearray):
+        return bytes(arg)
+    if isinstance(arg, memoryview):
+        return arg.tobytes()
+    return str(arg)
 
 
 def _response_key(args):
@@ -150,14 +164,14 @@ class Redis:
         self._db = db
         self._password = password
         self._decode = decode_responses
-        _connect(host, port)
+        self._conn = _connect(host, port)
         if password:
             self._exec('AUTH', password)
         if db:
             self._exec('SELECT', str(db))
 
     def _exec(self, *args):
-        result = self._dec(_execute([str(a) for a in args]))
+        result = self._dec(_execute(self._conn, [_coerce_command_arg(a) for a in args]))
         return self._apply_response_callback(args, result)
 
     def _dec(self, result):
@@ -195,7 +209,15 @@ class Redis:
         return result
 
     def close(self):
-        _close()
+        if self._conn is not None:
+            _close(self._conn)
+            self._conn = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def __enter__(self):
         return self
@@ -378,6 +400,9 @@ class Redis:
     def select(self, db): return self._exec('SELECT', str(db))
     def echo(self, msg): return self._exec('ECHO', msg)
     def time(self): return self._exec('TIME')
+    def script_load(self, script): return self._exec('SCRIPT', 'LOAD', script)
+    def eval(self, script, numkeys, *keys_and_args): return self._exec('EVAL', script, numkeys, *keys_and_args)
+    def evalsha(self, sha1, numkeys, *keys_and_args): return self._exec('EVALSHA', sha1, numkeys, *keys_and_args)
     def config_get(self, pattern="*"): return self._exec('CONFIG', 'GET', pattern)
     def config_set(self, name, value): return self._exec('CONFIG', 'SET', name, value)
     def config_resetstat(self): return self._exec('CONFIG', 'RESETSTAT')
@@ -433,8 +458,8 @@ class Pipeline:
             cmds = [['MULTI']] + cmds + [['EXEC']]
 
         # One Zig call: pack all, send all, recv all
-        cmd_lists = [[str(a) for a in cmd] for cmd in cmds]
-        results = _execute_pipeline(cmd_lists)
+        cmd_lists = [[_coerce_command_arg(a) for a in cmd] for cmd in cmds]
+        results = _execute_pipeline(self._client._conn, cmd_lists)
         results = [self._client._apply_response_callback(cmd, self._client._dec(r)) for cmd, r in zip(cmds, results)]
 
         if self._transaction and results:
@@ -485,3 +510,102 @@ class Pipeline:
             self._commands.append(_normalize_command_name(name) + list(args))
             return self
         return method
+
+
+class ThreadLocalRedis:
+    """One Redis connection per Python thread."""
+
+    def __init__(self, host='127.0.0.1', port=6379, db=0, password=None,
+                 decode_responses=True):
+        self._kwargs = {
+            'host': host,
+            'port': port,
+            'db': db,
+            'password': password,
+            'decode_responses': decode_responses,
+        }
+        self._local = threading.local()
+        self._registry_lock = threading.Lock()
+        self._clients = {}
+
+    def client(self):
+        client = getattr(self._local, 'client', None)
+        if client is None:
+            client = Redis(**self._kwargs)
+            self._local.client = client
+            with self._registry_lock:
+                self._clients[threading.get_ident()] = client
+        return client
+
+    def close_thread(self):
+        client = getattr(self._local, 'client', None)
+        if client is None:
+            return
+        client.close()
+        self._local.client = None
+        with self._registry_lock:
+            self._clients.pop(threading.get_ident(), None)
+
+    def close(self):
+        with self._registry_lock:
+            clients = list(self._clients.values())
+            self._clients.clear()
+        for client in clients:
+            client.close()
+        self._local.client = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+    def __getattr__(self, name):
+        if name.startswith('_'):
+            raise AttributeError(name)
+        return getattr(self.client(), name)
+
+
+class PooledRedis:
+    """Small fixed-size pool of native Redis clients."""
+
+    def __init__(self, size=4, host='127.0.0.1', port=6379, db=0, password=None,
+                 decode_responses=True):
+        self._kwargs = {
+            'host': host,
+            'port': port,
+            'db': db,
+            'password': password,
+            'decode_responses': decode_responses,
+        }
+        self._queue = LifoQueue(maxsize=size)
+        self._clients = [Redis(**self._kwargs) for _ in range(size)]
+        for client in self._clients:
+            self._queue.put(client)
+
+    @contextmanager
+    def connection(self, timeout=None):
+        try:
+            client = self._queue.get(timeout=timeout)
+        except Empty as exc:
+            raise RuntimeError("No Redis connection available in pool") from exc
+        try:
+            yield client
+        finally:
+            self._queue.put(client)
+
+    def close(self):
+        while True:
+            try:
+                self._queue.get_nowait()
+            except Empty:
+                break
+        for client in self._clients:
+            client.close()
+        self._clients = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()

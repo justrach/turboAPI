@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import unittest
 
 import redis
@@ -9,7 +10,7 @@ ROOT = os.path.dirname(os.path.dirname(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from faster_redis._client import Redis
+from faster_redis._client import PooledRedis, Redis, ThreadLocalRedis
 
 
 class ClientFallbackTests(unittest.TestCase):
@@ -28,6 +29,54 @@ class ClientFallbackTests(unittest.TestCase):
 
     def test_direct_multiword_command_mapping(self):
         self.assertIsInstance(self.faster.client_id(), int)
+
+    def test_multiple_clients_keep_selected_db_isolated(self):
+        db1 = Redis(db=1)
+        try:
+            db1.flushdb()
+            self.faster.set("shared-key", "db0")
+            db1.set("shared-key", "db1")
+            self.assertEqual(self.faster.get("shared-key"), "db0")
+            self.assertEqual(db1.get("shared-key"), "db1")
+        finally:
+            db1.close()
+
+    def test_thread_local_redis_keeps_one_client_per_thread(self):
+        tls = ThreadLocalRedis()
+        seen = []
+        lock = threading.Lock()
+
+        def worker():
+            client = tls.client()
+            client_id = client.client_id()
+            client.set(f"thread:{threading.get_ident()}", "ok")
+            with lock:
+                seen.append(client_id)
+            tls.close_thread()
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(len(set(seen)), 2)
+        tls.close()
+
+    def test_pooled_redis_supports_parallel_checkouts(self):
+        pool = PooledRedis(size=2)
+        seen = set()
+        try:
+            with pool.connection() as c1:
+                with pool.connection() as c2:
+                    seen.add(c1.client_id())
+                    seen.add(c2.client_id())
+                    self.assertIs(c1.ping(), True)
+                    self.assertIs(c2.ping(), True)
+        finally:
+            pool.close()
+        self.assertEqual(len(seen), 2)
 
     def test_pipeline_multiword_command_mapping(self):
         with self.faster.pipeline() as pipe:
@@ -56,6 +105,19 @@ class ClientFallbackTests(unittest.TestCase):
     def test_execute_command_matches_raw_multiword_command(self):
         actual = self.faster.execute_command("CLIENT", "ID")
         self.assertIsInstance(actual, int)
+
+    def test_script_commands_accept_binary_args(self):
+        script = b"return {KEYS[1],ARGV[1]}"
+        sha = self.faster.script_load(script)
+        self.assertEqual(len(sha), 40)
+        self.assertEqual(
+            self.faster.evalsha(sha, 1, b"script:key", memoryview(b"payload")),
+            ["script:key", "payload"],
+        )
+        self.assertEqual(
+            self.faster.eval(script, 1, bytearray(b"script:key"), b"payload"),
+            ["script:key", "payload"],
+        )
 
     def test_set_and_mset_match_redis_py_semantics(self):
         self.assertIs(self.faster.set("set-key", "1"), True)
