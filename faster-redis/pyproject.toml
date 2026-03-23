@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "faster-redis"
+version = "0.1.0"
+description = "Drop-in redis-py replacement powered by Zig — SIMD RESP parsing, pipelined I/O"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Rach Pradhan", email = "rach@turboapi.dev"}
+]
+keywords = ["redis", "zig", "performance", "simd", "resp", "pipelining"]
+dependencies = [
+    "redis>=5.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/justrach/turboAPI"
+Repository = "https://github.com/justrach/turboAPI"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["faster_redis*"]
+
+[tool.setuptools.package-data]
+faster_redis = ["*.so", "*.dylib", "*.pyd"]
