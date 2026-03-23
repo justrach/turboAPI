@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "turbopg"
-version = "0.1.0rc1"
+version = "0.1.1"
 description = "Zig-native Postgres client for Python — zero-overhead queries powered by pg.zig"
 readme = "README.md"
 requires-python = ">=3.11"

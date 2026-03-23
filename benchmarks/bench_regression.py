@@ -21,7 +21,7 @@ BASELINE_FILE = os.path.join(os.path.dirname(__file__), "baseline.json")
 
 # Minimum acceptable req/s per endpoint (updated by --save)
 DEFAULT_THRESHOLDS = {
-    "GET /health (static)": 130_000,
+    "GET /health": 130_000,
     "GET /": 125_000,
     "GET /json": 125_000,
     "GET /users/123": 125_000,
@@ -45,7 +45,9 @@ class Item(BaseModel):
     price: float
     description: Optional[str] = None
 
-app.static_route("GET", "/health", '{"status":"ok","engine":"zig-static"}')
+@app.get("/health")
+def health():
+    return {"status":"ok","engine":"turbo"}
 
 @app.get("/")
 def root():
@@ -72,7 +74,7 @@ if __name__ == "__main__":
 '''
 
 BENCHMARKS = [
-    ("GET /health (static)", "/health", "GET", None),
+    ("GET /health", "/health", "GET", None),
     ("GET /", "/", "GET", None),
     ("GET /json", "/json", "GET", None),
     ("GET /users/123", "/users/123", "GET", None),
@@ -142,6 +144,7 @@ def main():
     env = os.environ.copy()
     env["PYTHON_GIL"] = "0"
     env["TURBO_DISABLE_RATE_LIMITING"] = "1"
+    env["TURBO_DISABLE_CACHE"] = "1"
     proc = subprocess.Popen(
         [sys.executable, "/tmp/turboapi_regbench.py"],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

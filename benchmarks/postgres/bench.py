@@ -1,304 +1,437 @@
+#!/usr/bin/env python3
 """
-asyncpg vs TurboAPI+pg.zig -- head-to-head benchmark.
+End-to-end HTTP + DB benchmark.
 
-Runs inside Docker alongside Postgres 18. Fully reproducible.
+Compares:
+1. TurboAPI + pg.zig/turbopg
+2. FastAPI + asyncpg
+3. FastAPI + SQLAlchemy
 
-Tests 4 configurations:
-  1. asyncpg         -- raw Python, concurrent (asyncio.gather, pool=16)
-  2. Turbo cached    -- Zig response cache enabled (repeat requests hit cache)
-  3. Turbo no-cache  -- varying IDs via wrk lua script (every request hits Postgres)
-  4. Turbo raw SQL   -- custom SQL queries, ORDER BY random() to bust cache
-
-Usage:
-  cd benchmarks/postgres
-  docker compose up --build
+All three expose the same HTTP routes. TurboAPI runs with both the HTTP
+response cache and DB cache disabled so the benchmark measures uncached
+request -> query -> serialization throughput.
 """
 
-import asyncio
+from __future__ import annotations
+
 import os
 import re
 import socket
 import subprocess
-import threading
+import sys
+import tempfile
+import textwrap
 import time
+import urllib.request
+from dataclasses import dataclass
 
-CONN = os.environ.get("BENCH_PG_URL", "postgresql://bench:bench@localhost:5432/bench")
+DB_URL = os.environ.get("BENCH_PG_URL", "postgresql://bench:bench@127.0.0.1:5432/bench")
 WRK_DURATION = os.environ.get("BENCH_DURATION", "10s")
 WRK_THREADS = 4
 WRK_CONNECTIONS = 100
-N_ASYNC = 10_000
+POOL_SIZE = int(os.environ.get("BENCH_POOL_SIZE", "32"))
+TURBO_POOL_SIZE = int(os.environ.get("BENCH_TURBO_POOL_SIZE", str(POOL_SIZE)))
+COMPETITOR_POOL_SIZE = int(os.environ.get("BENCH_COMPETITOR_POOL_SIZE", str(POOL_SIZE)))
+SOLO_TURBO = os.environ.get("BENCH_SOLO_TURBO") == "1"
 
 
-def free_port():
+def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
-def parse_wrk(output):
-    rps = 0
+def parse_wrk(output: str) -> tuple[float, str]:
+    rps = 0.0
     lat = ""
     for line in output.splitlines():
-        if "Requests/sec" in line:
-            m = re.search(r"Requests/sec:\s*([\d.]+)", line)
-            if m:
-                rps = float(m.group(1))
+        if "Requests/sec:" in line:
+            match = re.search(r"Requests/sec:\s*([\d.]+)", line)
+            if match:
+                rps = float(match.group(1))
         if "Latency" in line and "Distribution" not in line:
             lat = line.strip()
     return rps, lat
 
 
-def run_wrk(url, label):
-    r = subprocess.run(
+def run_wrk(url: str, label: str) -> tuple[float, str]:
+    result = subprocess.run(
         ["wrk", f"-t{WRK_THREADS}", f"-c{WRK_CONNECTIONS}", f"-d{WRK_DURATION}", url],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
-    rps, lat = parse_wrk(r.stdout)
+    rps, lat = parse_wrk(result.stdout)
     print(f"  {label}: {rps:,.0f} req/s  |  {lat}", flush=True)
-    return rps
+    return rps, lat
 
 
-def run_wrk_lua(url, lua_path, label):
-    r = subprocess.run(
+def run_wrk_lua(url: str, lua_path: str, label: str) -> tuple[float, str]:
+    result = subprocess.run(
         ["wrk", f"-t{WRK_THREADS}", f"-c{WRK_CONNECTIONS}", f"-d{WRK_DURATION}", "-s", lua_path, url],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
-    rps, lat = parse_wrk(r.stdout)
+    rps, lat = parse_wrk(result.stdout)
     print(f"  {label}: {rps:,.0f} req/s  |  {lat}", flush=True)
-    return rps
+    return rps, lat
 
 
-# ---------------------------------------------------------------------------
-# 1. asyncpg
-# ---------------------------------------------------------------------------
-def bench_asyncpg():
-    print("\n=== 1. asyncpg (concurrent, pool=16) ===", flush=True)
-
-    async def run():
-        import asyncpg
-        conn_str = CONN.replace("postgresql://", "postgres://")
-        pool = await asyncpg.create_pool(conn_str, min_size=16, max_size=16)
-
-        # warmup
-        for i in range(200):
-            await pool.fetchrow("SELECT * FROM users WHERE id = $1", (i % 1000) + 1)
-
-        # SELECT by ID
-        start = time.perf_counter()
-        tasks = [pool.fetchrow("SELECT * FROM users WHERE id = $1", (i % 1000) + 1) for i in range(N_ASYNC)]
-        await asyncio.gather(*tasks)
-        elapsed = time.perf_counter() - start
-        rps_id = N_ASYNC / elapsed
-        print(f"  SELECT by ID:   {rps_id:,.0f} queries/sec  ({elapsed:.2f}s for {N_ASYNC})", flush=True)
-
-        # SELECT list
-        start2 = time.perf_counter()
-        tasks2 = [pool.fetch("SELECT * FROM users WHERE age > $1 LIMIT 20", 20 + (i % 30)) for i in range(N_ASYNC)]
-        await asyncio.gather(*tasks2)
-        elapsed2 = time.perf_counter() - start2
-        rps_list = N_ASYNC / elapsed2
-        print(f"  SELECT list:    {rps_list:,.0f} queries/sec  ({elapsed2:.2f}s for {N_ASYNC})", flush=True)
-
-        # Raw ILIKE
-        start3 = time.perf_counter()
-        tasks3 = [
-            pool.fetch("SELECT id, name, email FROM users WHERE name ILIKE $1 LIMIT 10", f"user_{(i%500)+1}%")
-            for i in range(N_ASYNC)
-        ]
-        await asyncio.gather(*tasks3)
-        elapsed3 = time.perf_counter() - start3
-        rps_raw = N_ASYNC / elapsed3
-        print(f"  Raw ILIKE:      {rps_raw:,.0f} queries/sec  ({elapsed3:.2f}s for {N_ASYNC})", flush=True)
-
-        await pool.close()
-        return rps_id, rps_list, rps_raw
-
-    return asyncio.run(run())
+def wait_for(port: int, timeout: float = 20.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
+            return True
+        except Exception:
+            time.sleep(0.1)
+    return False
 
 
-# ---------------------------------------------------------------------------
-# 2-4. TurboAPI+pg.zig
-# ---------------------------------------------------------------------------
-def start_turbo_app(routes_fn):
-    from turboapi import TurboAPI
-    app = TurboAPI()
-    app.configure_db(CONN, pool_size=16)
-    routes_fn(app)
+def warmup(port: int) -> None:
+    paths = [
+        "/health",
+        "/users/1",
+        "/users?age_min=20",
+        "/search?q=user_42%25",
+    ]
+    for path in paths:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2).read()
+        except Exception:
+            pass
+
+
+@dataclass
+class ServerHandle:
+    name: str
+    proc: subprocess.Popen[str]
+    port: int
+    err_path: str
+
+
+def start_server(name: str, code: str) -> ServerHandle:
     port = free_port()
-    # Store server thread so we can reference it
-    server_thread = threading.Thread(target=lambda: app.run(host="127.0.0.1", port=port), daemon=True)
-    server_thread.start()
-    time.sleep(3)
-    # warmup: hit enough unique IDs to prime all 16 pool connections
-    import requests
-    for i in range(200):
-        requests.get(f"http://127.0.0.1:{port}/users/{(i % 1000) + 1}", timeout=5)
-    time.sleep(1)
-    return port
-def routes_cached(app):
-    @app.db_get("/users/{user_id}", table="users", pk="id")
+    pool_size = TURBO_POOL_SIZE if name == "TurboAPI + pg.zig" else COMPETITOR_POOL_SIZE
+    rendered = code.format(db_url=DB_URL, port=port, pool_size=pool_size)
+    err_file = tempfile.NamedTemporaryFile(mode="w", suffix=f".{name}.log", delete=False)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", rendered],
+        stdout=subprocess.DEVNULL,
+        stderr=err_file,
+        text=True,
+    )
+    return ServerHandle(name=name, proc=proc, port=port, err_path=err_file.name)
+
+
+def stop_server(handle: ServerHandle) -> None:
+    handle.proc.kill()
+    try:
+        handle.proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        handle.proc.kill()
+
+
+def read_server_error(handle: ServerHandle) -> str:
+    try:
+        with open(handle.err_path) as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+TURBO_CODE = textwrap.dedent(
+    """
+    import os
+
+    os.environ["TURBO_DISABLE_CACHE"] = "1"
+    os.environ["TURBO_DISABLE_DB_CACHE"] = "1"
+    os.environ["TURBO_DISABLE_RATE_LIMITING"] = "1"
+    os.environ["TURBO_THREAD_POOL_SIZE"] = "{pool_size}"
+
+    from turboapi import TurboAPI
+
+    app = TurboAPI()
+    app.configure_db("{db_url}", pool_size={pool_size})
+
+    @app.db_get("/users/{{user_id}}", table="users", pk="id", columns=["id", "name", "email", "age"])
     def get_user():
         pass
 
-    @app.db_query("GET", "/users", sql="SELECT id, name, email, age FROM users LIMIT 20")
+    @app.db_query(
+        "GET",
+        "/users",
+        sql="SELECT id, name, email, age FROM users WHERE age > $1 ORDER BY id LIMIT 20",
+        params=["age_min"],
+    )
     def list_users():
         pass
 
-
-def routes_nocache(app):
-    @app.db_get("/users/{user_id}", table="users", pk="id")
-    def get_user():
-        pass
-
-    @app.db_query("GET", "/users", sql="SELECT id, name, email, age FROM users ORDER BY random() LIMIT 20")
-    def list_users():
-        pass
-
-
-def routes_raw(app):
-    @app.db_get("/users/{user_id}", table="users", pk="id")
-    def get_user():
-        pass
-
-    @app.db_query("GET", "/users", sql="SELECT id, name, email, age FROM users ORDER BY random() LIMIT 20")
-    def list_users():
-        pass
-
-    @app.db_query("GET", "/search", sql="SELECT id, name, email FROM users WHERE name ILIKE $1 LIMIT 10", params=["q"])
+    @app.db_query(
+        "GET",
+        "/search",
+        sql="SELECT id, name, email FROM users WHERE name ILIKE $1 LIMIT 10",
+        params=["q"],
+    )
     def search():
         pass
 
+    @app.get("/health")
+    def health():
+        return {{"status": "ok"}}
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
-def main():
-    import json as json_mod
+    app.run(host="127.0.0.1", port={port})
+    """
+)
 
-    results_file = "/tmp/bench_results.json"
 
-    # Check if we're running a sub-test or the orchestrator
-    mode = os.environ.get("BENCH_MODE", "orchestrate")
+FASTAPI_ASYNCPG_CODE = textwrap.dedent(
+    """
+    import asyncpg
+    import uvicorn
+    from contextlib import asynccontextmanager
+    from fastapi import FastAPI
 
-    if mode == "asyncpg":
-        apg_id, apg_list, apg_raw = bench_asyncpg()
-        with open(results_file, "w") as f:
-            json_mod.dump({"apg_id": apg_id, "apg_list": apg_list, "apg_raw": apg_raw}, f)
-        os._exit(0)
+    DB_URL = "{db_url}".replace("postgresql://", "postgres://")
+    pool = None
 
-    elif mode == "turbo_cached":
-        port = start_turbo_app(routes_cached)
-        print("\n=== 2. TurboAPI+pg.zig CACHED ===", flush=True)
-        rps_id = run_wrk(f"http://127.0.0.1:{port}/users/1", "SELECT by ID (cached)")
-        rps_list = run_wrk(f"http://127.0.0.1:{port}/users", "SELECT list (cached)")
-        with open(results_file, "w") as f:
-            json_mod.dump({"rps_id": rps_id, "rps_list": rps_list}, f)
-        os._exit(0)
+    @asynccontextmanager
+    async def lifespan(app):
+        global pool
+        pool = await asyncpg.create_pool(DB_URL, min_size={pool_size}, max_size={pool_size})
+        yield
+        await pool.close()
 
-    elif mode == "turbo_nocache":
-        port = start_turbo_app(routes_nocache)
-        print("\n=== 3. TurboAPI+pg.zig NO CACHE (varying IDs) ===", flush=True)
-        rps_id = run_wrk_lua(
-            f"http://127.0.0.1:{port}/users/1", "/app/varying_ids.lua",
-            "SELECT by ID (varying)",
-        )
-        rps_list = run_wrk(f"http://127.0.0.1:{port}/users", "SELECT list (random)")
-        with open(results_file, "w") as f:
-            json_mod.dump({"rps_id": rps_id, "rps_list": rps_list}, f)
-        os._exit(0)
+    app = FastAPI(lifespan=lifespan)
 
-    elif mode == "turbo_raw":
-        port = start_turbo_app(routes_raw)
-        print("\n=== 4. TurboAPI+pg.zig RAW QUERY ===", flush=True)
-        rps_id = run_wrk_lua(
-            f"http://127.0.0.1:{port}/users/1", "/app/varying_ids.lua",
-            "SELECT by ID (varying)",
-        )
-        rps_list = run_wrk(f"http://127.0.0.1:{port}/users", "SELECT list (random)")
-        rps_search = run_wrk(f"http://127.0.0.1:{port}/search?q=user_42%25", "Raw ILIKE search")
-        with open(results_file, "w") as f:
-            json_mod.dump({"rps_id": rps_id, "rps_list": rps_list, "rps_search": rps_search}, f)
-        os._exit(0)
+    @app.get("/users/{{user_id}}")
+    async def get_user(user_id: int):
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, name, email, age FROM users WHERE id = $1",
+                user_id,
+            )
+        return dict(row) if row else {{"error": "not found"}}
 
-    # --- Orchestrator: run each test as a separate process ---
-    print("=" * 70, flush=True)
-    print("asyncpg vs TurboAPI+pg.zig -- Head-to-Head Benchmark", flush=True)
-    print("=" * 70, flush=True)
-    print(f"Postgres: {CONN}", flush=True)
+    @app.get("/users")
+    async def list_users(age_min: int = 20):
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, name, email, age FROM users WHERE age > $1 ORDER BY id LIMIT 20",
+                age_min,
+            )
+        return [dict(row) for row in rows]
+
+    @app.get("/search")
+    async def search(q: str):
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, name, email FROM users WHERE name ILIKE $1 LIMIT 10",
+                q,
+            )
+        return [dict(row) for row in rows]
+
+    @app.get("/health")
+    async def health():
+        return {{"status": "ok"}}
+
+    uvicorn.run(app, host="127.0.0.1", port={port}, log_level="error", access_log=False)
+    """
+)
+
+
+FASTAPI_SQLALCHEMY_CODE = textwrap.dedent(
+    """
+    import uvicorn
+    from fastapi import FastAPI
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    engine = create_engine("{db_url}", pool_size={pool_size})
+    app = FastAPI()
+
+    @app.get("/users/{{user_id}}")
+    def get_user(user_id: int):
+        with Session(engine) as session:
+            row = session.execute(
+                text("SELECT id, name, email, age FROM users WHERE id = :id"),
+                {{"id": user_id}},
+            ).fetchone()
+        return dict(row._mapping) if row else {{"error": "not found"}}
+
+    @app.get("/users")
+    def list_users(age_min: int = 20):
+        with Session(engine) as session:
+            rows = session.execute(
+                text("SELECT id, name, email, age FROM users WHERE age > :age_min ORDER BY id LIMIT 20"),
+                {{"age_min": age_min}},
+            ).fetchall()
+        return [dict(row._mapping) for row in rows]
+
+    @app.get("/search")
+    def search(q: str):
+        with Session(engine) as session:
+            rows = session.execute(
+                text("SELECT id, name, email FROM users WHERE name ILIKE :q LIMIT 10"),
+                {{"q": q}},
+            ).fetchall()
+        return [dict(row._mapping) for row in rows]
+
+    @app.get("/health")
+    def health():
+        return {{"status": "ok"}}
+
+    uvicorn.run(app, host="127.0.0.1", port={port}, log_level="error", access_log=False)
+    """
+)
+
+
+def main() -> int:
+    print("=" * 78, flush=True)
+    print("TurboAPI + pg.zig vs FastAPI + asyncpg / SQLAlchemy", flush=True)
+    print("=" * 78, flush=True)
+    print(f"Postgres: {DB_URL}", flush=True)
     print(f"wrk: -t{WRK_THREADS} -c{WRK_CONNECTIONS} -d{WRK_DURATION}", flush=True)
-    print(f"asyncpg: {N_ASYNC} queries via asyncio.gather", flush=True)
-    print("Each test runs in its own process (no resource contention)", flush=True)
+    print(
+        f"pool sizes: turbo={TURBO_POOL_SIZE} competitors={COMPETITOR_POOL_SIZE}",
+        flush=True,
+    )
+    if SOLO_TURBO:
+        print("TurboAPI-only run. Cache is OFF.", flush=True)
+    else:
+        print("All servers expose the same HTTP routes. TurboAPI cache is OFF.", flush=True)
+    print(flush=True)
 
-    import sys
-    script = os.path.abspath(__file__)
-    env_base = dict(os.environ)
+    servers = [("TurboAPI + pg.zig", TURBO_CODE)]
+    if not SOLO_TURBO:
+        servers.extend([
+            ("FastAPI + asyncpg", FASTAPI_ASYNCPG_CODE),
+            ("FastAPI + SQLAlchemy", FASTAPI_SQLALCHEMY_CODE),
+        ])
 
-    def run_sub(mode_name):
-        env = dict(env_base)
-        env["BENCH_MODE"] = mode_name
-        r = subprocess.run(
-            [sys.executable, script],
-            env=env, capture_output=False, timeout=300,
-        )
-        if r.returncode != 0:
-            print(f"  {mode_name} failed (exit {r.returncode})", flush=True)
-            return {}
-        try:
-            with open(results_file) as f:
-                return json_mod.load(f)
-        except Exception:
-            return {}
+    handles: list[ServerHandle] = []
+    try:
+        for name, code in servers:
+            print(f"Starting {name}...", end=" ", flush=True)
+            handle = start_server(name, code)
+            if not wait_for(handle.port):
+                print("FAILED", flush=True)
+                err = read_server_error(handle)
+                if err:
+                    print(err, flush=True)
+                return 1
+            print(f"OK (port {handle.port})", flush=True)
+            warmup(handle.port)
+            handles.append(handle)
 
-    r1 = run_sub("asyncpg")
-    r2 = run_sub("turbo_cached")
-    r3 = run_sub("turbo_nocache")
-    r4 = run_sub("turbo_raw")
+        print(flush=True)
+        tests = [
+            ("GET /health", "health", lambda port: run_wrk(f"http://127.0.0.1:{port}/health", "GET /health")),
+            (
+                "GET /users/{id} (varying 1000 IDs)",
+                "by_id",
+                lambda port: run_wrk_lua(
+                    f"http://127.0.0.1:{port}/users/1",
+                    "benchmarks/postgres/varying_ids.lua",
+                    "GET /users/{id} (varying 1000 IDs)",
+                ),
+            ),
+            (
+                "GET /users?age_min=20",
+                "list",
+                lambda port: run_wrk(
+                    f"http://127.0.0.1:{port}/users?age_min=20",
+                    "GET /users?age_min=20",
+                ),
+            ),
+            (
+                "GET /search?q=user_42%%",
+                "search",
+                lambda port: run_wrk(
+                    f"http://127.0.0.1:{port}/search?q=user_42%25",
+                    "GET /search?q=user_42%",
+                ),
+            ),
+        ]
 
-    apg_id = r1.get("apg_id", 0)
-    apg_list = r1.get("apg_list", 0)
-    apg_raw = r1.get("apg_raw", 0)
-    rps_cached_id = r2.get("rps_id", 0)
-    rps_cached_list = r2.get("rps_list", 0)
-    rps_nc_id = r3.get("rps_id", 0)
-    rps_nc_list = r3.get("rps_list", 0)
-    rps_raw_id = r4.get("rps_id", 0)
-    rps_raw_list = r4.get("rps_list", 0)
-    rps_raw_search = r4.get("rps_search", 0)
+        results: dict[str, dict[str, float]] = {key: {} for _, key, _ in tests}
 
-    print("\n" + "=" * 70, flush=True)
-    print("SUMMARY", flush=True)
-    print("=" * 70, flush=True)
-    fmt = "{:<35} {:>12} {:>14} {:>14} {:>14}"
-    print(fmt.format("Test", "asyncpg", "Turbo cached", "Turbo no-cache", "Turbo raw"), flush=True)
-    print("-" * 89, flush=True)
-    print(fmt.format(
-        "SELECT by ID (q/s)",
-        f"{apg_id:,.0f}", f"{rps_cached_id:,.0f}", f"{rps_nc_id:,.0f}", f"{rps_raw_id:,.0f}",
-    ), flush=True)
-    print(fmt.format(
-        "SELECT list (q/s)",
-        f"{apg_list:,.0f}", f"{rps_cached_list:,.0f}", f"{rps_nc_list:,.0f}", f"{rps_raw_list:,.0f}",
-    ), flush=True)
-    print(fmt.format(
-        "Raw ILIKE (q/s)",
-        f"{apg_raw:,.0f}", "n/a", "n/a", f"{rps_raw_search:,.0f}",
-    ), flush=True)
-    print("-" * 89, flush=True)
+        for label, key, runner in tests:
+            print(f"=== {label} ===", flush=True)
+            for handle in handles:
+                rps, _ = runner(handle.port)
+                results[key][handle.name] = rps
+            print(flush=True)
 
-    if apg_id > 0:
-        print("\nMultipliers vs asyncpg:", flush=True)
-        if rps_cached_id:
-            print(f"  Cached by-ID:     {rps_cached_id/apg_id:.1f}x", flush=True)
-        if rps_nc_id:
-            print(f"  No-cache by-ID:   {rps_nc_id/apg_id:.1f}x", flush=True)
-        if rps_cached_list and apg_list:
-            print(f"  Cached list:      {rps_cached_list/apg_list:.1f}x", flush=True)
-        if rps_nc_list and apg_list:
-            print(f"  No-cache list:    {rps_nc_list/apg_list:.1f}x", flush=True)
-        if rps_raw_search and apg_raw:
-            print(f"  Raw ILIKE:        {rps_raw_search/apg_raw:.1f}x", flush=True)
+        print("=" * 78, flush=True)
+        print("SUMMARY", flush=True)
+        print("=" * 78, flush=True)
+        if SOLO_TURBO:
+            header = "{:<30} {:>16}"
+            row = "{:<30} {:>16,.0f}"
+            print(header.format("Test", "TurboAPI+pg.zig"), flush=True)
+            print("-" * 50, flush=True)
+            print(row.format("GET /health", results["health"]["TurboAPI + pg.zig"]), flush=True)
+            print(row.format("GET /users/{id}", results["by_id"]["TurboAPI + pg.zig"]), flush=True)
+            print(row.format("GET /users", results["list"]["TurboAPI + pg.zig"]), flush=True)
+            print(row.format("GET /search", results["search"]["TurboAPI + pg.zig"]), flush=True)
+            print("-" * 50, flush=True)
+        else:
+            header = "{:<30} {:>16} {:>18} {:>22}"
+            print(
+                header.format(
+                    "Test",
+                    "TurboAPI+pg.zig",
+                    "FastAPI+asyncpg",
+                    "FastAPI+SQLAlchemy",
+                ),
+                flush=True,
+            )
+            print("-" * 90, flush=True)
+            row = "{:<30} {:>16,.0f} {:>18,.0f} {:>22,.0f}"
+            print(
+                row.format(
+                    "GET /health",
+                    results["health"]["TurboAPI + pg.zig"],
+                    results["health"]["FastAPI + asyncpg"],
+                    results["health"]["FastAPI + SQLAlchemy"],
+                ),
+                flush=True,
+            )
+            print(
+                row.format(
+                    "GET /users/{id}",
+                    results["by_id"]["TurboAPI + pg.zig"],
+                    results["by_id"]["FastAPI + asyncpg"],
+                    results["by_id"]["FastAPI + SQLAlchemy"],
+                ),
+                flush=True,
+            )
+            print(
+                row.format(
+                    "GET /users",
+                    results["list"]["TurboAPI + pg.zig"],
+                    results["list"]["FastAPI + asyncpg"],
+                    results["list"]["FastAPI + SQLAlchemy"],
+                ),
+                flush=True,
+            )
+            print(
+                row.format(
+                    "GET /search",
+                    results["search"]["TurboAPI + pg.zig"],
+                    results["search"]["FastAPI + asyncpg"],
+                    results["search"]["FastAPI + SQLAlchemy"],
+                ),
+                flush=True,
+            )
+            print("-" * 90, flush=True)
+        return 0
+    finally:
+        for handle in handles:
+            stop_server(handle)
 
-    print("\nDone.", flush=True)
-    os._exit(0)
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""
+pgbench runner for TurboAPI+pg.zig (native path, no HTTP).
+
+Drop-in compatible with MagicStack's pgbench suite. Same args, same JSON output.
+Uses _db_query_raw directly (like asyncpg uses its native connection).
+"""
+
+import argparse
+import asyncio
+import json
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+import numpy as np
+
+
+def worker(db, query, query_args, start, duration, timeout_ms, is_copy=False, copy_info=None, is_batch=False, batch_info=None):
+    """Match pgbench's worker: loop for duration, record per-request latency."""
+    queries = 0
+    rows = 0
+    latency_stats = np.zeros((timeout_ms * 100,))
+    min_latency = float("inf")
+    max_latency = 0.0
+
+    # Pre-build COPY / batch rows list outside hot loop
+    if is_copy and copy_info:
+        from turboapi import turbonet as _turbonet
+        _copy_table = copy_info["table"]
+        _copy_columns = copy_info["columns"]
+        _copy_rows = [copy_info["row"]] * copy_info["count"]
+    elif is_batch and batch_info:
+        _batch_rows = [batch_info["row"]] * batch_info["count"]
+
+    while time.monotonic() - start < duration:
+        req_start = time.monotonic()
+        try:
+            if is_copy:
+                result = _turbonet._db_copy_from(_copy_table, _copy_columns, _copy_rows)
+                rows += result if isinstance(result, int) else copy_info["count"]
+            elif is_batch:
+                result = db.execute_many(query, _batch_rows)
+                rows += result if isinstance(result, int) else len(_batch_rows)
+            else:
+                result = db.query(query, query_args)
+                if isinstance(result, list):
+                    rows += len(result)
+                else:
+                    rows += 1
+        except Exception as e:
+            if queries == 0 and rows == 0:
+                import sys
+                sys.stderr.write(f"[turbopg worker error] {e}\n")
+            continue
+        req_time = round((time.monotonic() - req_start) * 1000 * 100)
+        req_time = min(req_time, len(latency_stats) - 1)
+
+        if req_time > max_latency:
+            max_latency = req_time
+        if req_time < min_latency:
+            min_latency = req_time
+        latency_stats[req_time] += 1
+        queries += 1
+
+    return queries, rows, latency_stats, min_latency, max_latency
+
+
+def run_bench(db, query, query_args, concurrency, duration, warmup_time, timeout_ms, is_copy=False, copy_info=None, is_batch=False, batch_info=None):
+    """Run benchmark with thread pool (GIL released during I/O)."""
+    # Warmup
+    if warmup_time > 0:
+        start = time.monotonic()
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futs = [
+                pool.submit(worker, db, query, query_args, start, warmup_time, timeout_ms, is_copy, copy_info, is_batch, batch_info)
+                for _ in range(concurrency)
+            ]
+            for f in futs:
+                f.result()
+
+    # Actual benchmark
+    start = time.monotonic()
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futs = [
+            pool.submit(worker, db, query, query_args, start, duration, timeout_ms, is_copy, copy_info, is_batch, batch_info)
+            for _ in range(concurrency)
+        ]
+        results = [f.result() for f in futs]
+    end = time.monotonic()
+
+    total_duration = end - start
+    total_queries = 0
+    total_rows = 0
+    combined_stats = None
+    min_lat = float("inf")
+    max_lat = 0.0
+
+    for q, r, stats, mn, mx in results:
+        total_queries += q
+        total_rows += r
+        if combined_stats is None:
+            combined_stats = stats
+        else:
+            combined_stats = np.add(combined_stats, stats)
+        if mx > max_lat:
+            max_lat = mx
+        if mn < min_lat:
+            min_lat = mn
+
+    return {
+        "queries": total_queries,
+        "rows": total_rows,
+        "duration": total_duration,
+        "min_latency": min_lat,
+        "max_latency": max_lat,
+        "latency_stats": combined_stats.tolist(),
+        "output_format": "json",
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="pgbench runner for TurboAPI+pg.zig (native)")
+    parser.add_argument("-C", "--concurrency", type=int, default=10)
+    parser.add_argument("-D", "--duration", type=int, default=30)
+    parser.add_argument("--timeout", default=2, type=int)
+    parser.add_argument("--warmup-time", type=int, default=5)
+    parser.add_argument("--output-format", default="text", type=str)
+    parser.add_argument("--pghost", type=str, default="127.0.0.1")
+    parser.add_argument("--pgport", type=int, default=5432)
+    parser.add_argument("--pguser", type=str, default="postgres")
+    parser.add_argument("driver", help="driver name (ignored)")
+    parser.add_argument("queryfile", help="JSON file with query")
+
+    args = parser.parse_args()
+
+    with open(args.queryfile) as f:
+        querydata = json.load(f)
+
+    query = querydata["query"]
+    query_args = querydata.get("args", [])
+    setup = querydata.get("setup")
+    teardown = querydata.get("teardown")
+
+    # Detect COPY FROM STDIN and parse table/columns from query
+    is_copy = False
+    batch_info = None
+    copy_info = None
+    if query.startswith("COPY "):
+        # Parse "COPY _test(a, b, c, d, e, f, g) FROM STDIN"
+        import re
+        m = re.match(r"COPY\s+(\w+)\(([^)]+)\)\s+FROM\s+STDIN", query)
+        if m:
+            table = m.group(1)
+            columns = [c.strip() for c in m.group(2).split(",")]
+            batch_info = query_args[0] if query_args and isinstance(query_args[0], dict) else {}
+            row_data = [str(v) for v in batch_info.get("row", [])]
+            count = batch_info.get("count", 1000)
+            copy_info = {"table": table, "columns": columns, "row": row_data, "count": count}
+            is_copy = True
+        else:
+            sys.exit(3)
+
+    is_batch = False
+    if not is_copy and query_args and isinstance(query_args[0], dict):
+        batch_info = query_args[0]
+        query_args = batch_info["row"]
+        is_batch = True
+
+    conn_str = f"postgresql://{args.pguser}@{args.pghost}:{args.pgport}/postgres"
+
+    # Redirect startup noise to stderr
+    old_stdout = sys.stdout
+    sys.stdout = sys.stderr
+
+    from turbopg import Database
+    db = Database(conn_str, pool_size=max(16, args.concurrency))
+
+    # Run setup query if present. Fail hard if setup fails so stale state does
+    # not silently contaminate the benchmark.
+    if setup:
+        try:
+            from turboapi import turbonet
+            turbonet._db_exec_raw(setup)
+        except Exception as e:
+            sys.stderr.write(f"[setup] {e}\n")
+            sys.exit(1)
+
+    sys.stdout = old_stdout
+
+    # Run benchmark using threads (GIL released during pg.zig I/O)
+    timeout_ms = args.timeout * 1000
+    data = run_bench(
+        db,
+        query,
+        query_args,
+        args.concurrency,
+        args.duration,
+        args.warmup_time,
+        timeout_ms,
+        is_copy,
+        copy_info,
+        is_batch,
+        batch_info,
+    )
+
+    if teardown:
+        try:
+            from turboapi import turbonet
+            turbonet._db_exec_raw(teardown)
+        except Exception as e:
+            sys.stderr.write(f"[teardown] {e}\n")
+            sys.exit(1)
+    print(json.dumps(data))
+
+
+if __name__ == "__main__":
+    main()

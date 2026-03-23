@@ -2,7 +2,7 @@ const mer = @import("mer");
 
 pub const meta: mer.Meta = .{
     .title = "TurboPG",
-    .description = "Zig-native Postgres — 12-96x faster than FastAPI + SQLAlchemy. Zero Python in the hot path.",
+    .description = "Zig-native Postgres. Clean 3-run median: 80.8k req/s on the PK route vs 5.2k for FastAPI + asyncpg and 2.0k for FastAPI + SQLAlchemy on this host.",
 };
 
 pub const prerender = true;
@@ -148,9 +148,9 @@ const html =
     \\<div class="hero">
     \\  <div class="exp-badge">&#9889; Experimental &mdash; coming soon</div>
     \\  <h1>Turbo<span>PG</span></h1>
-    \\  <p>Zig-native Postgres. The entire request cycle &mdash; HTTP parse, validation, SQL query, JSON response &mdash; runs in Zig. Zero Python. Zero GIL.</p>
+    \\  <p>Zig-native Postgres. HTTP parse, SQL query, and JSON response stay in Zig. Clean 3-run median on this host: 80.8k req/s on the PK route vs 5.2k for FastAPI + asyncpg and 2.0k for FastAPI + SQLAlchemy.</p>
     \\  <div class="hero-stat">
-    \\    <strong>96x</strong> faster than FastAPI + SQLAlchemy
+    \\    <strong>80.8k</strong> req/s on uncached PK route
     \\  </div>
     \\</div>
     \\
@@ -177,74 +177,85 @@ const html =
     \\<!-- Benchmarks -->
     \\<div class="section">
     \\  <div class="section-eyebrow">Performance</div>
-    \\  <h2>TurboAPI + pg.zig vs FastAPI + SQLAlchemy</h2>
-    \\  <p class="sub">Postgres 18, wrk 2t/50c/5s, Python 3.14t free-threaded</p>
+    \\  <h2>TurboAPI + pg.zig vs FastAPI + asyncpg + SQLAlchemy</h2>
+    \\  <p class="sub">Median of 3 clean Docker reruns. Postgres 18 in Colima, wrk 4t/100c/10s, Python 3.14t free-threaded, turbo pool=32, competitor pool=32.</p>
     \\
     \\  <div class="bar-group">
     \\    <h3>Requests per second (higher is better)</h3>
     \\
     \\    <div class="bar-row">
-    \\      <div class="bar-label">Baseline (no DB)</div>
-    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:90%"></div></div>
-    \\      <div class="bar-num">117,440/s</div>
-    \\      <div class="bar-speedup">12x</div>
+    \\      <div class="bar-label">GET /health</div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:100%"></div></div>
+    \\      <div class="bar-num">266,351/s</div>
+    \\      <div class="bar-speedup">29.1x async</div>
     \\    </div>
     \\    <div class="bar-row">
-    \\      <div class="bar-label" style="font-size:12px">FastAPI</div>
-    \\      <div class="bar-track"><div class="bar-fill other" style="width:7.5%"></div></div>
-    \\      <div class="bar-num" style="color:var(--muted)">9,782/s</div>
+    \\      <div class="bar-label" style="font-size:12px">FastAPI+asyncpg</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:3.4%"></div></div>
+    \\      <div class="bar-num" style="color:var(--muted)">9,161/s</div>
     \\      <div class="bar-speedup">&nbsp;</div>
-    \\    </div>
-    \\
-    \\    <div class="bar-row" style="margin-top:20px">
-    \\      <div class="bar-label">SELECT by PK</div>
-    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:97%"></div></div>
-    \\      <div class="bar-num">125,778/s</div>
-    \\      <div class="bar-speedup">48x</div>
-    \\    </div>
-    \\    <div class="bar-row">
-    \\      <div class="bar-label" style="font-size:12px">FastAPI+SA</div>
-    \\      <div class="bar-track"><div class="bar-fill other" style="width:2%"></div></div>
-    \\      <div class="bar-num" style="color:var(--muted)">2,639/s</div>
-    \\      <div class="bar-speedup">&nbsp;</div>
-    \\    </div>
-    \\
-    \\    <div class="bar-row" style="margin-top:20px">
-    \\      <div class="bar-label">Full-text search</div>
-    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:84%"></div></div>
-    \\      <div class="bar-num">109,626/s</div>
-    \\      <div class="bar-speedup">44x</div>
     \\    </div>
     \\    <div class="bar-row">
     \\      <div class="bar-label" style="font-size:12px">FastAPI+SA</div>
     \\      <div class="bar-track"><div class="bar-fill other" style="width:1.9%"></div></div>
-    \\      <div class="bar-num" style="color:var(--muted)">2,483/s</div>
+    \\      <div class="bar-num" style="color:var(--muted)">5,010/s</div>
     \\      <div class="bar-speedup">&nbsp;</div>
     \\    </div>
     \\
     \\    <div class="bar-row" style="margin-top:20px">
-    \\      <div class="bar-label">GROUP BY sum/avg</div>
-    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:99%"></div></div>
-    \\      <div class="bar-num">129,444/s</div>
-    \\      <div class="bar-speedup">96x</div>
+    \\      <div class="bar-label">GET /users/{id}</div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:100%"></div></div>
+    \\      <div class="bar-num">80,791/s</div>
+    \\      <div class="bar-speedup">15.5x async</div>
+    \\    </div>
+    \\    <div class="bar-row">
+    \\      <div class="bar-label" style="font-size:12px">FastAPI+asyncpg</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:6.4%"></div></div>
+    \\      <div class="bar-num" style="color:var(--muted)">5,203/s</div>
+    \\      <div class="bar-speedup">&nbsp;</div>
     \\    </div>
     \\    <div class="bar-row">
     \\      <div class="bar-label" style="font-size:12px">FastAPI+SA</div>
-    \\      <div class="bar-track"><div class="bar-fill other" style="width:1%"></div></div>
-    \\      <div class="bar-num" style="color:var(--muted)">1,354/s</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:2.5%"></div></div>
+    \\      <div class="bar-num" style="color:var(--muted)">1,983/s</div>
     \\      <div class="bar-speedup">&nbsp;</div>
     \\    </div>
     \\
     \\    <div class="bar-row" style="margin-top:20px">
-    \\      <div class="bar-label">Paginated list</div>
-    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:29%"></div></div>
-    \\      <div class="bar-num">37,729/s</div>
-    \\      <div class="bar-speedup">15x</div>
+    \\      <div class="bar-label">GET /users</div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:100%"></div></div>
+    \\      <div class="bar-num">71,650/s</div>
+    \\      <div class="bar-speedup">22.7x async</div>
+    \\    </div>
+    \\    <div class="bar-row">
+    \\      <div class="bar-label" style="font-size:12px">FastAPI+asyncpg</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:4.4%"></div></div>
+    \\      <div class="bar-num" style="color:var(--muted)">3,162/s</div>
+    \\      <div class="bar-speedup">&nbsp;</div>
     \\    </div>
     \\    <div class="bar-row">
     \\      <div class="bar-label" style="font-size:12px">FastAPI+SA</div>
-    \\      <div class="bar-track"><div class="bar-fill other" style="width:1.9%"></div></div>
-    \\      <div class="bar-num" style="color:var(--muted)">2,517/s</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:2.0%"></div></div>
+    \\      <div class="bar-num" style="color:var(--muted)">1,427/s</div>
+    \\      <div class="bar-speedup">&nbsp;</div>
+    \\    </div>
+    \\
+    \\    <div class="bar-row" style="margin-top:20px">
+    \\      <div class="bar-label">GET /search</div>
+    \\      <div class="bar-track"><div class="bar-fill turbo" style="width:100%"></div></div>
+    \\      <div class="bar-num">13,245/s</div>
+    \\      <div class="bar-speedup">3.4x async</div>
+    \\    </div>
+    \\    <div class="bar-row">
+    \\      <div class="bar-label" style="font-size:12px">FastAPI+asyncpg</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:29.6%"></div></div>
+    \\      <div class="bar-num" style="color:var(--muted)">3,915/s</div>
+    \\      <div class="bar-speedup">&nbsp;</div>
+    \\    </div>
+    \\    <div class="bar-row">
+    \\      <div class="bar-label" style="font-size:12px">FastAPI+SA</div>
+    \\      <div class="bar-track"><div class="bar-fill other" style="width:13.2%"></div></div>
+    \\      <div class="bar-num" style="color:var(--muted)">1,742/s</div>
     \\      <div class="bar-speedup">&nbsp;</div>
     \\    </div>
     \\  </div>
@@ -280,7 +291,7 @@ const html =
     \\    </div>
     \\    <div class="feature">
     \\      <h4>&#128203; Response cache</h4>
-    \\      <p>Thread-safe, 30s TTL, per-table invalidation, LRU eviction. Cached reads match pure Zig baseline (~130k req/s).</p>
+    \\      <p>Thread-safe, 30s TTL, per-table invalidation, LRU eviction. Useful when you want it, but the uncached benchmark on this page keeps both HTTP and DB caches off.</p>
     \\    </div>
     \\    <div class="feature">
     \\      <h4>&#128640; Prepared statements</h4>
@@ -317,7 +328,7 @@ const html =
     \\
     \\<span class="cmt"># Auto-CRUD &mdash; Zig generates SQL from model</span>
     \\@app.db_get(<span class="str">"/users/{user_id}"</span>, table=<span class="str">"users"</span>, pk=<span class="str">"id"</span>)
-    \\<span class="kw">def</span> get_user(): <span class="kw">pass</span>   <span class="cmt"># 130k req/s, zero Python</span>
+    \\<span class="kw">def</span> get_user(): <span class="kw">pass</span>   <span class="cmt"># ~80.8k req/s uncached median on this host</span>
     \\
     \\<span class="cmt"># Custom SQL &mdash; pgvector, FTS, JOINs, anything</span>
     \\@app.db_query(<span class="str">"GET"</span>, <span class="str">"/search"</span>, sql=<span class="str">"""
@@ -342,7 +353,7 @@ const html =
     \\<!-- CTA -->
     \\<div class="section" style="text-align:center;padding:80px 40px">
     \\  <h2>Ship faster APIs</h2>
-    \\  <p class="sub">Drop-in FastAPI replacement. Zig-native Postgres. 12-96x faster.</p>
+    \\  <p class="sub">Drop-in FastAPI replacement. Zig-native Postgres. Corrected uncached DB routes: 3.4-40.7x faster than these Python stacks on this host.</p>
     \\  <div style="display:flex;gap:16px;justify-content:center;margin-top:24px">
     \\    <a href="/quickstart" class="nav-cta" style="font-size:15px;padding:12px 28px;border-radius:6px">Get started</a>
     \\    <a href="https://github.com/justrach/turboAPI" class="nav-cta" style="font-size:15px;padding:12px 28px;border-radius:6px;background:var(--bg3);color:var(--text) !important;border:1px solid var(--border)">GitHub</a>

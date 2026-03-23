@@ -1,60 +1,96 @@
-# asyncpg vs TurboAPI+pg.zig -- Benchmark Results
+# TurboAPI + pg.zig vs FastAPI + asyncpg / SQLAlchemy
 
-**Date:** 2026-03-21
-**Setup:** Postgres 18, Docker (Colima), aarch64 (M3 Pro), Python 3.14t free-threaded
-**Method:** Each test runs in its own subprocess (no resource contention)
+This benchmark suite now measures one thing only:
 
-## Configuration
+- end-to-end HTTP + DB performance
 
-| Config | Description |
-|--------|-------------|
-| asyncpg | Raw Python, asyncio.gather, pool=16, 10k queries |
-| Turbo cached | Zig response cache enabled, repeat requests hit cache, wrk -t4 -c100 -d10s |
-| Turbo no-cache | Varying IDs via wrk lua script, every request hits Postgres |
-| Turbo raw SQL | Custom SQL queries, ORDER BY random() + ILIKE |
+It does not mix in:
 
-## Results
+- driver-only results
+- cached TurboAPI routes
+- warmed cache comparisons
 
-| Test | asyncpg | Turbo cached | Turbo no-cache | Turbo raw |
-|------|---------|-------------|----------------|-----------|
-| SELECT by ID | 19,585/s | 361,337/s | 83,262/s | 64,342/s |
-| SELECT list (20 rows) | 18,385/s | 390,832/s | 352,916/s | 375,569/s |
-| Raw ILIKE | 12,217/s | n/a | n/a | 350,025/s |
+## Method
 
-## Multipliers vs asyncpg
+- Postgres 18 in Docker
+- same HTTP routes exposed by all three stacks
+- `wrk` load generation
+- TurboAPI response cache disabled via `TURBO_DISABLE_CACHE=1`
+- TurboAPI DB cache disabled via `TURBO_DISABLE_DB_CACHE=1`
 
-| Test | Multiplier |
-|------|-----------|
-| Cached by-ID | 18.4x |
-| No-cache by-ID | 4.3x |
-| Cached list | 21.3x |
-| No-cache list | 19.2x |
-| Raw ILIKE | 28.7x |
+Compared stacks:
 
-## Latency
+1. `TurboAPI + pg.zig/turbopg`
+2. `FastAPI + asyncpg`
+3. `FastAPI + SQLAlchemy`
 
-| Test | Turbo avg | Turbo p99 |
-|------|-----------|-----------|
-| Cached by-ID | 52us | 4.45ms |
-| Cached list | 60us | 9.24ms |
-| No-cache by-ID (varying) | 11.87ms | 610ms |
-| No-cache list (random) | 58us | 6.71ms |
-| Raw ILIKE search | 55us | 6.07ms |
+Routes:
 
-## Notes
+1. `GET /health`
+2. `GET /users/{id}` with varying IDs
+3. `GET /users?age_min=20`
+4. `GET /search?q=user_42%`
 
-- asyncpg is the fastest pure-Python Postgres client. These numbers represent Python's ceiling for DB throughput.
-- TurboAPI+pg.zig bypasses Python entirely on the hot path: HTTP parse, Postgres query (binary protocol), JSON serialization all happen in Zig.
-- "No-cache by-ID" is the fairest comparison: every request hits Postgres through Docker networking. Still 4.3x faster than asyncpg.
-- List queries cache on the SQL string, so even "no-cache" configs show high throughput for repeated list queries.
-- The no-cache by-ID latency (11.87ms avg) includes Docker/Colima VM networking overhead. On native Postgres (unix socket), expect significantly lower latency.
-- Raw ILIKE at 350k req/s is cached after the first hit (same query string). For truly uncached ILIKE with varying params, expect numbers closer to the no-cache by-ID range.
+## Current replicated results
 
-## Reproduce
+**Date:** 2026-03-22  
+**Setup:** Docker Postgres 18, Python 3.14t, `wrk -t4 -c100 -d10s`  
+**TurboAPI runtime state:** `TURBO_DISABLE_CACHE=1`, `TURBO_DISABLE_DB_CACHE=1`, `TURBO_DISABLE_RATE_LIMITING=1`, `TURBO_THREAD_POOL_SIZE=32`  
+**Benchmark pool sizing:** `turbo=32`, `competitors=32`  
+**Colima:** `Virtualization.Framework`, `aarch64`, `4 vCPU`, `8 GiB RAM`, `100 GiB disk`, `virtiofs`, Docker runtime  
+**Host CPU / RAM:** `Apple M3 Ultra`, `256 GiB`
+
+Primary table below is the median of 3 clean Docker reruns from `docker compose down -v`.
+
+| Test | TurboAPI + pg.zig | FastAPI + asyncpg | FastAPI + SQLAlchemy |
+|------|-------------------|-------------------|----------------------|
+| `GET /health` | `266,351 req/s` | `9,161 req/s` | `5,010 req/s` |
+| `GET /users/{id}` varying 1000 IDs | `80,791 req/s` | `5,203 req/s` | `1,983 req/s` |
+| `GET /users?age_min=20` | `71,650 req/s` | `3,162 req/s` | `1,427 req/s` |
+| `GET /search?q=user_42%` | `13,245 req/s` | `3,915 req/s` | `1,742 req/s` |
+
+What this run shows:
+
+- TurboAPI is dramatically faster on the no-DB route.
+- TurboAPI + pg.zig is faster on all three uncached DB routes in this setup.
+- On this Colima profile, the fair median uncached end-to-end PK route is about `80.8k req/s` vs `5.2k` for FastAPI + asyncpg.
+- These are seeded Docker reruns of the actual benchmark harness, not ad hoc local host-DB numbers.
+- This suite is end-to-end HTTP + DB, so do not compare these numbers directly to `benchmarks/pgbench`.
+
+### 3-run ranges
+
+| Test | TurboAPI + pg.zig | FastAPI + asyncpg | FastAPI + SQLAlchemy |
+|------|-------------------|-------------------|----------------------|
+| `GET /health` | `263,395..323,224 req/s` | `9,110..9,502 req/s` | `4,980..5,037 req/s` |
+| `GET /users/{id}` varying 1000 IDs | `77,768..94,248 req/s` | `4,973..5,464 req/s` | `1,896..2,054 req/s` |
+| `GET /users?age_min=20` | `70,000..82,502 req/s` | `3,119..3,198 req/s` | `1,394..1,490 req/s` |
+| `GET /search?q=user_42%` | `13,182..13,516 req/s` | `3,847..3,924 req/s` | `1,736..1,755 req/s` |
+
+## Turbo-only scaling note
+
+With the same uncached route set on this host, TurboAPI alone scaled materially with a larger DB pool:
+
+| Turbo pool size | `GET /users/{id}` | `GET /users` | `GET /search` |
+|----------------|-------------------|--------------|---------------|
+| `16` | `13,228 req/s` | `12,567 req/s` | `7,099 req/s` |
+| `32` | `19,380 req/s` | `18,375 req/s` | `7,709 req/s` |
+| `64` | `25,716 req/s` | `23,590 req/s` | `8,023 req/s` |
+
+This is useful as a Turbo scaling test, but `32` remains the fair shared default on this host because higher competitor pool sizes ran into connection limits.
+
+## Run
 
 ```bash
 cd benchmarks/postgres
-docker compose up --build
+docker compose up --build --abort-on-container-exit bench
 ```
 
-No local dependencies needed. Everything runs inside Docker.
+## Why this suite exists
+
+Use this benchmark when you want to answer:
+
+- how fast is the full web stack
+- how much overhead does FastAPI add on top of the DB client
+- how does TurboAPI behave with caches disabled
+
+If you want raw database driver numbers, use `benchmarks/pgbench` instead.

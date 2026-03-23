@@ -1,4 +1,4 @@
-name: Benchmark
+name: Driver Benchmark
 
 on:
   push:
@@ -9,55 +9,26 @@ on:
 
 jobs:
   benchmark:
-    name: "TurboAPI vs FastAPI"
+    name: "turbopg vs asyncpg / psycopg3"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.14t (free-threaded)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.14t'
-          allow-prereleases: true
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-
-      - name: Install wrk
+      - name: Reset Docker benchmark state
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wrk
-
-      - name: Build turbonet extension
-        run: python zig/build_turbonet.py --install
-
-      - name: Install packages
-        run: |
-          pip install -e .
-          pip install fastapi uvicorn requests
+          docker compose -f benchmarks/pgbench/docker-compose.yml down -v --remove-orphans || true
 
       - name: Run benchmark
-        continue-on-error: true  # Known: Linux segfault on Zig thread cleanup
         run: |
-          python benchmarks/turboapi_vs_fastapi.py --duration 10 --threads 4 --connections 100
+          docker compose -f benchmarks/pgbench/docker-compose.yml up --build --abort-on-container-exit pgbench | tee pgbench_output.txt
 
-      - name: Comment PR with results
-        if: github.event_name == 'pull_request'
-        continue-on-error: true  # Known: Linux Zig server may fail to start
-        uses: actions/github-script@v7
+      - name: Tear down Docker benchmark state
+        if: always()
+        run: |
+          docker compose -f benchmarks/pgbench/docker-compose.yml down -v --remove-orphans || true
+
+      - name: Upload benchmark output
+        uses: actions/upload-artifact@v4
         with:
-          script: |
-            const { execSync } = require('child_process');
-            const output = execSync(
-              'python benchmarks/turboapi_vs_fastapi.py --duration 5 --threads 2 --connections 50',
-              { encoding: 'utf-8', timeout: 120000 }
-            ).trim();
-
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `## ⚡ Benchmark Results\n\n\`\`\`\n${output}\n\`\`\``
-            });
+          name: driver-benchmark-output
+          path: pgbench_output.txt

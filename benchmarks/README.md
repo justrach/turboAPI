@@ -1,35 +1,48 @@
 # TurboAPI Benchmarks
 
-Comprehensive benchmark suite comparing TurboAPI/dhi against FastAPI/Pydantic.
+The repo now treats benchmarks as two primary suites only:
 
-## Benchmarks
+## 1. Driver-only benchmark
 
-| File | Description |
-|------|-------------|
-| `bench_validation.py` | Core validation performance (dhi vs Pydantic) |
-| `bench_json.py` | JSON serialization/deserialization |
-| `bench_memory.py` | Memory usage and allocation patterns |
-| `bench_throughput.py` | Request throughput (TurboAPI vs FastAPI) |
+Path: `benchmarks/pgbench`
 
-## Running Benchmarks
+Purpose:
+- compare `turbopg` / pg.zig directly against `asyncpg` and `psycopg3`
+- no HTTP layer
+- measures raw query throughput and decode cost
 
-```bash
-# Run all benchmarks
-python benchmarks/bench_validation.py
-python benchmarks/bench_json.py
-python benchmarks/bench_memory.py
-python benchmarks/bench_throughput.py
-
-# Or use the run script
-./benchmarks/run_all.sh
-```
-
-## Requirements
+Run:
 
 ```bash
-pip install dhi pydantic fastapi turboapi
+cd benchmarks/pgbench
+docker compose up --build --abort-on-container-exit pgbench
 ```
 
-## Results
+Validation:
 
-Results are saved to `results_*.json` files after each benchmark run.
+```bash
+cd benchmarks/pgbench
+python3 validate_runs.py --runs 3
+```
+
+## 2. End-to-end HTTP + DB benchmark
+
+Path: `benchmarks/postgres`
+
+Purpose:
+- compare `TurboAPI + pg.zig/turbopg`
+- against `FastAPI + asyncpg`
+- and `FastAPI + SQLAlchemy`
+- all over HTTP, with TurboAPI response cache and DB cache disabled
+
+Run:
+
+```bash
+cd benchmarks/postgres
+docker compose up --build --abort-on-container-exit bench
+```
+
+## Notes
+
+- Older overlapping benchmark scripts were removed to avoid mixing driver-only, framework-only, and cached-vs-uncached claims.
+- Validation microbenchmarks such as `bench_validation.py` and `bench_json.py` can still exist as internal profiling tools, but they are not the headline benchmark suites.
