@@ -149,6 +149,20 @@ _ERROR_PREFIXES = (
     "ASK ",
 )
 
+_OK_TRUE_COMMANDS = {
+    "AUTH",
+    "FLUSHALL",
+    "FLUSHDB",
+    "MSET",
+    "PING",
+    "SELECT",
+    "SET",
+    "UNWATCH",
+    "WATCH",
+}
+
+_BOOL_INT_COMMANDS = {"EXPIRE", "HEXISTS", "SISMEMBER", "SETNX"}
+
 
 def _raise_pipeline_error(value):
     if isinstance(value, list):
@@ -157,6 +171,41 @@ def _raise_pipeline_error(value):
         return
     if isinstance(value, str) and value.startswith(_ERROR_PREFIXES):
         raise _redis_py.exceptions.ResponseError(value)
+
+
+def _command_name(part):
+    if isinstance(part, bytes):
+        return part.decode("utf-8", "ignore").upper()
+    return str(part).upper()
+
+
+def _apply_response_fast(args, result):
+    if not args:
+        return result, True
+
+    cmd0 = _command_name(args[0])
+    if cmd0 == "GET":
+        return result, True
+
+    if cmd0 in _OK_TRUE_COMMANDS:
+        if result == "OK" or result == "PONG":
+            return True, True
+        return result, True
+
+    if cmd0 in _BOOL_INT_COMMANDS:
+        return (bool(result) if result is not None else None), True
+
+    if cmd0 == "ZRANGE":
+        if len(args) > 4 and any(_command_name(part) == "WITHSCORES" for part in args[1:]):
+            if not isinstance(result, list):
+                return result, True
+            pairs = []
+            for i in range(0, len(result), 2):
+                pairs.append((result[i], float(result[i + 1])))
+            return pairs, True
+        return result, True
+
+    return result, False
 
 
 class Redis:
@@ -177,6 +226,9 @@ class Redis:
 
     def _exec(self, *args):
         result = self._dec(self._execute_raw([_coerce_command_arg(a) for a in args]))
+        fast_result, handled = _apply_response_fast(args, result)
+        if handled:
+            return fast_result
         return self._apply_response_callback(args, result)
 
     def _execute_raw(self, args):
@@ -194,29 +246,16 @@ class Redis:
 
     def _apply_response_callback(self, args, result):
         key = _response_key(args)
-        if key in {"AUTH", "CONFIG RESETSTAT", "CONFIG SET", "FLUSHALL", "FLUSHDB", "MSET", "PING", "SELECT", "SET", "UNWATCH", "WATCH"}:
-            return True if result == "OK" or result == "PONG" else result
+        if key in {"CONFIG RESETSTAT", "CONFIG SET", "XGROUP CREATE"}:
+            return True if result == "OK" else result
         if key == "ACL GETUSER":
             return _parse_acl_getuser(result)
         if key == "CONFIG GET":
             return _pairs_to_dict(result)
         if key == "CLIENT LIST":
             return _parse_client_list(result)
-        if key == "XGROUP CREATE":
-            return True if result == "OK" else result
         if key == "XGROUP DESTROY":
             return bool(result) if result is not None else None
-        if key in {"EXPIRE", "HEXISTS", "SISMEMBER", "SETNX"}:
-            return bool(result) if result is not None else None
-        if key == "ZRANGE" and any(str(part).upper() == "WITHSCORES" for part in args[1:]):
-            if not isinstance(result, list):
-                return result
-            pairs = []
-            for i in range(0, len(result), 2):
-                member = result[i]
-                score = result[i + 1]
-                pairs.append((member, float(score)))
-            return pairs
         return result
 
     def close(self):
@@ -470,15 +509,26 @@ class Pipeline:
 
         # One Zig call: pack all, send all, recv all
         cmd_lists = [[_coerce_command_arg(a) for a in cmd] for cmd in cmds]
-        results = self._client._execute_pipeline_raw(cmd_lists)
-        results = [self._client._apply_response_callback(cmd, self._client._dec(r)) for cmd, r in zip(cmds, results)]
+        raw_results = self._client._execute_pipeline_raw(cmd_lists)
+        results = []
+        for cmd, raw in zip(cmds, raw_results):
+            decoded = self._client._dec(raw)
+            fast_result, handled = _apply_response_fast(cmd, decoded)
+            if handled:
+                results.append(fast_result)
+            else:
+                results.append(self._client._apply_response_callback(cmd, decoded))
 
         if self._transaction and results:
             if isinstance(results[-1], list):
-                exec_results = [
-                    self._client._apply_response_callback(cmd, self._client._dec(result))
-                    for cmd, result in zip(self._commands, results[-1])
-                ]
+                exec_results = []
+                for cmd, result in zip(self._commands, results[-1]):
+                    decoded = self._client._dec(result)
+                    fast_result, handled = _apply_response_fast(cmd, decoded)
+                    if handled:
+                        exec_results.append(fast_result)
+                    else:
+                        exec_results.append(self._client._apply_response_callback(cmd, decoded))
                 _raise_pipeline_error(exec_results)
                 self._commands = []
                 self._watching = False
@@ -627,6 +677,9 @@ class PooledRedis(Redis):
 
     def _exec(self, *args):
         result = self._dec(self._execute_raw([_coerce_command_arg(a) for a in args]))
+        fast_result, handled = _apply_response_fast(args, result)
+        if handled:
+            return fast_result
         return self._apply_response_callback(args, result)
 
     def close(self):
