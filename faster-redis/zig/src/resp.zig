@@ -243,6 +243,13 @@ pub fn packCommand(allocator: Allocator, args: []const []const u8) ![]u8 {
     return buf;
 }
 
+pub fn packCommandInto(allocator: Allocator, buf: *std.ArrayList(u8), args: []const []const u8) ![]u8 {
+    try buf.resize(allocator, 0);
+    try buf.ensureTotalCapacity(allocator, estimateCommandSize(args));
+    try appendPackedCommand(allocator, buf, args);
+    return buf.items;
+}
+
 /// Pack multiple commands for pipelining. Returns single buffer.
 pub fn packPipeline(allocator: Allocator, commands: []const []const []const u8) ![]u8 {
     var total: usize = 0;
@@ -279,6 +286,50 @@ pub fn packPipeline(allocator: Allocator, commands: []const []const []const u8) 
     }
 
     return buf;
+}
+
+pub fn packPipelineInto(allocator: Allocator, buf: *std.ArrayList(u8), commands: []const []const []const u8) ![]u8 {
+    try buf.resize(allocator, 0);
+    try buf.ensureTotalCapacity(allocator, estimatePipelineSize(commands));
+    for (commands) |args| {
+        try appendPackedCommand(allocator, buf, args);
+    }
+    return buf.items;
+}
+
+fn estimateCommandSize(args: []const []const u8) usize {
+    var total: usize = 0;
+    total += 1 + countDigits(args.len) + 2;
+    for (args) |arg| {
+        total += 1 + countDigits(arg.len) + 2 + arg.len + 2;
+    }
+    return total;
+}
+
+fn estimatePipelineSize(commands: []const []const []const u8) usize {
+    var total: usize = 0;
+    for (commands) |args| {
+        total += estimateCommandSize(args);
+    }
+    return total;
+}
+
+fn appendPackedCommand(allocator: Allocator, buf: *std.ArrayList(u8), args: []const []const u8) !void {
+    var tmp: [32]u8 = undefined;
+
+    try buf.append(allocator, '*');
+    const argc = try std.fmt.bufPrint(&tmp, "{d}", .{args.len});
+    try buf.appendSlice(allocator, argc);
+    try buf.appendSlice(allocator, "\r\n");
+
+    for (args) |arg| {
+        try buf.append(allocator, '$');
+        const len = try std.fmt.bufPrint(&tmp, "{d}", .{arg.len});
+        try buf.appendSlice(allocator, len);
+        try buf.appendSlice(allocator, "\r\n");
+        try buf.appendSlice(allocator, arg);
+        try buf.appendSlice(allocator, "\r\n");
+    }
 }
 
 fn countDigits(n: usize) usize {

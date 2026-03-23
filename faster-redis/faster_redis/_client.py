@@ -2,15 +2,18 @@
 
 import threading
 from contextlib import contextmanager
-from queue import LifoQueue, Empty
 
 import redis as _redis_py
 
 from faster_redis._redis_accel import (
-    connect as _connect,
-    execute as _execute,
-    execute_pipeline as _execute_pipeline,
     close as _close,
+    close_pool as _close_pool,
+    connect as _connect,
+    connect_pool as _connect_pool,
+    execute as _execute,
+    execute_pooled as _execute_pooled,
+    execute_pipeline as _execute_pipeline,
+    execute_pipeline_pooled as _execute_pipeline_pooled,
 )
 
 
@@ -171,8 +174,14 @@ class Redis:
             self._exec('SELECT', str(db))
 
     def _exec(self, *args):
-        result = self._dec(_execute(self._conn, [_coerce_command_arg(a) for a in args]))
+        result = self._dec(self._execute_raw([_coerce_command_arg(a) for a in args]))
         return self._apply_response_callback(args, result)
+
+    def _execute_raw(self, args):
+        return _execute(self._conn, args)
+
+    def _execute_pipeline_raw(self, cmd_lists):
+        return _execute_pipeline(self._conn, cmd_lists)
 
     def _dec(self, result):
         if result is None:
@@ -459,7 +468,7 @@ class Pipeline:
 
         # One Zig call: pack all, send all, recv all
         cmd_lists = [[_coerce_command_arg(a) for a in cmd] for cmd in cmds]
-        results = _execute_pipeline(self._client._conn, cmd_lists)
+        results = self._client._execute_pipeline_raw(cmd_lists)
         results = [self._client._apply_response_callback(cmd, self._client._dec(r)) for cmd, r in zip(cmds, results)]
 
         if self._transaction and results:
@@ -566,46 +575,50 @@ class ThreadLocalRedis:
         return getattr(self.client(), name)
 
 
-class PooledRedis:
-    """Small fixed-size pool of native Redis clients."""
+class PooledRedis(Redis):
+    """Small fixed-size native pool of Redis connections."""
 
     def __init__(self, size=4, host='127.0.0.1', port=6379, db=0, password=None,
                  decode_responses=True):
-        self._kwargs = {
-            'host': host,
-            'port': port,
-            'db': db,
-            'password': password,
-            'decode_responses': decode_responses,
-        }
-        self._queue = LifoQueue(maxsize=size)
-        self._clients = [Redis(**self._kwargs) for _ in range(size)]
-        for client in self._clients:
-            self._queue.put(client)
+        self._host = host
+        self._port = port
+        self._db = db
+        self._password = password
+        self._decode = decode_responses
+        self._size = size
+        self._pool = _connect_pool(host, port, size)
+        if password:
+            for _ in range(size):
+                self._exec('AUTH', password)
+        if db:
+            for _ in range(size):
+                self._exec('SELECT', str(db))
 
     @contextmanager
     def connection(self, timeout=None):
-        try:
-            client = self._queue.get(timeout=timeout)
-        except Empty as exc:
-            raise RuntimeError("No Redis connection available in pool") from exc
-        try:
-            yield client
-        finally:
-            self._queue.put(client)
+        del timeout
+        yield self
+
+    def _execute_raw(self, args):
+        return _execute_pooled(self._pool, args)
+
+    def _execute_pipeline_raw(self, cmd_lists):
+        return _execute_pipeline_pooled(self._pool, cmd_lists)
+
+    def _exec(self, *args):
+        result = self._dec(self._execute_raw([_coerce_command_arg(a) for a in args]))
+        return self._apply_response_callback(args, result)
 
     def close(self):
-        while True:
-            try:
-                self._queue.get_nowait()
-            except Empty:
-                break
-        for client in self._clients:
-            client.close()
-        self._clients = []
+        if getattr(self, '_pool', None) is not None:
+            _close_pool(self._pool)
+            self._pool = None
 
     def __enter__(self):
         return self
 
     def __exit__(self, *a):
         self.close()
+
+    def pipeline(self, transaction=False):
+        return Pipeline(self, transaction)
