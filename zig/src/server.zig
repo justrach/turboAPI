@@ -201,6 +201,7 @@ var routes: ?std.StringHashMap(HandlerEntry) = null;
 var native_routes: ?std.StringHashMap(NativeHandlerEntry) = null;
 var static_routes: ?std.StringHashMap(StaticRouteEntry) = null;
 var response_cache: ?std.StringHashMap([]const u8) = null;
+var response_cache_lock: std.Thread.Mutex = .{};
 var response_cache_count: usize = 0;
 const MAX_CACHE_ENTRIES: usize = 10_000; // bounded to prevent OOM via unique paths
 var model_schemas: ?std.StringHashMap(dhi.ModelSchema) = null;
@@ -242,15 +243,38 @@ fn getResponseCache() *std.StringHashMap([]const u8) {
     return &response_cache.?;
 }
 
+fn getCachedResponse(key: []const u8) ?[]const u8 {
+    response_cache_lock.lock();
+    defer response_cache_lock.unlock();
+    if (response_cache == null) return null;
+    return response_cache.?.get(key);
+}
+
 /// Cache a pre-rendered response, respecting MAX_CACHE_ENTRIES to prevent OOM.
 fn cacheResponse(key: []const u8, rendered: []const u8) void {
-    if (response_cache_count >= MAX_CACHE_ENTRIES) return; // bounded — reject when full
+    response_cache_lock.lock();
+    defer response_cache_lock.unlock();
+
+    if (response_cache_count >= MAX_CACHE_ENTRIES) {
+        allocator.free(rendered);
+        return;
+    }
+
     const key_dupe = allocator.dupe(u8, key) catch return;
-    getResponseCache().put(key_dupe, rendered) catch {
+    const cache = getResponseCache();
+    const gop = cache.getOrPut(key_dupe) catch {
         allocator.free(rendered);
         allocator.free(key_dupe);
         return;
     };
+
+    if (gop.found_existing) {
+        allocator.free(rendered);
+        allocator.free(key_dupe);
+        return;
+    }
+
+    gop.value_ptr.* = rendered;
     response_cache_count += 1;
 }
 
@@ -982,7 +1006,7 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     switch (entry.handler_tag) {
         .simple_sync_noargs => {
             if (cache_noargs_responses) {
-                if (getResponseCache().get(match.handler_key)) |cached| {
+                if (getCachedResponse(match.handler_key)) |cached| {
                     // Cache hit: body-only cache, sendResponse adds fresh Date header
                     sendResponse(stream, 200, "application/json", cached);
                     return;
@@ -1002,7 +1026,7 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
                     std.fmt.bufPrint(&cache_key_buf, "{s} {s}?{s}", .{ method, path, query_string }) catch path
                 else
                     std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch path;
-                if (getResponseCache().get(cache_key)) |cached| {
+                if (getCachedResponse(cache_key)) |cached| {
                     sendResponse(stream, 200, "application/json", cached);
                     return;
                 }
@@ -1975,6 +1999,43 @@ pub fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u
 pub fn configure_rate_limiting(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     // No-op for now – will implement later
     return py.pyNone();
+}
+
+const CacheThreadCtx = struct {
+    key: []const u8,
+    body: []const u8,
+    iterations: usize,
+};
+
+fn cacheThreadWorker(ctx: *const CacheThreadCtx) void {
+    for (0..ctx.iterations) |_| {
+        const rendered = allocator.dupe(u8, ctx.body) catch return;
+        cacheResponse(ctx.key, rendered);
+        const cached = getCachedResponse(ctx.key) orelse continue;
+        std.debug.assert(std.mem.eql(u8, cached, ctx.body));
+    }
+}
+
+test "response cache is safe under concurrent access" {
+    response_cache = null;
+    response_cache_count = 0;
+    response_cache_lock = .{};
+
+    var threads: [8]std.Thread = undefined;
+    var ctxs: [8]CacheThreadCtx = undefined;
+
+    for (&ctxs, 0..) |*ctx, i| {
+        const key = if ((i % 2) == 0) "GET /items/1" else "GET /items/2";
+        const body = if ((i % 2) == 0) "{\"item_id\":1}" else "{\"item_id\":2}";
+        ctx.* = .{ .key = key, .body = body, .iterations = 500 };
+        threads[i] = try std.Thread.spawn(.{}, cacheThreadWorker, .{ctx});
+    }
+
+    for (threads) |thread| thread.join();
+
+    try std.testing.expectEqual(@as(usize, 2), response_cache_count);
+    try std.testing.expectEqualStrings("{\"item_id\":1}", getCachedResponse("GET /items/1").?);
+    try std.testing.expectEqualStrings("{\"item_id\":2}", getCachedResponse("GET /items/2").?);
 }
 
 
