@@ -27,6 +27,26 @@ If this PR is not tied to an existing issue, open one first.
 # paste exact commands here
 ```
 
+## Red-To-Green Evidence
+
+### Failing Before
+
+```bash
+# paste the exact failing test or repro command here
+```
+
+### Passing After
+
+```bash
+# paste the exact passing rerun here
+```
+
+### Nearby Non-Regression Checks
+
+```bash
+# paste the closest neighboring tests / guards you ran here
+```
+
 ## Benchmarks
 
 If this PR changes benchmark code or benchmark claims, fill this out:
@@ -42,6 +62,9 @@ If this PR changes benchmark code or benchmark claims, fill this out:
 
 - [ ] PR is matched to an issue
 - [ ] PR scope is narrow and reviewable
+- [ ] I showed the failing test or repro before the fix
+- [ ] I showed the same test or repro passing after the fix
+- [ ] I ran nearby non-regression checks, not just the one happy-path test
 - [ ] No generated `.zig-cache`, `zig-out`, dylibs, or other build artifacts are committed
 - [ ] No unrelated dependency or `uv.lock` churn is included
 - [ ] Docs/benchmarks were updated only if the code change actually requires it

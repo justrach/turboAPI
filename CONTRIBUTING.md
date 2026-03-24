@@ -24,10 +24,36 @@ Every PR description should include:
 - summary of the exact change
 - files or subsystems touched
 - tests run
+- failing test, xfail, or exact repro that demonstrated the problem before the fix
+- passing rerun of that same test or repro after the fix
+- nearby non-regression checks proving the change did not just move the bug
 - whether the branch was rebased onto current `main`
 - whether any generated files, lockfiles, or benchmarks changed
 
 If a PR does not map cleanly to an issue, open the issue first.
+
+## Red-To-Green Rule
+
+For bug fixes, compatibility fixes, runtime fixes, and perf regressions:
+
+1. show the failing test, xfail, or exact repro first
+2. make the code change
+3. rerun the same test or repro and show it passing
+4. run the closest neighboring tests to prove the fix did not just move the bug
+
+If there is no failing test yet, write one first unless the failure is impossible to encode cleanly.
+
+Examples of acceptable proof in a PR:
+
+- `before`: `tests/test_async_handlers.py` showing the real remaining failure
+- `after`: the same file rerun cleanly with updated expectations
+- nearby guard: the closest compatibility or parity suite still passing
+
+Or:
+
+- `before`: exact `curl`, request, or benchmark command and failing output
+- `after`: the same command with corrected output
+- nearby guard: targeted tests proving adjacent behavior still works
 
 ## Scope Rules
 
@@ -105,6 +131,14 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv314t/bin/python -m pytest -q tests/test_tu
 zig build test
 ```
 
+For fixes, do not just say “tests passed”.
+
+Show:
+
+- the failing command before the fix
+- the passing command after the fix
+- at least one neighboring or regression-guard command
+
 If you changed benchmarks:
 
 - state whether the run was local or CI
@@ -123,6 +157,7 @@ Benchmark-related PRs must say:
 - whether numbers are cold-start or warmed steady-state
 - number of runs
 - whether values are single-run or median
+- exact machine or CI environment
 
 Do not publish cached results as uncached DB performance.
 
