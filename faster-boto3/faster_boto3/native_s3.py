@@ -21,6 +21,7 @@ from botocore.response import StreamingBody
 logger = logging.getLogger("faster_boto3.native_s3")
 _MIN_MULTIPART_CHUNK = 5 * 1024 * 1024
 _UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD"
+_S3_XMLNS = "http://s3.amazonaws.com/doc/2006-03-01/"
 
 
 def _http_accel_module():
@@ -47,13 +48,13 @@ def _escape_key(key: str) -> str:
 def _encode_query(params: dict[str, str | int]) -> str:
     items = []
     for key, value in sorted(params.items()):
-        items.append(
-            (
-                urllib.parse.quote(str(key), safe="-_.~"),
-                urllib.parse.quote(str(value), safe="-_.~"),
-            )
-        )
-    return "&".join(f"{k}={v}" for k, v in items)
+        encoded_key = urllib.parse.quote(str(key), safe="-_.~")
+        if value == "":
+            items.append(encoded_key)
+        else:
+            encoded_value = urllib.parse.quote(str(value), safe="-_.~")
+            items.append(f"{encoded_key}={encoded_value}")
+    return "&".join(items)
 
 
 def _header_value(value):
@@ -359,6 +360,98 @@ class NativeS3Client:
         def fallback():
             return self._fallback.delete_public_access_block(Bucket=Bucket)
         return self._run_mode("delete_public_access_block", native, fallback)
+
+    def get_bucket_logging(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.get_bucket_logging(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_get_bucket_logging(Bucket=Bucket)
+        def fallback():
+            return self._fallback.get_bucket_logging(Bucket=Bucket)
+        return self._run_mode("get_bucket_logging", native, fallback)
+
+    def put_bucket_logging(self, *, Bucket, BucketLoggingStatus, **kwargs):
+        if kwargs:
+            return self._fallback.put_bucket_logging(
+                Bucket=Bucket,
+                BucketLoggingStatus=BucketLoggingStatus,
+                **kwargs,
+            )
+        def native():
+            return self._native_put_bucket_logging(Bucket=Bucket, BucketLoggingStatus=BucketLoggingStatus)
+        def fallback():
+            return self._fallback.put_bucket_logging(Bucket=Bucket, BucketLoggingStatus=BucketLoggingStatus)
+        return self._run_mode("put_bucket_logging", native, fallback)
+    def get_bucket_encryption(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.get_bucket_encryption(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_get_bucket_encryption(Bucket=Bucket)
+        def fallback():
+            return self._fallback.get_bucket_encryption(Bucket=Bucket)
+        return self._run_mode("get_bucket_encryption", native, fallback)
+
+    def put_bucket_encryption(self, *, Bucket, ServerSideEncryptionConfiguration, **kwargs):
+        if kwargs:
+            return self._fallback.put_bucket_encryption(
+                Bucket=Bucket,
+                ServerSideEncryptionConfiguration=ServerSideEncryptionConfiguration,
+                **kwargs,
+            )
+        def native():
+            return self._native_put_bucket_encryption(
+                Bucket=Bucket,
+                ServerSideEncryptionConfiguration=ServerSideEncryptionConfiguration,
+            )
+        def fallback():
+            return self._fallback.put_bucket_encryption(
+                Bucket=Bucket,
+                ServerSideEncryptionConfiguration=ServerSideEncryptionConfiguration,
+            )
+        return self._run_mode("put_bucket_encryption", native, fallback)
+
+    def delete_bucket_encryption(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.delete_bucket_encryption(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_delete_bucket_encryption(Bucket=Bucket)
+        def fallback():
+            return self._fallback.delete_bucket_encryption(Bucket=Bucket)
+        return self._run_mode("delete_bucket_encryption", native, fallback)
+
+    def get_bucket_website(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.get_bucket_website(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_get_bucket_website(Bucket=Bucket)
+        def fallback():
+            return self._fallback.get_bucket_website(Bucket=Bucket)
+        return self._run_mode("get_bucket_website", native, fallback)
+
+    def put_bucket_website(self, *, Bucket, WebsiteConfiguration, **kwargs):
+        if kwargs:
+            return self._fallback.put_bucket_website(
+                Bucket=Bucket, WebsiteConfiguration=WebsiteConfiguration, **kwargs
+            )
+        def native():
+            return self._native_put_bucket_website(
+                Bucket=Bucket, WebsiteConfiguration=WebsiteConfiguration
+            )
+        def fallback():
+            return self._fallback.put_bucket_website(
+                Bucket=Bucket, WebsiteConfiguration=WebsiteConfiguration
+            )
+        return self._run_mode("put_bucket_website", native, fallback)
+
+    def delete_bucket_website(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.delete_bucket_website(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_delete_bucket_website(Bucket=Bucket)
+        def fallback():
+            return self._fallback.delete_bucket_website(Bucket=Bucket)
+        return self._run_mode("delete_bucket_website", native, fallback)
+
 
     def list_objects(self, *, Bucket, Prefix=None, Marker=None, MaxKeys=None, Delimiter=None, **kwargs):
         if kwargs:
@@ -967,6 +1060,87 @@ class NativeS3Client:
         parsed_headers = _parse_headers(resp_headers)
         self._raise_for_error("DeletePublicAccessBlock", status, parsed_headers, resp_body)
         return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
+    def _native_get_bucket_logging(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None, params={"logging": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("GetBucketLogging", status, parsed_headers, resp_body)
+        out = self._parse_bucket_logging(resp_body)
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
+
+    def _native_put_bucket_logging(self, *, Bucket, BucketLoggingStatus):
+        path, query, url = self._build_url(Bucket, None, params={"logging": ""})
+        body = self._encode_bucket_logging_xml(BucketLoggingStatus)
+        payload_hash = _sigv4_accel_module().sha256_hex(body)
+        headers = self._signed_headers("PUT", path, query, payload_hash, body=body)
+        status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, body)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("PutBucketLogging", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+    def _native_get_bucket_encryption(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None, params={"encryption": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("GetBucketEncryption", status, parsed_headers, resp_body)
+        out = self._parse_encryption(resp_body)
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
+
+    def _native_put_bucket_encryption(self, *, Bucket, ServerSideEncryptionConfiguration):
+        path, query, url = self._build_url(Bucket, None, params={"encryption": ""})
+        body = self._encode_encryption_xml(ServerSideEncryptionConfiguration)
+        payload_hash = _sigv4_accel_module().sha256_hex(body)
+        headers = self._signed_headers("PUT", path, query, payload_hash, body=body)
+        status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, body)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("PutBucketEncryption", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
+    def _native_delete_bucket_encryption(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None, params={"encryption": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("DELETE", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("DELETE", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("DeleteBucketEncryption", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
+    def _native_get_bucket_website(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None, params={"website": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("GetBucketWebsite", status, parsed_headers, resp_body)
+        out = self._parse_bucket_website(resp_body)
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
+
+    def _native_put_bucket_website(self, *, Bucket, WebsiteConfiguration):
+        path, query, url = self._build_url(Bucket, None, params={"website": ""})
+        body = self._encode_bucket_website_xml(WebsiteConfiguration)
+        payload_hash = _sigv4_accel_module().sha256_hex(body)
+        headers = self._signed_headers("PUT", path, query, payload_hash, body=body)
+        status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, body)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("PutBucketWebsite", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
+    def _native_delete_bucket_website(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None, params={"website": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("DELETE", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("DELETE", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("DeleteBucketWebsite", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
 
     def _native_multipart_put_object(self, *, Bucket, Key, Body, Metadata, fd_request, multipart_cfg):
         chunk_size = multipart_cfg["chunk_size"]
@@ -1648,6 +1822,40 @@ class NativeS3Client:
                 out[_strip_ns(child.tag)] = text.lower() == "true"
         return {"PublicAccessBlockConfiguration": out}
 
+    def _parse_bucket_logging(self, body: bytes):
+        if not body:
+            return {}
+        root = ET.fromstring(body)
+        logging_enabled = root.find(".//{*}LoggingEnabled")
+        if logging_enabled is None:
+            return {}
+        out = {}
+        for child in logging_enabled:
+            tag = _strip_ns(child.tag)
+            if tag in {"TargetBucket", "TargetPrefix"} and child.text is not None:
+                out[tag] = child.text
+            elif tag == "TargetGrants":
+                grants = []
+                for grant_node in child.findall("{*}Grant"):
+                    grant = {}
+                    grantee_node = grant_node.find("{*}Grantee")
+                    if grantee_node is not None:
+                        grantee = {}
+                        for g_child in grantee_node:
+                            g_tag = _strip_ns(g_child.tag)
+                            if g_child.text is not None:
+                                grantee[g_tag] = g_child.text
+                        xsi_type = grantee_node.get("{http://www.w3.org/2001/XMLSchema-instance}type")
+                        if xsi_type:
+                            grantee["Type"] = xsi_type.split(":")[-1] if ":" in xsi_type else xsi_type
+                        grant["Grantee"] = grantee
+                    perm_node = grant_node.find("{*}Permission")
+                    if perm_node is not None and perm_node.text is not None:
+                        grant["Permission"] = perm_node.text
+                    grants.append(grant)
+                out["TargetGrants"] = grants
+        return {"LoggingEnabled": out}
+
     def _parse_list_object_versions(self, body: bytes):
         if not body:
             return {"Versions": [], "DeleteMarkers": []}
@@ -1763,14 +1971,14 @@ class NativeS3Client:
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     def _encode_create_bucket_xml(self, config):
-        root = ET.Element("CreateBucketConfiguration")
+        root = ET.Element("CreateBucketConfiguration", xmlns=_S3_XMLNS)
         location = config.get("LocationConstraint")
         if location is not None:
             ET.SubElement(root, "LocationConstraint").text = str(location)
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     def _encode_tagging_xml(self, tagging):
-        root = ET.Element("Tagging")
+        root = ET.Element("Tagging", xmlns=_S3_XMLNS)
         tag_set = ET.SubElement(root, "TagSet")
         for item in tagging.get("TagSet", []):
             tag = ET.SubElement(tag_set, "Tag")
@@ -1779,7 +1987,7 @@ class NativeS3Client:
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     def _encode_versioning_xml(self, config):
-        root = ET.Element("VersioningConfiguration")
+        root = ET.Element("VersioningConfiguration", xmlns=_S3_XMLNS)
         for key in ("Status", "MFADelete"):
             value = config.get(key)
             if value is not None:
@@ -1787,14 +1995,14 @@ class NativeS3Client:
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     def _encode_request_payment_xml(self, config):
-        root = ET.Element("RequestPaymentConfiguration")
+        root = ET.Element("RequestPaymentConfiguration", xmlns=_S3_XMLNS)
         payer = config.get("Payer")
         if payer is not None:
             ET.SubElement(root, "Payer").text = str(payer)
-        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        return ET.tostring(root, encoding="utf-8")
 
     def _encode_public_access_block_xml(self, config):
-        root = ET.Element("PublicAccessBlockConfiguration")
+        root = ET.Element("PublicAccessBlockConfiguration", xmlns=_S3_XMLNS)
         for key in (
             "BlockPublicAcls",
             "IgnorePublicAcls",
@@ -1804,7 +2012,75 @@ class NativeS3Client:
             value = config.get(key)
             if value is not None:
                 ET.SubElement(root, key).text = "true" if value else "false"
-        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        return ET.tostring(root, encoding="utf-8")
+
+    def _encode_bucket_logging_xml(self, config):
+        root = ET.Element("BucketLoggingStatus", xmlns=_S3_XMLNS)
+        logging_enabled = config.get("LoggingEnabled")
+        if logging_enabled:
+            le_el = ET.SubElement(root, "LoggingEnabled")
+            target_bucket = logging_enabled.get("TargetBucket")
+            if target_bucket is not None:
+                ET.SubElement(le_el, "TargetBucket").text = str(target_bucket)
+            target_prefix = logging_enabled.get("TargetPrefix")
+            if target_prefix is not None:
+                ET.SubElement(le_el, "TargetPrefix").text = str(target_prefix)
+            target_grants = logging_enabled.get("TargetGrants")
+            if target_grants:
+                tg_el = ET.SubElement(le_el, "TargetGrants")
+                for grant in target_grants:
+                    grant_el = ET.SubElement(tg_el, "Grant")
+                    grantee = grant.get("Grantee", {})
+                    if grantee:
+                        grantee_el = ET.SubElement(grant_el, "Grantee")
+                        grantee_type = grantee.get("Type")
+                        if grantee_type:
+                            grantee_el.set("{http://www.w3.org/2001/XMLSchema-instance}type", grantee_type)
+                        for g_key, g_value in grantee.items():
+                            if g_key != "Type":
+                                ET.SubElement(grantee_el, g_key).text = str(g_value)
+                    perm = grant.get("Permission")
+                    if perm is not None:
+                        ET.SubElement(grant_el, "Permission").text = str(perm)
+        return ET.tostring(root, encoding="utf-8")
+
+    def _encode_encryption_xml(self, config):
+        root = ET.Element("ServerSideEncryptionConfiguration", xmlns=_S3_XMLNS)
+        for rule in config.get("Rules", []):
+            rule_el = ET.SubElement(root, "Rule")
+            default = rule.get("ApplyServerSideEncryptionByDefault")
+            if default is not None:
+                default_el = ET.SubElement(rule_el, "ApplyServerSideEncryptionByDefault")
+                for key in ("SSEAlgorithm", "KMSMasterKeyID"):
+                    value = default.get(key)
+                    if value is not None:
+                        ET.SubElement(default_el, key).text = str(value)
+            bucket_key = rule.get("BucketKeyEnabled")
+            if bucket_key is not None:
+                ET.SubElement(rule_el, "BucketKeyEnabled").text = "true" if bucket_key else "false"
+        return ET.tostring(root, encoding="utf-8")
+
+    def _parse_encryption(self, body: bytes):
+        if not body:
+            return {"ServerSideEncryptionConfiguration": {"Rules": []}}
+        root = ET.fromstring(body)
+        rules = []
+        for rule_node in root.findall(".//{*}Rule"):
+            rule = {}
+            default_node = rule_node.find("{*}ApplyServerSideEncryptionByDefault")
+            if default_node is not None:
+                default = {}
+                for child in default_node:
+                    tag = _strip_ns(child.tag)
+                    if child.text is not None:
+                        default[tag] = child.text
+                rule["ApplyServerSideEncryptionByDefault"] = default
+            bucket_key_node = rule_node.find("{*}BucketKeyEnabled")
+            if bucket_key_node is not None and bucket_key_node.text is not None:
+                rule["BucketKeyEnabled"] = bucket_key_node.text.lower() == "true"
+            rules.append(rule)
+        return {"ServerSideEncryptionConfiguration": {"Rules": rules}}
+
 
     def _encode_delete_objects_xml(self, delete):
         root = ET.Element("Delete")
@@ -1816,6 +2092,66 @@ class NativeS3Client:
             if obj.get("VersionId") is not None:
                 ET.SubElement(obj_el, "VersionId").text = obj["VersionId"]
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    def _encode_bucket_website_xml(self, config):
+        root = ET.Element("WebsiteConfiguration", xmlns=_S3_XMLNS)
+        index_doc = config.get("IndexDocument")
+        if index_doc:
+            idx_el = ET.SubElement(root, "IndexDocument")
+            if "Suffix" in index_doc:
+                ET.SubElement(idx_el, "Suffix").text = str(index_doc["Suffix"])
+        error_doc = config.get("ErrorDocument")
+        if error_doc:
+            err_el = ET.SubElement(root, "ErrorDocument")
+            if "Key" in error_doc:
+                ET.SubElement(err_el, "Key").text = str(error_doc["Key"])
+        redirect_all = config.get("RedirectAllRequestsTo")
+        if redirect_all:
+            redir_el = ET.SubElement(root, "RedirectAllRequestsTo")
+            if "HostName" in redirect_all:
+                ET.SubElement(redir_el, "HostName").text = str(redirect_all["HostName"])
+            if "Protocol" in redirect_all:
+                ET.SubElement(redir_el, "Protocol").text = str(redirect_all["Protocol"])
+        routing_rules = config.get("RoutingRules", [])
+        if routing_rules:
+            rules_el = ET.SubElement(root, "RoutingRules")
+            for rule in routing_rules:
+                rule_el = ET.SubElement(rules_el, "RoutingRule")
+                condition = rule.get("Condition")
+                if condition:
+                    cond_el = ET.SubElement(rule_el, "Condition")
+                    for k, v in condition.items():
+                        ET.SubElement(cond_el, k).text = str(v)
+                redirect = rule.get("Redirect")
+                if redirect:
+                    redir_rule_el = ET.SubElement(rule_el, "Redirect")
+                    for k, v in redirect.items():
+                        ET.SubElement(redir_rule_el, k).text = str(v)
+        return ET.tostring(root, encoding="utf-8")
+
+    def _parse_bucket_website(self, body: bytes):
+        if not body:
+            return {}
+        root = ET.fromstring(body)
+        out = {}
+        for child in root:
+            tag = _strip_ns(child.tag)
+            if tag == "IndexDocument":
+                out["IndexDocument"] = {_strip_ns(c.tag): c.text for c in child if c.text}
+            elif tag == "ErrorDocument":
+                out["ErrorDocument"] = {_strip_ns(c.tag): c.text for c in child if c.text}
+            elif tag == "RedirectAllRequestsTo":
+                out["RedirectAllRequestsTo"] = {_strip_ns(c.tag): c.text for c in child if c.text}
+            elif tag == "RoutingRules":
+                rules = []
+                for rule_node in child:
+                    rule = {}
+                    for part in rule_node:
+                        part_tag = _strip_ns(part.tag)
+                        rule[part_tag] = {_strip_ns(c.tag): c.text for c in part if c.text}
+                    rules.append(rule)
+                out["RoutingRules"] = rules
+        return out
 
     def _parse_delete_objects(self, body: bytes):
         if not body:
@@ -2001,6 +2337,10 @@ def _results_equal(operation_name: str, native_result, fallback_result) -> bool:
         return native_result.get("LocationConstraint") == fallback_result.get("LocationConstraint")
     if operation_name == "get_bucket_versioning":
         return native_result.get("Status") == fallback_result.get("Status")
+    if operation_name == "get_bucket_encryption":
+        return native_result.get("ServerSideEncryptionConfiguration") == fallback_result.get("ServerSideEncryptionConfiguration")
+    if operation_name == "get_bucket_logging":
+        return native_result.get("LoggingEnabled") == fallback_result.get("LoggingEnabled")
     if operation_name == "delete_objects":
         native_deleted = [item.get("Key") for item in native_result.get("Deleted", [])]
         fallback_deleted = [item.get("Key") for item in fallback_result.get("Deleted", [])]
@@ -2031,6 +2371,9 @@ def _results_equal(operation_name: str, native_result, fallback_result) -> bool:
         "upload_part_copy",
         "complete_multipart_upload",
         "abort_multipart_upload",
+        "put_bucket_encryption",
+        "delete_bucket_encryption",
+        "put_bucket_logging",
     }:
         return native_result == fallback_result or native_result.get("ResponseMetadata", {}).get("HTTPStatusCode") == fallback_result.get("ResponseMetadata", {}).get("HTTPStatusCode")
     return True

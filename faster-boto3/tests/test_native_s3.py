@@ -460,3 +460,151 @@ def test_operation_override_put_object_only(setup_bucket, monkeypatch):
         native_mod.NativeS3Client._native_put_object = orig_native_put
         s3._fallback.put_object = orig_fallback_put
         s3._fallback.get_object = orig_fallback_get
+
+
+def test_native_bucket_logging(native_s3):
+    # Disable logging first (empty BucketLoggingStatus)
+    put_disable = native_s3.put_bucket_logging(Bucket=BUCKET, BucketLoggingStatus={})
+    assert put_disable["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+    # Get logging — should have no LoggingEnabled when disabled
+    got_disabled = native_s3.get_bucket_logging(Bucket=BUCKET)
+    assert "ResponseMetadata" in got_disabled
+    assert got_disabled.get("LoggingEnabled") is None
+
+    # Enable logging targeting the same bucket with a prefix (LocalStack allows self-logging)
+    logging_cfg = {
+        "LoggingEnabled": {
+            "TargetBucket": BUCKET,
+            "TargetPrefix": "access-logs/",
+        }
+    }
+    put_enable = native_s3.put_bucket_logging(Bucket=BUCKET, BucketLoggingStatus=logging_cfg)
+    assert put_enable["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+    got_enabled = native_s3.get_bucket_logging(Bucket=BUCKET)
+    assert got_enabled["LoggingEnabled"]["TargetBucket"] == BUCKET
+    assert got_enabled["LoggingEnabled"]["TargetPrefix"] == "access-logs/"
+
+    # Disable again to leave the bucket clean for other tests
+    put_disable2 = native_s3.put_bucket_logging(Bucket=BUCKET, BucketLoggingStatus={})
+    assert put_disable2["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+def test_native_bucket_website_redirect_all(native_s3):
+    website_cfg = {
+        "RedirectAllRequestsTo": {
+            "HostName": "www.example.com",
+            "Protocol": "https",
+        }
+    }
+    put = native_s3.put_bucket_website(Bucket=BUCKET, WebsiteConfiguration=website_cfg)
+    assert put["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+    got = native_s3.get_bucket_website(Bucket=BUCKET)
+    assert "ResponseMetadata" in got
+    redirect = got.get("RedirectAllRequestsTo", {})
+    assert redirect.get("HostName") == "www.example.com"
+    assert redirect.get("Protocol") == "https"
+
+    deleted = native_s3.delete_bucket_website(Bucket=BUCKET)
+    assert deleted["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+
+def test_native_bucket_website_routing_rules(native_s3):
+    website_cfg = {
+        "IndexDocument": {"Suffix": "index.html"},
+        "RoutingRules": [
+            {
+                "Condition": {"KeyPrefixEquals": "docs/"},
+                "Redirect": {
+                    "ReplaceKeyPrefixWith": "documents/",
+                    "Protocol": "https",
+                    "HostName": "www.example.com",
+                },
+            }
+        ],
+    }
+    put = native_s3.put_bucket_website(Bucket=BUCKET, WebsiteConfiguration=website_cfg)
+    assert put["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+    got = native_s3.get_bucket_website(Bucket=BUCKET)
+    assert "ResponseMetadata" in got
+    assert got.get("IndexDocument", {}).get("Suffix") == "index.html"
+    rules = got.get("RoutingRules", [])
+    assert len(rules) >= 1
+    condition = rules[0].get("Condition", {})
+    assert condition.get("KeyPrefixEquals") == "docs/"
+    redirect = rules[0].get("Redirect", {})
+    assert redirect.get("ReplaceKeyPrefixWith") == "documents/"
+
+    deleted = native_s3.delete_bucket_website(Bucket=BUCKET)
+    assert deleted["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+
+def test_native_bucket_website_kwargs_fallback(setup_bucket, monkeypatch):
+    """Extra kwargs must route through the boto3 fallback client."""
+    monkeypatch.setenv("FASTER_BOTO3_NATIVE", "s3")
+    import faster_boto3
+    faster_boto3.patch()
+    s3 = faster_boto3.client("s3", endpoint_url=ENDPOINT, region_name=REGION, **CREDS)
+
+    fallback_calls = []
+    orig = s3._fallback.put_bucket_website
+
+    def patched_fallback(*args, **kwargs):
+        fallback_calls.append(kwargs)
+        return orig(*args, **kwargs)
+
+    s3._fallback.put_bucket_website = patched_fallback
+    try:
+        website_cfg = {"IndexDocument": {"Suffix": "index.html"}}
+        s3.put_bucket_website(
+            Bucket=BUCKET,
+            WebsiteConfiguration=website_cfg,
+            ChecksumAlgorithm="CRC32",  # extra kwarg triggers fallback
+        )
+    except Exception:
+        pass  # LocalStack may reject unknown params; what matters is the routing
+    finally:
+        s3._fallback.put_bucket_website = orig
+        faster_boto3.unpatch()
+
+    assert fallback_calls, "extra kwargs must route to the fallback client"
+
+
+def test_native_bucket_website(native_s3):
+    website_cfg = {
+        "IndexDocument": {"Suffix": "index.html"},
+        "ErrorDocument": {"Key": "error.html"},
+    }
+    put = native_s3.put_bucket_website(Bucket=BUCKET, WebsiteConfiguration=website_cfg)
+    assert put["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+    got = native_s3.get_bucket_website(Bucket=BUCKET)
+    assert got["IndexDocument"]["Suffix"] == "index.html"
+    assert got["ErrorDocument"]["Key"] == "error.html"
+
+    deleted = native_s3.delete_bucket_website(Bucket=BUCKET)
+    assert deleted["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+
+def test_native_bucket_encryption(native_s3):
+    sse_cfg = {
+        "Rules": [
+            {
+                "ApplyServerSideEncryptionByDefault": {
+                    "SSEAlgorithm": "AES256",
+                },
+            }
+        ]
+    }
+    put = native_s3.put_bucket_encryption(Bucket=BUCKET, ServerSideEncryptionConfiguration=sse_cfg)
+    assert put["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+    got = native_s3.get_bucket_encryption(Bucket=BUCKET)
+    rules = got["ServerSideEncryptionConfiguration"]["Rules"]
+    assert len(rules) >= 1
+    assert rules[0]["ApplyServerSideEncryptionByDefault"]["SSEAlgorithm"] == "AES256"
+
+    deleted = native_s3.delete_bucket_encryption(Bucket=BUCKET)
+    assert deleted["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
