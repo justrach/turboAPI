@@ -27,6 +27,7 @@
   <a href="#-migrating-from-fastapi">Migrate</a> ·
   <a href="#-why-python">Why Python?</a> ·
   <a href="#-observability">Observability</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
   <a href="SECURITY.md">Security</a>
 </p>
 
