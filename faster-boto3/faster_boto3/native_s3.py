@@ -268,6 +268,98 @@ class NativeS3Client:
             )
         return self._run_mode("put_bucket_versioning", native, fallback)
 
+    def get_bucket_policy(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.get_bucket_policy(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_get_bucket_policy(Bucket=Bucket)
+        def fallback():
+            return self._fallback.get_bucket_policy(Bucket=Bucket)
+        return self._run_mode("get_bucket_policy", native, fallback)
+
+    def put_bucket_policy(self, *, Bucket, Policy, **kwargs):
+        if kwargs:
+            return self._fallback.put_bucket_policy(Bucket=Bucket, Policy=Policy, **kwargs)
+        def native():
+            return self._native_put_bucket_policy(Bucket=Bucket, Policy=Policy)
+        def fallback():
+            return self._fallback.put_bucket_policy(Bucket=Bucket, Policy=Policy)
+        return self._run_mode("put_bucket_policy", native, fallback)
+
+    def delete_bucket_policy(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.delete_bucket_policy(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_delete_bucket_policy(Bucket=Bucket)
+        def fallback():
+            return self._fallback.delete_bucket_policy(Bucket=Bucket)
+        return self._run_mode("delete_bucket_policy", native, fallback)
+
+    def get_bucket_request_payment(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.get_bucket_request_payment(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_get_bucket_request_payment(Bucket=Bucket)
+        def fallback():
+            return self._fallback.get_bucket_request_payment(Bucket=Bucket)
+        return self._run_mode("get_bucket_request_payment", native, fallback)
+
+    def put_bucket_request_payment(self, *, Bucket, RequestPaymentConfiguration, **kwargs):
+        if kwargs:
+            return self._fallback.put_bucket_request_payment(
+                Bucket=Bucket,
+                RequestPaymentConfiguration=RequestPaymentConfiguration,
+                **kwargs,
+            )
+        def native():
+            return self._native_put_bucket_request_payment(
+                Bucket=Bucket,
+                RequestPaymentConfiguration=RequestPaymentConfiguration,
+            )
+        def fallback():
+            return self._fallback.put_bucket_request_payment(
+                Bucket=Bucket,
+                RequestPaymentConfiguration=RequestPaymentConfiguration,
+            )
+        return self._run_mode("put_bucket_request_payment", native, fallback)
+
+    def get_public_access_block(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.get_public_access_block(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_get_public_access_block(Bucket=Bucket)
+        def fallback():
+            return self._fallback.get_public_access_block(Bucket=Bucket)
+        return self._run_mode("get_public_access_block", native, fallback)
+
+    def put_public_access_block(self, *, Bucket, PublicAccessBlockConfiguration, **kwargs):
+        if kwargs:
+            return self._fallback.put_public_access_block(
+                Bucket=Bucket,
+                PublicAccessBlockConfiguration=PublicAccessBlockConfiguration,
+                **kwargs,
+            )
+        def native():
+            return self._native_put_public_access_block(
+                Bucket=Bucket,
+                PublicAccessBlockConfiguration=PublicAccessBlockConfiguration,
+            )
+        def fallback():
+            return self._fallback.put_public_access_block(
+                Bucket=Bucket,
+                PublicAccessBlockConfiguration=PublicAccessBlockConfiguration,
+            )
+        return self._run_mode("put_public_access_block", native, fallback)
+
+    def delete_public_access_block(self, *, Bucket, **kwargs):
+        if kwargs:
+            return self._fallback.delete_public_access_block(Bucket=Bucket, **kwargs)
+        def native():
+            return self._native_delete_public_access_block(Bucket=Bucket)
+        def fallback():
+            return self._fallback.delete_public_access_block(Bucket=Bucket)
+        return self._run_mode("delete_public_access_block", native, fallback)
+
     def list_objects(self, *, Bucket, Prefix=None, Marker=None, MaxKeys=None, Delimiter=None, **kwargs):
         if kwargs:
             return self._fallback.list_objects(
@@ -792,6 +884,88 @@ class NativeS3Client:
         status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, body)
         parsed_headers = _parse_headers(resp_headers)
         self._raise_for_error("PutBucketVersioning", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
+    def _native_get_bucket_policy(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None, params={"policy": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("GetBucketPolicy", status, parsed_headers, resp_body)
+        return {
+            "Policy": resp_body.decode("utf-8"),
+            "ResponseMetadata": self._response_metadata(status, parsed_headers),
+        }
+
+    def _native_put_bucket_policy(self, *, Bucket, Policy):
+        path, query, url = self._build_url(Bucket, None, params={"policy": ""})
+        body = Policy.encode("utf-8") if isinstance(Policy, str) else Policy
+        payload_hash = _sigv4_accel_module().sha256_hex(body)
+        headers = self._signed_headers("PUT", path, query, payload_hash, body=body)
+        status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, body)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("PutBucketPolicy", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
+    def _native_delete_bucket_policy(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None, params={"policy": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("DELETE", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("DELETE", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("DeleteBucketPolicy", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
+    def _native_get_bucket_request_payment(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None, params={"requestPayment": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("GetBucketRequestPayment", status, parsed_headers, resp_body)
+        out = self._parse_request_payment(resp_body)
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
+
+    def _native_put_bucket_request_payment(self, *, Bucket, RequestPaymentConfiguration):
+        path, query, url = self._build_url(Bucket, None, params={"requestPayment": ""})
+        body = self._encode_request_payment_xml(RequestPaymentConfiguration)
+        payload_hash = _sigv4_accel_module().sha256_hex(body)
+        headers = self._signed_headers("PUT", path, query, payload_hash, body=body)
+        status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, body)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("PutBucketRequestPayment", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
+    def _native_get_public_access_block(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None, params={"publicAccessBlock": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("GET", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("GET", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("GetPublicAccessBlock", status, parsed_headers, resp_body)
+        out = self._parse_public_access_block(resp_body)
+        out["ResponseMetadata"] = self._response_metadata(status, parsed_headers)
+        return out
+
+    def _native_put_public_access_block(self, *, Bucket, PublicAccessBlockConfiguration):
+        path, query, url = self._build_url(Bucket, None, params={"publicAccessBlock": ""})
+        body = self._encode_public_access_block_xml(PublicAccessBlockConfiguration)
+        payload_hash = _sigv4_accel_module().sha256_hex(body)
+        headers = self._signed_headers("PUT", path, query, payload_hash, body=body)
+        status, resp_headers, resp_body = _http_accel_module().request("PUT", url, headers, body)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("PutPublicAccessBlock", status, parsed_headers, resp_body)
+        return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
+
+    def _native_delete_public_access_block(self, *, Bucket):
+        path, query, url = self._build_url(Bucket, None, params={"publicAccessBlock": ""})
+        payload_hash = _sigv4_accel_module().sha256_hex(b"")
+        headers = self._signed_headers("DELETE", path, query, payload_hash, body=None)
+        status, resp_headers, resp_body = _http_accel_module().request("DELETE", url, headers, None)
+        parsed_headers = _parse_headers(resp_headers)
+        self._raise_for_error("DeletePublicAccessBlock", status, parsed_headers, resp_body)
         return {"ResponseMetadata": self._response_metadata(status, parsed_headers)}
 
     def _native_multipart_put_object(self, *, Bucket, Key, Body, Metadata, fd_request, multipart_cfg):
@@ -1452,6 +1626,28 @@ class NativeS3Client:
                 out[_strip_ns(child.tag)] = text
         return out
 
+    def _parse_request_payment(self, body: bytes):
+        if not body:
+            return {}
+        root = ET.fromstring(body)
+        out = {}
+        for child in root:
+            text = child.text
+            if text is not None:
+                out[_strip_ns(child.tag)] = text
+        return out
+
+    def _parse_public_access_block(self, body: bytes):
+        if not body:
+            return {"PublicAccessBlockConfiguration": {}}
+        root = ET.fromstring(body)
+        out = {}
+        for child in root:
+            text = child.text
+            if text is not None:
+                out[_strip_ns(child.tag)] = text.lower() == "true"
+        return {"PublicAccessBlockConfiguration": out}
+
     def _parse_list_object_versions(self, body: bytes):
         if not body:
             return {"Versions": [], "DeleteMarkers": []}
@@ -1588,6 +1784,26 @@ class NativeS3Client:
             value = config.get(key)
             if value is not None:
                 ET.SubElement(root, key).text = str(value)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    def _encode_request_payment_xml(self, config):
+        root = ET.Element("RequestPaymentConfiguration")
+        payer = config.get("Payer")
+        if payer is not None:
+            ET.SubElement(root, "Payer").text = str(payer)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    def _encode_public_access_block_xml(self, config):
+        root = ET.Element("PublicAccessBlockConfiguration")
+        for key in (
+            "BlockPublicAcls",
+            "IgnorePublicAcls",
+            "BlockPublicPolicy",
+            "RestrictPublicBuckets",
+        ):
+            value = config.get(key)
+            if value is not None:
+                ET.SubElement(root, key).text = "true" if value else "false"
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     def _encode_delete_objects_xml(self, delete):

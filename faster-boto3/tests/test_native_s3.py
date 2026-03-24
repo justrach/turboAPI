@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 
@@ -104,6 +105,56 @@ def test_native_bucket_versioning_and_list_object_versions(native_s3):
     versions = native_s3.list_object_versions(Bucket=BUCKET, Prefix="versioned-object")
     version_keys = [item["Key"] for item in versions["Versions"]]
     assert "versioned-object" in version_keys
+
+
+def test_native_bucket_policy_request_payment_and_public_access(native_s3):
+    policy_doc = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "AllowListBucket",
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": ["s3:ListBucket"],
+                "Resource": [f"arn:aws:s3:::{BUCKET}"],
+            }
+        ],
+    }
+    put_policy = native_s3.put_bucket_policy(Bucket=BUCKET, Policy=json.dumps(policy_doc))
+    assert put_policy["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+    got_policy = native_s3.get_bucket_policy(Bucket=BUCKET)
+    assert json.loads(got_policy["Policy"]) == policy_doc
+
+    payment = native_s3.put_bucket_request_payment(
+        Bucket=BUCKET,
+        RequestPaymentConfiguration={"Payer": "Requester"},
+    )
+    assert payment["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+    got_payment = native_s3.get_bucket_request_payment(Bucket=BUCKET)
+    assert got_payment["Payer"] == "Requester"
+
+    block_cfg = {
+        "BlockPublicAcls": True,
+        "IgnorePublicAcls": True,
+        "BlockPublicPolicy": False,
+        "RestrictPublicBuckets": False,
+    }
+    put_pab = native_s3.put_public_access_block(
+        Bucket=BUCKET,
+        PublicAccessBlockConfiguration=block_cfg,
+    )
+    assert put_pab["ResponseMetadata"]["HTTPStatusCode"] in {200, 204}
+
+    got_pab = native_s3.get_public_access_block(Bucket=BUCKET)
+    assert got_pab["PublicAccessBlockConfiguration"] == block_cfg
+
+    deleted_pab = native_s3.delete_public_access_block(Bucket=BUCKET)
+    assert deleted_pab["ResponseMetadata"]["HTTPStatusCode"] == 204
+
+    deleted_policy = native_s3.delete_bucket_policy(Bucket=BUCKET)
+    assert deleted_policy["ResponseMetadata"]["HTTPStatusCode"] == 204
 
 
 def test_native_head_and_get(native_s3):
