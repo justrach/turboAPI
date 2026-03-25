@@ -778,12 +778,14 @@ def create_enhanced_handler(original_handler, route_definition):
                                         pass
                             parsed_params.update(params)
 
-                # 3. Parse headers (only if handler needs them)
-                if _has_header_params:
-                    headers_dict = kwargs.get("headers", {})
-                    if headers_dict:
-                        header_params = HeaderParser.parse_headers(headers_dict, sig)
-                        parsed_params.update(header_params)
+                # 3. Parse headers (always, for both explicit Header() and implicit name-matched params).
+                # Use non-overriding merge so query/path params resolved above take precedence.
+                headers_dict = kwargs.get("headers", {})
+                if headers_dict:
+                    header_params = HeaderParser.parse_headers(headers_dict, sig)
+                    for _hk, _hv in header_params.items():
+                        if _hk not in parsed_params:
+                            parsed_params[_hk] = _hv
 
                 # 4. Parse request body (JSON)
                 body_data = kwargs.get("body", b"")

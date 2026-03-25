@@ -108,21 +108,19 @@ def test_cors_explicit_origin_with_credentials_ok():
 # ── Bug #11: Password hash placeholder ──────────────────────────────────────
 
 def test_get_password_hash_raises():
-    """Bug #11: get_password_hash must NOT return plaintext."""
+    """Bug #11 → fixed: get_password_hash must return a hash, NOT raise and NOT return plaintext."""
     from turboapi.security import get_password_hash
 
-    with pytest.raises(NotImplementedError):
-        get_password_hash("secret123")
-
-
+    hashed = get_password_hash("secret123")
+    assert isinstance(hashed, str) and hashed, "get_password_hash must return a non-empty string"
+    assert hashed != "secret123", "get_password_hash must NOT return plaintext"
 def test_verify_password_raises():
-    """Bug #11: verify_password must NOT do plaintext comparison."""
-    from turboapi.security import verify_password
+    """Bug #11 → fixed: verify_password must verify correctly, NOT raise."""
+    from turboapi.security import get_password_hash, verify_password
 
-    with pytest.raises(NotImplementedError):
-        verify_password("secret123", "secret123")
-
-
+    hashed = get_password_hash("secret123")
+    assert verify_password("secret123", hashed) is True
+    assert verify_password("wrong", hashed) is False
 # ── Bug #5: Port range validation ───────────────────────────────────────────
 # (Zig-side — tested via integration; can't unit test @intCast directly)
 

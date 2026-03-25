@@ -134,14 +134,12 @@ def gzip_app():
     return f"http://127.0.0.1:{port}"
 
 
-@pytest.mark.xfail(reason="Requires middleware header/body passthrough (PR #55)")
 def test_gzip_middleware_compat(gzip_app):
     """GZip middleware must correctly compress and return 200."""
     r = requests.get(f"{gzip_app}/large", headers={"Accept-Encoding": "gzip"})
     assert r.status_code == 200, r.text
     assert r.headers.get("Content-Encoding") == "gzip"
 
-@pytest.mark.xfail(reason="Requires middleware header/body passthrough (PR #55)")
 def test_gzip_body_is_actually_compressed(gzip_app):
     """The body must actually be gzip-compressed bytes, not original JSON.
     Decompress and verify the data survived the round trip."""
