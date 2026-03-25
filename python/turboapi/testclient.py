@@ -160,10 +160,61 @@ class TestClient:
             cookie_str = "; ".join(f"{k}={v}" for k, v in merged_cookies.items())
             request_headers["cookie"] = cookie_str
 
+        # Issue #104: Check mounted apps (e.g. StaticFiles) before route matching
+        if hasattr(self.app, '_mounts'):
+            for mount_path, mount_info in self.app._mounts.items():
+                if path.startswith(mount_path + "/") or path == mount_path:
+                    sub_path = path[len(mount_path):]
+                    mounted_app = mount_info["app"]
+                    if hasattr(mounted_app, 'get_file'):
+                        result = mounted_app.get_file(sub_path)
+                        if result is not None:
+                            content_bytes, content_type, size = result
+                            return TestResponse(
+                                status_code=200,
+                                content=content_bytes,
+                                headers={"content-type": content_type},
+                            )
+
+        # Issue #102: Serve docs and openapi URLs
+        if hasattr(self.app, 'openapi_url') and self.app.openapi_url and path == self.app.openapi_url:
+            import json as json_module
+            schema = self.app.openapi()
+            body = json_module.dumps(schema).encode("utf-8")
+            return TestResponse(status_code=200, content=body, headers={"content-type": "application/json"})
+
+        if hasattr(self.app, 'docs_url') and self.app.docs_url and path == self.app.docs_url:
+            html = f"""<!DOCTYPE html>
+<html><head><title>{self.app.title} - Swagger UI</title></head>
+<body><div id="swagger-ui"></div></body></html>"""
+            return TestResponse(status_code=200, content=html.encode("utf-8"), headers={"content-type": "text/html"})
+
         # Find matching route
         route, path_params = self._find_route(method.upper(), path)
         if route is None:
             return TestResponse(status_code=404, content=b'{"detail":"Not Found"}')
+
+        # Issue #103: Enforce router-level dependencies
+        if hasattr(route, 'dependencies') and route.dependencies:
+            for dep in route.dependencies:
+                dep_fn = dep.dependency if hasattr(dep, 'dependency') else dep
+                if dep_fn is not None:
+                    try:
+                        if inspect.iscoroutinefunction(dep_fn):
+                            try:
+                                asyncio.get_event_loop().run_until_complete(dep_fn())
+                            except RuntimeError:
+                                asyncio.run(dep_fn())
+                        else:
+                            dep_fn()
+                    except Exception as dep_exc:
+                        if hasattr(dep_exc, "status_code") and hasattr(dep_exc, "detail"):
+                            return TestResponse(
+                                status_code=dep_exc.status_code,
+                                content=_json_encode({"detail": dep_exc.detail}),
+                                headers=getattr(dep_exc, "headers", None) or {},
+                            )
+                        raise
 
         # Build handler kwargs
         handler = route.handler
@@ -237,6 +288,17 @@ class TestClient:
             else:
                 result = handler(**kwargs)
         except Exception as e:
+            # Issue #100: Check registered custom exception handlers first
+            if hasattr(self.app, '_exception_handlers'):
+                for exc_class, exc_handler in self.app._exception_handlers.items():
+                    if isinstance(e, exc_class):
+                        result = exc_handler(None, e)
+                        if inspect.isawaitable(result):
+                            try:
+                                result = asyncio.get_event_loop().run_until_complete(result)
+                            except RuntimeError:
+                                result = asyncio.run(result)
+                        return self._build_response(result)
             # Check for HTTPException
             if hasattr(e, "status_code") and hasattr(e, "detail"):
                 error_body = {"detail": e.detail}
