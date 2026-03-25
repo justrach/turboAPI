@@ -2,6 +2,20 @@
 
 All notable changes to TurboAPI are documented here.
 
+## [1.0.21] — 2026-03-26
+
+### Bug Fixes
+
+- Restored custom exception-handler dispatch in the runtime/TestClient path.
+- Restored execution of `lifespan=` callables during ASGI lifespan startup and shutdown.
+- Restored serving of configured `/docs` and `/openapi.json` URLs in the verifier/TestClient path.
+- Restored enforcement of router-level dependencies during request handling.
+- Restored mounted `StaticFiles` dispatch in the runtime/TestClient path.
+
+### Verification
+
+- Added exact repro coverage for issues `#100` through `#104` in `tests/test_verified_compat_gaps.py`.
+
 ## [1.0.01] — 2026-03-19
 
 ### Performance (47k → 150k req/s)

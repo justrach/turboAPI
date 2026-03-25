@@ -49,6 +49,7 @@ class RouteDefinition:
     tags: list[str] = None
     summary: str | None = None
     description: str | None = None
+    dependencies: list = None
 
 
 class RouteRegistry:
@@ -213,8 +214,9 @@ class Router:
 
     def include_router(self, router: Router, prefix: str = "", tags: list[str] = None):
         """Include another router's routes."""
+        router_deps = list(router.dependencies) if router.dependencies else []
         for route in router.registry.get_routes():
-            # Create new route with updated prefix and tags
+            merged_deps = router_deps + (route.dependencies or [])
             new_route = RouteDefinition(
                 path=prefix + route.path,
                 method=route.method,
@@ -226,6 +228,7 @@ class Router:
                 tags=(tags or []) + (route.tags or []),
                 summary=route.summary,
                 description=route.description,
+                dependencies=merged_deps if merged_deps else None,
             )
             self.registry.register_route(new_route)
 
