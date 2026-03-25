@@ -121,7 +121,7 @@ def test_verified_password_hashing_helpers():
 
     Repro for https://github.com/justrach/turboAPI/issues/98
     """
-    from turboapi.security import get_password_hash, verify_password
+    from turboapi import get_password_hash, verify_password_hash
 
     password = "correct-horse-battery-staple"
     hashed = get_password_hash(password)
@@ -131,12 +131,12 @@ def test_verified_password_hashing_helpers():
     assert hashed != password, "get_password_hash returned plaintext — no hashing performed"
 
     # Correct password must verify
-    assert verify_password(password, hashed) is True, (
+    assert verify_password_hash(password, hashed) is True, (
         "verify_password returned False for the correct password"
     )
 
     # Wrong password must not verify
-    assert verify_password("wrong-password", hashed) is False, (
+    assert verify_password_hash("wrong-password", hashed) is False, (
         "verify_password returned True for a wrong password"
     )
 
@@ -145,5 +145,5 @@ def test_verified_password_hashing_helpers():
     assert hashed != hashed2, "get_password_hash produced identical hashes (missing random salt)"
 
     # Cross-verify: each hash must only accept its own password
-    assert verify_password(password, hashed2) is True
-    assert verify_password("bad", hashed2) is False
+    assert verify_password_hash(password, hashed2) is True
+    assert verify_password_hash("bad", hashed2) is False

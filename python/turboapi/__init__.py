@@ -81,6 +81,10 @@ from .security import (
     OAuth2PasswordBearer,
     Security,
     SecurityScopes,
+    get_password_hash,
+)
+from .security import (
+    verify_password as verify_password_hash,
 )
 
 # SSE (Server-Sent Events)
@@ -92,7 +96,7 @@ from .version_check import check_free_threading_support, get_python_threading_in
 # WebSocket
 from .websockets import WebSocket, WebSocketDisconnect
 
-__version__ = "1.0.19"
+__version__ = "1.0.20"
 __all__ = [
     # Core
     "TurboAPI",
@@ -162,5 +166,7 @@ __all__ = [
     "create_refresh_token",
     "decode_token",
     "hash_password",
+    "get_password_hash",
     "verify_password",
+    "verify_password_hash",
 ]

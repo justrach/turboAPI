@@ -2,6 +2,18 @@
 
 All notable changes to TurboAPI are documented here.
 
+## [1.0.20] — 2026-03-25
+
+### Bug Fixes
+
+- Restored gzip middleware header/body passthrough on the Zig runtime so `Content-Encoding: gzip` and compressed bytes survive the round trip.
+- Restored implicit header-name extraction for plain handler params such as `authorization` and `x_request_id`.
+- Replaced password helper placeholders with working stdlib PBKDF2 hashing and verification helpers, exposed as `get_password_hash()` and `verify_password_hash()` at the package root without changing the existing JWT-oriented `verify_password()` export.
+
+### Verification
+
+- Added exact repro coverage for issues [#96](https://github.com/justrach/turboAPI/issues/96), [#97](https://github.com/justrach/turboAPI/issues/97), and [#98](https://github.com/justrach/turboAPI/issues/98) in `tests/test_verified_audit_items.py`.
+
 ## [1.0.01] — 2026-03-19
 
 ### Performance (47k → 150k req/s)
@@ -27,7 +39,7 @@ All notable changes to TurboAPI are documented here.
   - `middleware.py`: `threading.Lock` on rate limiter dict (data race)
   - `middleware.py`: Prefer `X-Real-IP` over `X-Forwarded-For`
   - `middleware.py`: `ValueError` on CORS wildcard + credentials
-  - `security.py`: `NotImplementedError` for password hash placeholders
+  - `security.py`: password hash placeholder issue was identified here; the working built-in hash/verify implementation shipped later in `1.0.20`
   - `server.zig`: `handler_tag` set in all route registration functions
 - **Slowloris protection** — `SO_RCVTIMEO` 30s on accepted sockets (`dee1019`)
 - **Fuzz tests** for HTTP parser, router, JSON validator, URL decoder (`2024239`)

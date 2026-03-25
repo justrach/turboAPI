@@ -635,8 +635,6 @@ def create_enhanced_handler(original_handler, route_definition):
     # Pre-check which features this handler needs
     _param_names = set(sig.parameters.keys())
     _has_dependencies = False
-    _has_header_params = False
-    from turboapi.datastructures import Header
 
     try:
         from turboapi.security import Depends, SecurityBase, get_depends
@@ -645,8 +643,6 @@ def create_enhanced_handler(original_handler, route_definition):
     except ImportError:
         _has_security = False
     for pname, param in sig.parameters.items():
-        if isinstance(param.default, Header):
-            _has_header_params = True
         if _has_security and (
             isinstance(param.default, (Depends, SecurityBase)) or get_depends(param) is not None
         ):
@@ -676,12 +672,14 @@ def create_enhanced_handler(original_handler, route_definition):
                         )
                         parsed_params.update(path_params)
 
-                # 3. Parse headers
-                if "headers" in kwargs:
-                    headers_dict = kwargs.get("headers", {})
-                    if headers_dict:
-                        header_params = HeaderParser.parse_headers(headers_dict, sig)
-                        parsed_params.update(header_params)
+                # 3. Parse headers for explicit Header() params and implicit
+                # underscore-to-dash name matches. Do not override query/path.
+                headers_dict = kwargs.get("headers", {})
+                if headers_dict:
+                    header_params = HeaderParser.parse_headers(headers_dict, sig)
+                    for _hk, _hv in header_params.items():
+                        if _hk not in parsed_params:
+                            parsed_params[_hk] = _hv
 
                 # 4. Parse request body (JSON)
                 if "body" in kwargs:

@@ -1946,15 +1946,21 @@ pub fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u
         day_secs.getHoursIntoDay(), day_secs.getMinutesIntoHour(), day_secs.getSecondsIntoMinute(),
     }) catch "Thu, 01 Jan 2026 00:00:00 GMT";
 
-    var header_buf: [512]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf,
-        "HTTP/1.1 {d} {s}\r\nServer: TurboAPI\r\nDate: {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive",
-        .{ status, statusText(status), date_str, content_type, body.len },
-    ) catch return;
-
     // Assemble: header + cors_headers (pre-rendered, "" if disabled) + \r\n\r\n + body
     const cors = cors_headers; // "" when disabled — zero overhead
     const trailer = "\r\n\r\n";
+    const header_fmt =
+        "HTTP/1.1 {d} {s}\r\nServer: TurboAPI\r\nDate: {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive";
+    const header_args = .{ status, statusText(status), date_str, content_type, body.len };
+    var header_buf: [2048]u8 = undefined;
+    const header = std.fmt.bufPrint(&header_buf, header_fmt, header_args) catch {
+        const fallback =
+            "HTTP/1.1 500 Internal Server Error\r\nServer: TurboAPI\r\nContent-Type: text/plain\r\nContent-Length: 0\r\nConnection: close";
+        stream.writeAll(fallback) catch return;
+        stream.writeAll(trailer) catch return;
+        return;
+    };
+
     const total = header.len + cors.len + trailer.len + body.len;
     if (total <= 4096) {
         var resp_buf: [4096]u8 = undefined;

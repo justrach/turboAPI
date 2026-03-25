@@ -602,6 +602,11 @@ class ZigIntegratedTurboAPI(TurboAPI):
         middleware_instances = self._middleware_instances
 
         def middleware_wrapped_handler(**kwargs):
+            def _sanitize_header_component(value: str) -> str:
+                # Prevent CRLF injection when extra headers are tunneled through
+                # the content_type field for the Zig response writer.
+                return value.replace("\r", "").replace("\n", "")
+
             # Normalize header names to lowercase so middleware can use case-insensitive
             # dict.get("accept-encoding") lookups regardless of what the Zig HTTP parser
             # preserved (it keeps the original mixed-case from the wire).
@@ -664,13 +669,15 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 base_ct = result.get("content_type") or "application/json"
                 extra_parts = []
                 for hname, hvalue in response.headers.items():
-                    hn_lower = hname.lower()
+                    safe_name = _sanitize_header_component(hname)
+                    safe_value = _sanitize_header_component(str(hvalue))
+                    hn_lower = safe_name.lower()
                     if hn_lower == "content-type":
-                        base_ct = hvalue
+                        base_ct = safe_value
                     elif hn_lower == "content-length":
                         pass  # Zig recalculates from actual body length
                     else:
-                        extra_parts.append(f"{hname}: {hvalue}")
+                        extra_parts.append(f"{safe_name}: {safe_value}")
                 if extra_parts:
                     result["content_type"] = base_ct + "\r\n" + "\r\n".join(extra_parts)
                 else:
