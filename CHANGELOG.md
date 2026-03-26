@@ -16,6 +16,12 @@ All notable changes to TurboAPI are documented here.
 
 - Added exact repro coverage for issues `#100` through `#104` in `tests/test_verified_compat_gaps.py`.
 
+## [1.0.22] — 2026-03-26
+
+### Build Fixes
+
+- Refreshed the pinned `dhi` dependency hash in `zig/build.zig.zon` so `Build & Publish` can build the `turbonet` extension on clean CI runners again.
+
 ## [1.0.01] — 2026-03-19
 
 ### Performance (47k → 150k req/s)
