@@ -4,7 +4,7 @@
     .dependencies = .{
         .dhi = .{
             .url = "https://github.com/justrach/dhi/archive/refs/heads/main.tar.gz",
-            .hash = "dhi-0.1.0-Fz3bn0-FAwAv-biejuK3wnjN1A9D3F-NYLFa7fIVu7Ei",
+            .hash = "dhi-0.1.0-Fz3bnz2GAwD-QDhvUhwzx5RJ5Yu1q_eYivGu0JYlOrcZ",
         },
         .pg = .{
             .url = "git+https://github.com/justrach/pg.zig?ref=master#7605502f24e348c50341cbdf84ac135613d512af",
