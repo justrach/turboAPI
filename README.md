@@ -197,6 +197,10 @@ For database benchmarks, `TURBO_DISABLE_DB_CACHE=1` will measure true per-reques
 
 ## ⚙️ Architecture
 
+### Shared core: [`turboapi-core`](turboapi-core/)
+
+The radix trie router, HTTP utilities (`percentDecode`, `queryStringGet`, `statusText`, `formatHttpDate`), and a bounded response cache live in a standalone Zig library — **turboapi-core**. Both turboAPI (this repo) and [merjs](https://github.com/justrach/merjs) import it as a build dependency, so the routing and HTTP parsing logic is shared across both frameworks with zero duplication.
+
 ### Request lifecycle
 
 Every HTTP request flows through the same pipeline. The key idea: Python only runs your business logic. Everything else — parsing, routing, validation, response writing — happens in Zig.
@@ -409,29 +413,39 @@ python3.14t app.py
 
 ```
 turboAPI/
+├── turboapi-core/              # shared Zig library (also used by merjs)
+│   ├── src/
+│   │   ├── root.zig            # public API surface
+│   │   ├── router.zig          # radix trie with path params + wildcards
+│   │   ├── http.zig            # percentDecode, queryStringGet, statusText, formatHttpDate
+│   │   ├── cache.zig           # bounded thread-safe response cache
+│   │   └── types.zig           # HeaderPair, shared types
+│   ├── build.zig
+│   └── build.zig.zon           # zero dependencies
 ├── python/turboapi/
-│   ├── main_app.py           # TurboAPI class (FastAPI-compatible, ASGI __call__)
-│   ├── zig_integration.py    # route registration, handler classification
-│   ├── request_handler.py    # enhanced/fast/fast_model handlers
-│   ├── security.py           # OAuth2, HTTPBearer, APIKey, Depends
-│   ├── version_check.py      # free-threading detection
-│   └── turbonet.*.so         # compiled Zig extension
+│   ├── main_app.py             # TurboAPI class (FastAPI-compatible, ASGI __call__)
+│   ├── zig_integration.py      # route registration, handler classification
+│   ├── request_handler.py      # enhanced/fast/fast_model handlers
+│   ├── security.py             # OAuth2, HTTPBearer, APIKey, Depends
+│   ├── version_check.py        # free-threading detection
+│   └── turbonet.*.so           # compiled Zig extension
 ├── zig/
 │   ├── src/
-│   │   ├── main.zig          # Python C extension entry
-│   │   ├── server.zig        # HTTP server, thread pool, dispatch, JSON→PyObject
-│   │   ├── router.zig        # radix trie with path params + wildcards
-│   │   ├── dhi_validator.zig # runtime JSON schema validation
-│   │   └── py.zig            # Python C-API wrappers
-│   ├── build.zig             # Zig build system
-│   ├── build.zig.zon         # dependencies (dhi fetched automatically)
-│   └── build_turbonet.py     # auto-detect Python, invoke zig build
-├── tests/                    # 275+ tests
+│   │   ├── main.zig            # Python C extension entry
+│   │   ├── server.zig          # HTTP server, thread pool, dispatch, JSON→PyObject
+│   │   ├── dhi_validator.zig   # runtime JSON schema validation
+│   │   ├── db.zig              # TurboPG — Zig-native Postgres driver
+│   │   └── py.zig              # Python C-API wrappers
+│   ├── build.zig               # Zig build system (imports turboapi-core)
+│   ├── build.zig.zon           # dependencies (dhi, pg.zig, turboapi-core)
+│   └── build_turbonet.py       # auto-detect Python, invoke zig build
+├── tests/                      # 275+ tests
 ├── benchmarks/
-├── Dockerfile                # Python 3.14t + Zig 0.15 + turbonet
+├── Dockerfile                  # Python 3.14t + Zig 0.15 + turbonet
 ├── docker-compose.yml
-└── Makefile                  # make build, make test, make release
+└── Makefile                    # make build, make test, make release
 ```
+
 
 ---
 
