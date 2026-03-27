@@ -45,6 +45,10 @@ pub fn build(b: *std.Build) void {
     });
     const pg_mod = pg_dep.module("pg");
 
+    // ── turboapi-core (shared router + HTTP utilities) ──
+    const core_dep = b.dependency("turboapi_core", .{});
+    const core_mod = core_dep.module("turboapi-core");
+
     // ── shared library (turbonet) ──
     const lib = b.addLibrary(.{
         .name = "turbonet",
@@ -62,6 +66,7 @@ pub fn build(b: *std.Build) void {
     lib.root_module.addImport("validators_comprehensive", validators_comprehensive_mod);
     lib.root_module.addImport("model", model_mod);
     lib.root_module.addImport("pg", pg_mod);
+    lib.root_module.addImport("turboapi-core", core_mod);
 
     lib.addIncludePath(.{ .cwd_relative = include_path });
     lib.root_module.addRPathSpecial("@loader_path");
@@ -103,6 +108,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("validators_comprehensive", validators_comprehensive_mod);
     tests.root_module.addImport("model", model_mod);
     tests.root_module.addImport("pg", pg_mod);
+    tests.root_module.addImport("turboapi-core", core_mod);
     tests.addIncludePath(.{ .cwd_relative = include_path });
     tests.addLibraryPath(.{ .cwd_relative = lib_path });
     tests.linkSystemLibrary(py_lib_name);

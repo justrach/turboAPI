@@ -5,7 +5,8 @@
 const std = @import("std");
 const py = @import("py.zig");
 const c = py.c;
-const router_mod = @import("router.zig");
+const core = @import("turboapi-core");
+const router_mod = core.router;
 const dhi = @import("dhi_validator.zig");
 const db = @import("db.zig");
 

@@ -6,7 +6,7 @@ const std = @import("std");
 const pg = @import("pg");
 const py = @import("py.zig");
 const c = py.c;
-const router_mod = @import("router.zig");
+const router_mod = @import("turboapi-core").router;
 const dhi = @import("dhi_validator.zig");
 
 // GIL release shim (C functions to avoid opaque PyThreadState in Zig cimport)

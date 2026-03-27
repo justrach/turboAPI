@@ -77,7 +77,6 @@ pub const RouteMatch = struct {
             self.alloc.free(v);
         }
         self.owned_values.deinit(self.alloc);
-        // No HashMap to deinit — params are stack-allocated
     }
 };
 
@@ -470,7 +469,6 @@ test "no match returns null" {
 
 
 // ── Fuzz tests ───────────────────────────────────────────────────────────────
-// Run: zig build fuzz-router  (then execute the binary with --fuzz)
 
 fn fuzz_findRoute(_: void, input: []const u8) anyerror!void {
     if (input.len == 0) return;
@@ -481,7 +479,7 @@ fn fuzz_findRoute(_: void, input: []const u8) anyerror!void {
     // Remainder is the path (may be empty, may be garbage)
     const path = if (input.len > 1) input[1..] else "/";
 
-    var r = Router.init(std.heap.c_allocator);
+    var r = Router.init(std.testing.allocator);
     defer r.deinit();
 
     // Seed with representative routes
@@ -517,7 +515,7 @@ test "fuzz: router findRoute — never panics, no OOB on any path" {
         "\x00/files/deep/nested/path",  // wildcard
         // Adversarial inputs
         "\x00" ++ "/" ++ ("a/" ** 70),  // 70 segments — exceeds 64-segment limit → null
-        "\x00/\x00secret",              // null byte in path
+        "\x00/\x00secret",             // null byte in path
         "\x00/" ++ ("a" ** 4096),       // very long single segment
         "\x00/%2F%2F/../admin",         // path traversal attempt
         "\x00/users/%00/profile",       // null byte percent-encoded

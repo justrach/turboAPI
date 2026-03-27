@@ -6,7 +6,7 @@ pub const py = @import("py.zig");
 const c = py.c;
 const response = @import("response.zig");
 const server = @import("server.zig");
-pub const router = @import("router.zig");
+pub const router = @import("turboapi-core").router;
 const db = @import("db.zig");
 
 // ── Method table ────────────────────────────────────────────────────────────
