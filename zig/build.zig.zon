@@ -10,6 +10,9 @@
             .url = "git+https://github.com/justrach/pg.zig?ref=master#7605502f24e348c50341cbdf84ac135613d512af",
             .hash = "pg-0.0.0-Wp_7gYTxBgDOvvLXaKfiXksk9WArPQJWgY833oQjfk1y",
         },
+        .turboapi_core = .{
+            .path = "../turboapi-core",
+        },
     },
     .paths = .{""},
     .fingerprint = 0xc1ce10811168d4a1,
