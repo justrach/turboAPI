@@ -127,6 +127,26 @@ The app also exposes an ASGI `__call__` fallback — you can use `uvicorn main:a
 
 ---
 
+## What's New
+
+### v1.0.23 — Shared Zig core (`turboapi-core`)
+
+Extracted the radix trie router, HTTP utilities, and response cache into a standalone Zig library — [**turboapi-core**](turboapi-core/). Both turboAPI and [merjs](https://github.com/justrach/merjs) now share the same routing and HTTP primitives. Zero performance regression (134k req/s unchanged).
+
+### v1.0.22 — Build fix
+
+Refreshed the pinned `dhi` dependency hash so CI builds the `turbonet` extension on clean runners again.
+
+### v1.0.21 — Compat gap fixes
+
+Restored custom exception handlers, lifespan callables, `/docs` + `/openapi.json` serving, router-level dependencies, and `StaticFiles` mounts in the TestClient/runtime path. Added exact repro coverage for issues #100–#104.
+
+### v1.0.01 — Performance (47k → 150k req/s)
+
+Per-worker `PyThreadState`, `PyObject_CallNoArgs` for zero-arg handlers, tuple response ABI, zero-alloc `sendResponse`, single-parse `model_sync`, static routes, Zig-native CORS, enum handler dispatch, skip header parsing for simple routes, zero-alloc route params, response caching. See [CHANGELOG.md](CHANGELOG.md) for full details.
+
+---
+
 ## Benchmarks
 
 Benchmarks are split into three categories and should not be mixed:
