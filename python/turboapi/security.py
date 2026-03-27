@@ -506,30 +506,46 @@ from .exceptions import HTTPException  # noqa: F401, E402
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
-    Verify a password against a hash.
+    Verify a password against a hash produced by get_password_hash().
 
-    This is a placeholder — install a proper hashing library and replace:
-      - passlib with bcrypt: ``passlib.hash.bcrypt.verify(plain, hashed)``
-      - argon2-cffi: ``argon2.PasswordHasher().verify(hashed, plain)``
+    Uses PBKDF2-HMAC-SHA256 with the salt embedded in the stored hash.
+    Format: ``pbkdf2_sha256$<iterations>$<salt_hex>$<hash_hex>``
     """
-    raise NotImplementedError(
-        "verify_password is not implemented. "
-        "Install passlib[bcrypt] or argon2-cffi and replace this function."
-    )
+    import hashlib
+    import hmac as _hmac
+
+    try:
+        tag, iterations_str, salt_hex, stored_hex = hashed_password.split("$")
+    except ValueError:
+        return False
+    if tag != "pbkdf2_sha256":
+        return False
+    try:
+        iterations = int(iterations_str)
+        salt = bytes.fromhex(salt_hex)
+        stored = bytes.fromhex(stored_hex)
+    except (ValueError, TypeError):
+        return False
+    dk = hashlib.pbkdf2_hmac("sha256", plain_password.encode("utf-8"), salt, iterations)
+    return _hmac.compare_digest(dk, stored)
 
 
 def get_password_hash(password: str) -> str:
     """
-    Hash a password.
+    Hash a password using PBKDF2-HMAC-SHA256 with a random 16-byte salt.
 
-    This is a placeholder — install a proper hashing library and replace:
-      - passlib with bcrypt: ``passlib.hash.bcrypt.hash(password)``
-      - argon2-cffi: ``argon2.PasswordHasher().hash(password)``
+    Returns a string in the format:
+    ``pbkdf2_sha256$<iterations>$<salt_hex>$<hash_hex>``
+
+    Pure-stdlib implementation — no extra dependencies required.
     """
-    raise NotImplementedError(
-        "get_password_hash is not implemented. "
-        "Install passlib[bcrypt] or argon2-cffi and replace this function."
-    )
+    import hashlib
+    import os
+
+    iterations = 260_000
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${dk.hex()}"
 
 
 # ============================================================================

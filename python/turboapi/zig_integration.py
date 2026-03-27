@@ -602,10 +602,20 @@ class ZigIntegratedTurboAPI(TurboAPI):
         middleware_instances = self._middleware_instances
 
         def middleware_wrapped_handler(**kwargs):
+            def _sanitize_header_component(value: str) -> str:
+                # Prevent CRLF injection when extra headers are tunneled through
+                # the content_type field for the Zig response writer.
+                return value.replace("\r", "").replace("\n", "")
+
+            # Normalize header names to lowercase so middleware can use case-insensitive
+            # dict.get("accept-encoding") lookups regardless of what the Zig HTTP parser
+            # preserved (it keeps the original mixed-case from the wire).
+            raw_headers = kwargs.get("headers", {})
+            normalized_headers = {k.lower(): v for k, v in raw_headers.items()}
             request = Request(
                 method=kwargs.get("method", ""),
                 path=kwargs.get("path", ""),
-                headers=kwargs.get("headers", {}),
+                headers=normalized_headers,
                 body=kwargs.get("body", b""),
                 query_string=kwargs.get("query_string", ""),
                 path_params=kwargs.get("path_params", {}),
@@ -649,10 +659,33 @@ class ZigIntegratedTurboAPI(TurboAPI):
             for mw in reversed(middleware_instances):
                 response = mw.after_request(request, response)
 
-            # Merge middleware-added headers back
+            # Merge middleware-added headers and body back into the result dict.
+            # Extra headers (e.g. Content-Encoding: gzip) are injected into the
+            # content_type string via \r\n so that sendResponse() in Zig emits them
+            # verbatim — no Zig-side header ABI changes required.
             result["status_code"] = response.status_code
             if response.headers:
                 result["extra_headers"] = response.headers
+                base_ct = result.get("content_type") or "application/json"
+                extra_parts = []
+                for hname, hvalue in response.headers.items():
+                    safe_name = _sanitize_header_component(hname)
+                    safe_value = _sanitize_header_component(str(hvalue))
+                    hn_lower = safe_name.lower()
+                    if hn_lower == "content-type":
+                        base_ct = safe_value
+                    elif hn_lower == "content-length":
+                        pass
+                    else:
+                        extra_parts.append(f"{safe_name}: {safe_value}")
+                if extra_parts:
+                    result["content_type"] = base_ct + "\r\n" + "\r\n".join(extra_parts)
+                else:
+                    result["content_type"] = base_ct
+
+            response_body = response.body
+            if response_body:
+                result["content"] = response_body
 
             return result
 
