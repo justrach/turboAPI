@@ -2,6 +2,27 @@
 
 All notable changes to TurboAPI are documented here.
 
+## [1.0.23] — 2026-03-27
+
+### Architecture
+
+- Extracted radix trie router, HTTP utilities (`percentDecode`, `queryStringGet`, `statusText`, `formatHttpDate`), bounded response cache, and shared types into standalone **turboapi-core** Zig library with zero dependencies.
+- turboAPI now imports router from turboapi-core (deleted `zig/src/router.zig`).
+- [merjs](https://github.com/justrach/merjs) wired as a consumer of turboapi-core — shared routing foundation across both frameworks.
+- Zero performance regression: 134k req/s, 0.16ms avg latency unchanged.
+
+### Documentation
+
+- Added "What's New" changelog section to README (visible before benchmarks).
+- Updated Architecture section with turboapi-core explanation.
+- Updated Project Structure to reflect new `turboapi-core/` directory.
+
+## [1.0.22] — 2026-03-26
+
+### Build Fixes
+
+- Refreshed the pinned `dhi` dependency hash in `zig/build.zig.zon` so `Build & Publish` can build the `turbonet` extension on clean CI runners again.
+
 ## [1.0.21] — 2026-03-26
 
 ### Bug Fixes
