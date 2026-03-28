@@ -212,6 +212,15 @@ Three optimizations inspired by [Go's httprouter](https://github.com/julienschmi
 
 See [issue #1](https://github.com/justrach/turboapi-core/issues/1) for the full analysis.
 
+### Optimization history
+
+| Version | What changed | Mixed lookups/sec | ns/op |
+|---|---|---|---|
+| v1 | Segment-by-segment trie + StringHashMap | 19.2M/s | 52ns |
+| v2 | Prefix compression + indices array | 37M/s | 27ns |
+| v3 | Method-indexed trees (current) | **43.5M/s** | **23ns** |
+| Go httprouter | — (reference) | 40M/s | 25ns |
+
 ---
 
 ## License

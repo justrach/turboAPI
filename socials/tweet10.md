@@ -1,4 +1,4 @@
-# Tweet 10 — turboapi-core: two frameworks, one Zig core
+# Tweet 10 — turboapi-core: a router library, not a server
 
 **Best times to post (PST):** Tue-Thu, 8-10 AM
 **Best times to post (SGT):** Tue-Thu, 11 PM - 1 AM
@@ -7,81 +7,88 @@
 
 ## Tweet 1 (Hook)
 
-I was maintaining two routers in two repos doing the exact same thing.
+I built a URL router in Zig that's faster than Go's httprouter.
 
-turboAPI (Python framework, 134k req/s) and merjs (Zig full-stack, 100/100 Lighthouse) both needed URL matching, percent-decoding, query parsing. Same code, different files.
+43.5M lookups/sec. 23ns per match. Adversarial-verified.
 
-So I ripped the Zig HTTP core out into its own library.
+It's not a server. It's not a framework. It's a library — you give it a path, it gives you a match.
 
 ---
 
 ## Tweet 2 (What it is)
 
-turboapi-core. Zero-dep Zig library.
+turboapi-core. A Zig library. Zero dependencies.
 
-- Radix trie router with `{param}` + `*wildcard`
-- `percentDecode`, `queryStringGet`, `statusText`, `formatHttpDate`
-- Bounded thread-safe response cache
+- Prefix-compressed radix trie (like Go's httprouter, but in Zig)
+- Method-indexed trees — one trie per GET/POST/PUT/etc
+- `{param}` extraction, `*wildcard` matching, path traversal rejection
+- HTTP utilities: percentDecode, queryStringGet, statusText
 
-530 lines. 23 tests. Fuzz-tested.
+530 lines of Zig. 23 tests. Fuzz-tested.
 
-Both frameworks now import it. Bug fix in the router? Both get it.
-
----
-
-## Tweet 3 (What's NOT shared)
-
-I didn't try to share the TCP server. That would've been a mistake.
-
-turboAPI does raw socket I/O with manual HTTP/1.1 parsing and Python thread states per worker. merjs uses Zig's stdlib `std.http.Server`.
-
-Different runtimes, different concurrency. But both need the same URL matcher and the same percent-decoder.
+Not an HTTP server. Not a framework. Just the routing + HTTP parsing bits that every server needs but nobody wants to rewrite.
 
 ---
 
-## Tweet 4 (Numbers)
+## Tweet 3 (The benchmark story)
 
-Zero perf regression on turboAPI. Still 134k req/s, 0.16ms avg.
+How I got here:
 
-The import resolves at compile time. Same binary. Same benchmarks.
+v1: Segment-by-segment trie + StringHashMap → 19M/s (52ns)
+v2: Prefix compression + indices array → 37M/s (27ns)
+v3: Method-indexed trees → 43.5M/s (23ns)
 
-merjs: all routes still 200, builds clean, Lighthouse still 100.
+Go httprouter: 40M/s (25ns)
+
+Each optimization was inspired by reading Go's httprouter source. Zig just let me take the same ideas further — no GC, no interface dispatch, no sync.Pool overhead.
 
 ---
 
-## Tweet 5 (Use it yourself)
+## Tweet 4 (Honest numbers)
 
-turboapi-core is its own repo. Any Zig project can use it:
+I also wrote an adversarial benchmark to make sure the numbers aren't fake:
 
-```zig
-const core = @import("turboapi-core");
-var router = core.Router.init(allocator);
-try router.addRoute("GET", "/users/{id}", "get_user");
-```
+- Anti-DCE: forces use of every result (handler key + params) → 41.7M/s
+- Runtime paths: generates new URLs every iteration (no string caching) → 28.6M/s
+- 100-route table: scaling test → 20M/s
 
-https://github.com/justrach/turboapi-core
+The 43.5M headline is for a fixed 16-route API. Real traffic with varying param values is closer to 28M. Both beat Go.
+
+---
+
+## Tweet 5 (Who uses it)
+
+Two frameworks share this one library:
+
+turboAPI — Python web framework. 134k req/s. Uses turboapi-core for routing, HTTP utils, response cache.
+
+merjs — Zig full-stack framework. 100/100 Lighthouse. Uses turboapi-core for the router (API method dispatch coming next).
+
+Bug fix in the router → both frameworks get it. Fuzz test finds an edge case → both are covered.
 
 ---
 
 ## Tweet 6 (CTA)
 
-Shipped today:
-- turboAPI v1.0.23
-- merjs v0.2.1
-- turboapi-core v0.1.0
-
-https://github.com/justrach/turboAPI
-https://github.com/justrach/merjs
 https://github.com/justrach/turboapi-core
+
+530 lines. Zero deps. Faster than Go. Fuzz-tested.
+
+Add it to your Zig project:
+```
+zig fetch --save=turboapi_core "git+https://github.com/justrach/turboapi-core.git#main"
+```
 
 ---
 
 ## Alt: Single tweet
 
-I was copy-pasting router code between two Zig frameworks. Same radix trie, same percent-decoder, different repos.
+Built a URL router in Zig that beats Go's httprouter.
 
-Ripped it into its own library: turboapi-core. 530 lines, zero deps, fuzz-tested.
+43.5M lookups/sec (23ns). Adversarial-verified — not cached, not fake.
 
-turboAPI v1.0.23 and merjs v0.2.1 both import it now. Zero perf regression. 134k req/s unchanged.
+It's not a server. It's a library: prefix-compressed radix trie, method-indexed trees, fuzz-tested. 530 lines, zero deps.
+
+turboAPI and merjs both use it.
 
 https://github.com/justrach/turboapi-core
