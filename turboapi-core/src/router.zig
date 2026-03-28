@@ -1,5 +1,11 @@
-// Radix trie router with parameterized path matching.
+// Compressed radix trie router with Go httprouter-style optimizations.
 // Supports static segments, parameterized segments ({id}), and wildcard (*path).
+//
+// Optimizations over segment-by-segment trie:
+//   1. Prefix-compressed nodes — shared prefixes stored once
+//   2. Child lookup via indices byte array — O(1) for <16 children
+//   3. Priority ordering — hot routes checked first
+//   4. Path walked as raw string — no segment splitting on lookup
 
 const std = @import("std");
 
@@ -86,12 +92,12 @@ pub const Router = struct {
 
     pub fn init(alloc: Allocator) Router {
         const root = alloc.create(RouteNode) catch @panic("OOM");
-        root.* = RouteNode.initEmpty(alloc);
+        root.* = RouteNode.initEmpty();
         return .{ .root = root, .alloc = alloc };
     }
 
     pub fn deinit(self: *Router) void {
-        self.root.deinit(self.alloc);
+        self.root.deinitRecursive(self.alloc);
         self.alloc.destroy(self.root);
     }
 
@@ -99,35 +105,16 @@ pub const Router = struct {
     /// `method` is the HTTP method (e.g. "GET"). Path must start with '/'.
     pub fn addRoute(self: *Router, method: []const u8, path: []const u8, handler_key: []const u8) !void {
         if (path.len == 0 or path[0] != '/') return error.InvalidPath;
-
-        const segments = try parsePath(self.alloc, path);
-        defer self.alloc.free(segments);
-
-        try self.insertRoute(self.root, segments, method, handler_key);
+        try self.addRouteImpl(method, path[1..], handler_key, self.root);
     }
 
     /// Find the handler key and extract path parameters for the given path.
     pub fn findRoute(self: *const Router, method: []const u8, path: []const u8) ?RouteMatch {
-        const trimmed = if (path.len > 0 and path[0] == '/') path[1..] else path;
-
-        var segments_buf: [64][]const u8 = undefined;
-        var seg_count: usize = 0;
-
-        if (trimmed.len == 0) {
-            // root path — zero segments
-        } else {
-            var it = std.mem.splitScalar(u8, trimmed, '/');
-            while (it.next()) |seg| {
-                if (seg_count >= segments_buf.len) return null;
-                segments_buf[seg_count] = seg;
-                seg_count += 1;
-            }
-        }
-        const segments = segments_buf[0..seg_count];
+        const search = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
         var params: RouteParams = .{};
         var owned: std.ArrayListUnmanaged([]const u8) = .empty;
-        if (self.findHandler(self.root, segments, 0, method, &params, &owned)) |handler_key| {
+        if (self.getValue(self.root, search, method, &params, &owned)) |handler_key| {
             return RouteMatch{
                 .handler_key = handler_key,
                 .params = params,
@@ -139,221 +126,307 @@ pub const Router = struct {
         return null;
     }
 
-    // ── Internal ────────────────────────────────────────────────────────
+    // ── addRoute internals ──────────────────────────────────────────────
 
-    fn insertRoute(self: *Router, node: *RouteNode, segments: []const Segment, method: []const u8, handler_key: []const u8) !void {
-        if (segments.len == 0) {
-            const owned_method = try self.alloc.dupe(u8, method);
-            const owned_key = try self.alloc.dupe(u8, handler_key);
-            // If a handler for this method already exists, free the old one
-            if (node.handlers.fetchRemove(owned_method)) |old| {
-                self.alloc.free(old.key);
-                self.alloc.free(old.value);
+    fn addRouteImpl(self: *Router, method: []const u8, path: []const u8, handler_key: []const u8, node: *RouteNode) !void {
+        // If path is empty, we've reached the target node — register the handler
+        if (path.len == 0) {
+            return self.setHandler(node, method, handler_key);
+        }
+
+        // Check for param segment: {name}
+        if (path[0] == '{') {
+            const close = std.mem.indexOfScalar(u8, path, '}') orelse return error.InvalidPath;
+            const param_name = path[1..close];
+            const rest = if (close + 1 < path.len) path[close + 1 ..] else "";
+            const rest_trimmed = if (rest.len > 0 and rest[0] == '/') rest[1..] else rest;
+
+            if (node.param_child == null) {
+                const child = try self.alloc.create(RouteNode);
+                child.* = RouteNode.initEmpty();
+                child.param_name = try self.alloc.dupe(u8, param_name);
+                node.param_child = child;
             }
-            try node.handlers.put(owned_method, owned_key);
+            return self.addRouteImpl(method, rest_trimmed, handler_key, node.param_child.?);
+        }
+
+        // Check for wildcard: *name
+        if (path[0] == '*') {
+            const param_name = if (path.len > 1) path[1..] else "wildcard";
+            const child = if (node.wildcard_child) |wc| wc else blk: {
+                const c = try self.alloc.create(RouteNode);
+                c.* = RouteNode.initEmpty();
+                c.param_name = try self.alloc.dupe(u8, param_name);
+                node.wildcard_child = c;
+                break :blk c;
+            };
+            return self.setHandler(child, method, handler_key);
+        }
+
+        // Static path — find longest common prefix with existing children
+        const first_byte = path[0];
+        const child_idx = node.findChildIndex(first_byte);
+
+        if (child_idx) |idx| {
+            const child = node.children_list[idx];
+            const common_len = longestCommonPrefix(path, child.path);
+
+            if (common_len == child.path.len) {
+                // Child path fully matched — descend into it
+                const rest = path[common_len..];
+                const rest_trimmed = if (rest.len > 0 and rest[0] == '/') rest[1..] else rest;
+                try self.addRouteImpl(method, rest_trimmed, handler_key, child);
+                self.incrementChildPrio(node, idx);
+                return;
+            }
+
+            // Partial match — split the existing node
+            const split_child = try self.alloc.create(RouteNode);
+            split_child.* = RouteNode.initEmpty();
+            split_child.path = try self.alloc.dupe(u8, path[0..common_len]);
+
+            // Shorten the existing child's path
+            const old_path = child.path;
+            child.path = try self.alloc.dupe(u8, old_path[common_len..]);
+            self.alloc.free(old_path);
+
+            // Move existing child under split node
+            try split_child.addChild(self.alloc, child);
+
+            // Replace in parent
+            node.children_list[idx] = split_child;
+            node.indices[idx] = split_child.path[0];
+
+            // Insert new path remainder
+            const rest = path[common_len..];
+            const rest_trimmed = if (rest.len > 0 and rest[0] == '/') rest[1..] else rest;
+            try self.addRouteImpl(method, rest_trimmed, handler_key, split_child);
             return;
         }
 
-        const seg = segments[0];
-        const rest = segments[1..];
+        // No matching child — create a new one for this static segment
+        const seg_end = findSegmentEnd(path);
+        const segment = path[0..seg_end];
+        const rest = path[seg_end..];
+        const rest_trimmed = if (rest.len > 0 and rest[0] == '/') rest[1..] else rest;
 
-        switch (seg) {
-            .static => |name| {
-                if (node.children.getPtr(name)) |child_ptr| {
-                    try self.insertRoute(child_ptr.*, rest, method, handler_key);
-                } else {
-                    const child = try self.alloc.create(RouteNode);
-                    child.* = RouteNode.initEmpty(self.alloc);
-                    const owned_name = try self.alloc.dupe(u8, name);
-                    try node.children.put(owned_name, child);
-                    try self.insertRoute(child, rest, method, handler_key);
-                }
-            },
-            .param => |param_name| {
-                if (node.param_child == null) {
-                    const child = try self.alloc.create(RouteNode);
-                    child.* = RouteNode.initEmpty(self.alloc);
-                    child.param_name = try self.alloc.dupe(u8, param_name);
-                    node.param_child = child;
-                }
-                try self.insertRoute(node.param_child.?, rest, method, handler_key);
-            },
-            .wildcard => |param_name| {
-                const child = if (node.wildcard_child) |wc| wc else blk: {
-                    const c = try self.alloc.create(RouteNode);
-                    c.* = RouteNode.initEmpty(self.alloc);
-                    c.param_name = try self.alloc.dupe(u8, param_name);
-                    node.wildcard_child = c;
-                    break :blk c;
-                };
-                const owned_method = try self.alloc.dupe(u8, method);
-                const owned_key = try self.alloc.dupe(u8, handler_key);
-                try child.handlers.put(owned_method, owned_key);
-            },
+        const child = try self.alloc.create(RouteNode);
+        child.* = RouteNode.initEmpty();
+        child.path = try self.alloc.dupe(u8, segment);
+
+        try node.addChild(self.alloc, child);
+
+        if (rest_trimmed.len == 0 and rest.len == 0) {
+            return self.setHandler(child, method, handler_key);
+        }
+
+        try self.addRouteImpl(method, rest_trimmed, handler_key, child);
+    }
+
+    fn setHandler(self: *Router, node: *RouteNode, method: []const u8, handler_key: []const u8) !void {
+        const owned_method = try self.alloc.dupe(u8, method);
+        const owned_key = try self.alloc.dupe(u8, handler_key);
+        if (node.handlers.fetchRemove(owned_method)) |old| {
+            self.alloc.free(old.key);
+            self.alloc.free(old.value);
+        }
+        try node.handlers.put(self.alloc, owned_method, owned_key);
+    }
+
+    fn incrementChildPrio(_: *Router, node: *RouteNode, idx: usize) void {
+        node.children_list[idx].priority += 1;
+        const prio = node.children_list[idx].priority;
+
+        // Bubble left while priority is higher than predecessor
+        var pos = idx;
+        while (pos > 0 and node.children_list[pos - 1].priority < prio) {
+            const tmp = node.children_list[pos];
+            node.children_list[pos] = node.children_list[pos - 1];
+            node.children_list[pos - 1] = tmp;
+            const tmp_idx = node.indices[pos];
+            node.indices[pos] = node.indices[pos - 1];
+            node.indices[pos - 1] = tmp_idx;
+            pos -= 1;
         }
     }
 
-    fn findHandler(
+    // ── findRoute internals (walk raw path string) ──────────────────────
+
+    fn getValue(
         self: *const Router,
-        node: *const RouteNode,
-        segments: []const []const u8,
-        index: usize,
+        start_node: *const RouteNode,
+        start_path: []const u8,
         method: []const u8,
         params: *RouteParams,
         owned: *std.ArrayListUnmanaged([]const u8),
     ) ?[]const u8 {
-        if (index >= segments.len) {
-            return node.handlers.get(method);
-        }
+        var current = start_node;
+        var remaining = start_path;
 
-        const segment = segments[index];
-
-        // 1. Try static match first (highest priority)
-        if (node.children.get(segment)) |child| {
-            if (self.findHandler(child, segments, index + 1, method, params, owned)) |h| {
-                return h;
+        walk: while (true) {
+            if (remaining.len == 0) {
+                return current.handlers.get(method);
             }
-        }
 
-        // 2. Try parameter match
-        if (node.param_child) |param_child| {
-            if (param_child.param_name) |pname| {
-                params.put(pname, segment);
-                if (self.findHandler(param_child, segments, index + 1, method, params, owned)) |h| {
-                    return h;
+            // 1. Try static children via indices lookup
+            const first_byte = remaining[0];
+            if (current.findChildIndex(first_byte)) |idx| {
+                const child = current.children_list[idx];
+                const child_path = child.path;
+
+                if (remaining.len >= child_path.len and
+                    std.mem.eql(u8, remaining[0..child_path.len], child_path))
+                {
+                    remaining = remaining[child_path.len..];
+                    if (remaining.len > 0 and remaining[0] == '/') {
+                        remaining = remaining[1..];
+                    }
+                    current = child;
+                    continue :walk;
                 }
-                // Backtrack
-                params.removeLast();
             }
-        }
 
-        // 3. Try wildcard match (matches rest of path)
-        if (node.wildcard_child) |wc| {
-            if (wc.param_name) |pname| {
-                if (wc.handlers.get(method)) |handler_key| {
-                    // Reject path traversal: no segment may be ".." or "."
-                    for (segments[index..]) |s| {
-                        if (std.mem.eql(u8, s, "..") or std.mem.eql(u8, s, ".")) return null;
+            // 2. Try parameter child
+            if (current.param_child) |param_child| {
+                if (param_child.param_name) |pname| {
+                    const seg_end = std.mem.indexOfScalar(u8, remaining, '/') orelse remaining.len;
+                    const value = remaining[0..seg_end];
+
+                    params.put(pname, value);
+                    const rest = if (seg_end < remaining.len) remaining[seg_end + 1 ..] else "";
+
+                    if (self.getValue(param_child, rest, method, params, owned)) |h| {
+                        return h;
                     }
-                    // Join remaining segments with '/'
-                    var total_len: usize = 0;
-                    for (segments[index..]) |s| {
-                        if (total_len > 0) total_len += 1;
-                        total_len += s.len;
-                    }
-                    const joined = self.alloc.alloc(u8, total_len) catch return null;
-                    var pos: usize = 0;
-                    for (segments[index..]) |s| {
-                        if (pos > 0) {
-                            joined[pos] = '/';
-                            pos += 1;
+                    params.removeLast();
+                }
+            }
+
+            // 3. Try wildcard child (matches rest of path)
+            if (current.wildcard_child) |wc| {
+                if (wc.param_name) |pname| {
+                    if (wc.handlers.get(method)) |handler_key| {
+                        // Reject path traversal
+                        var check = remaining;
+                        while (check.len > 0) {
+                            const seg_end = std.mem.indexOfScalar(u8, check, '/') orelse check.len;
+                            const seg = check[0..seg_end];
+                            if (std.mem.eql(u8, seg, "..") or std.mem.eql(u8, seg, ".")) return null;
+                            if (seg_end >= check.len) break;
+                            check = check[seg_end + 1 ..];
                         }
-                        @memcpy(joined[pos..][0..s.len], s);
-                        pos += s.len;
+                        const joined = self.alloc.dupe(u8, remaining) catch return null;
+                        params.put(pname, joined);
+                        owned.append(self.alloc, joined) catch return null;
+                        return handler_key;
                     }
-                    params.put(pname, joined);
-                    owned.append(self.alloc, joined) catch return null;
-                    return handler_key;
                 }
             }
-        }
 
-        return null;
+            return null;
+        }
+    }
+
+    // ── Helpers ─────────────────────────────────────────────────────────
+
+    fn findSegmentEnd(path: []const u8) usize {
+        for (path, 0..) |c, i| {
+            if (c == '/' or c == '{' or c == '*') return i;
+        }
+        return path.len;
+    }
+
+    fn longestCommonPrefix(a: []const u8, b: []const u8) usize {
+        const max = @min(a.len, b.len);
+        var i: usize = 0;
+        while (i < max and a[i] == b[i]) : (i += 1) {}
+        return i;
     }
 };
 
 // ── Route node ──────────────────────────────────────────────────────────────
 
 const RouteNode = struct {
-    children: std.StringHashMap(*RouteNode),
+    path: []const u8, // compressed prefix (e.g. "users")
+    indices: []u8, // first byte of each child's path — for O(1) child lookup
+    children_list: []*RouteNode, // parallel with indices
     param_child: ?*RouteNode,
     wildcard_child: ?*RouteNode,
     param_name: ?[]const u8,
-    /// Maps HTTP method → handler_key (e.g. "GET" → "GET /users/{id}")
-    handlers: std.StringHashMap([]const u8),
+    handlers: HandlerMap, // method -> handler_key
+    priority: u32,
 
-    fn initEmpty(alloc: Allocator) RouteNode {
+    const HandlerMap = std.HashMapUnmanaged([]const u8, []const u8, std.hash_map.StringContext, std.hash_map.default_max_load_percentage);
+
+    fn initEmpty() RouteNode {
         return .{
-            .children = std.StringHashMap(*RouteNode).init(alloc),
+            .path = "",
+            .indices = &.{},
+            .children_list = &.{},
             .param_child = null,
             .wildcard_child = null,
             .param_name = null,
-            .handlers = std.StringHashMap([]const u8).init(alloc),
+            .handlers = .empty,
+            .priority = 0,
         };
     }
 
-    fn deinit(self: *RouteNode, alloc: Allocator) void {
-        // Free static children
-        var it = self.children.iterator();
-        while (it.next()) |entry| {
-            entry.value_ptr.*.deinit(alloc);
-            alloc.destroy(entry.value_ptr.*);
-            alloc.free(entry.key_ptr.*);
+    fn findChildIndex(self: *const RouteNode, c: u8) ?usize {
+        for (self.indices, 0..) |idx_byte, i| {
+            if (idx_byte == c) return i;
         }
-        self.children.deinit();
+        return null;
+    }
 
-        // Free param child
+    fn addChild(self: *RouteNode, alloc: Allocator, child: *RouteNode) !void {
+        const old_len = self.indices.len;
+        const new_len = old_len + 1;
+        const first_byte = if (child.path.len > 0) child.path[0] else 0;
+
+        const new_indices = try alloc.alloc(u8, new_len);
+        if (old_len > 0) {
+            @memcpy(new_indices[0..old_len], self.indices);
+            alloc.free(self.indices);
+        }
+        new_indices[old_len] = first_byte;
+        self.indices = new_indices;
+
+        const new_children = try alloc.alloc(*RouteNode, new_len);
+        if (old_len > 0) {
+            @memcpy(new_children[0..old_len], self.children_list);
+            alloc.free(self.children_list);
+        }
+        new_children[old_len] = child;
+        self.children_list = new_children;
+    }
+
+    fn deinitRecursive(self: *RouteNode, alloc: Allocator) void {
+        for (self.children_list) |child| {
+            child.deinitRecursive(alloc);
+            alloc.destroy(child);
+        }
+        if (self.indices.len > 0) alloc.free(self.indices);
+        if (self.children_list.len > 0) alloc.free(self.children_list);
+
         if (self.param_child) |pc| {
-            pc.deinit(alloc);
+            pc.deinitRecursive(alloc);
             alloc.destroy(pc);
         }
-
-        // Free wildcard child
         if (self.wildcard_child) |wc| {
-            wc.deinit(alloc);
+            wc.deinitRecursive(alloc);
             alloc.destroy(wc);
         }
 
-        // Free owned strings
+        if (self.path.len > 0) alloc.free(self.path);
         if (self.param_name) |pn| alloc.free(pn);
         var hit = self.handlers.iterator();
         while (hit.next()) |entry| {
             alloc.free(entry.key_ptr.*);
             alloc.free(entry.value_ptr.*);
         }
-        self.handlers.deinit();
+        self.handlers.deinit(alloc);
     }
 };
-
-// ── Path parsing ────────────────────────────────────────────────────────────
-
-const Segment = union(enum) {
-    static: []const u8,
-    param: []const u8,
-    wildcard: []const u8,
-};
-
-fn parsePath(alloc: Allocator, path: []const u8) ![]const Segment {
-    const trimmed = if (path.len > 0 and path[0] == '/') path[1..] else path;
-
-    if (trimmed.len == 0) {
-        // Root path — zero segments (handler lives at the root node)
-        return try alloc.alloc(Segment, 0);
-    }
-
-    // Count segments
-    var count: usize = 1;
-    for (trimmed) |ch| {
-        if (ch == '/') count += 1;
-    }
-
-    const segs = try alloc.alloc(Segment, count);
-    var i: usize = 0;
-    var it = std.mem.splitScalar(u8, trimmed, '/');
-    while (it.next()) |seg| {
-        if (seg.len >= 2 and seg[0] == '{' and seg[seg.len - 1] == '}') {
-            segs[i] = .{ .param = seg[1 .. seg.len - 1] };
-        } else if (seg.len >= 1 and seg[0] == '*') {
-            const name = if (seg.len > 1) seg[1..] else "wildcard";
-            segs[i] = .{ .wildcard = name };
-        } else {
-            segs[i] = .{ .static = seg };
-        }
-        i += 1;
-    }
-
-    return segs;
-}
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
