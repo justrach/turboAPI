@@ -8,6 +8,17 @@ TurboAPI sits at the boundary between the internet and your Python application. 
 Internet → [Zig HTTP core] → [dhi validator] → [Python handler]
 ```
 
+### Layer 0: Shared HTTP Core (`turboapi-core`)
+
+The radix trie router, HTTP utilities (`percentDecode`, `queryStringGet`), and bounded response cache live in a standalone Zig library — [turboapi-core](https://github.com/justrach/turboapi-core). This code is shared between turboAPI and [merjs](https://github.com/justrach/merjs), meaning both frameworks benefit from the same security hardening.
+
+Security properties:
+- **Prefix-compressed radix trie** — no regex, no backtracking, O(path length) matching
+- **Zero-alloc param extraction** — fixed-size stack array, no heap during lookups
+- **Path traversal rejection** — wildcard routes reject `..` and `.` segments
+- **Fuzz-tested** — router, percent-decoder, and query parser all have seed corpora + continuous fuzz support
+- **Zero dependencies** — no transitive supply chain risk
+
 ### Layer 1: Zig HTTP Core (`server.zig`)
 
 What it accepts:
@@ -19,10 +30,10 @@ What it rejects at the TCP/parse level:
 - Requests with `Content-Length` exceeding the 16MB cap (returns 413)
 - Malformed HTTP/1.1 request lines (returns 400)
 - Headers that overflow the 8KB header buffer (returns 431)
+- `Transfer-Encoding` + `Content-Length` together (returns 400 — RFC 7230 §3.3.3 smuggling guard)
+- `Transfer-Encoding` without `Content-Length` (returns 501 — chunked not implemented)
 
 **Known gaps:**
-- `Transfer-Encoding` is not parsed; only `Content-Length` is used for body framing — requests using chunked encoding are not deserialized correctly. Put a proxy in front that normalises this before forwarding.
-- `Transfer-Encoding` is not parsed; only `Content-Length` is used for body framing — requests using chunked encoding are not deserialized correctly. Put a proxy in front that normalises this before forwarding.
 - No max header count limit (high header count won't crash, but isn't capped)
 - CRLF injection in header values is not explicitly sanitized — rely on your reverse proxy (nginx/Caddy) for this in production
 
@@ -46,19 +57,19 @@ Standard Python security practices apply. TurboAPI does not add injection risks 
 
 ## Security Testing Status
 
-| Component | Fuzz tested | Notes |
-|-----------|-------------|-------|
-| HTTP parser (header parsing, request line) | ✅ Seed corpus | `zig build test` runs seeds; `zig build test --fuzz` for continuous |
-| HTTP parser (URL / percent-decode) | ✅ Seed corpus | `fuzz_percentDecode`, `fuzz_queryStringGet` in `server.zig` |
-| dhi schema validator | ✅ Seed corpus | `fuzz_validateJson` in `dhi_validator.zig` |
-| Router (radix trie) | ✅ Seed corpus | `fuzz_findRoute` in `router.zig` |
-| JSON body parser (depth bombs) | ❌ Not yet | Planned — see [#37](https://github.com/justrach/turboAPI/issues/37) |
+| Component | Fuzz tested | Location | Notes |
+|-----------|-------------|----------|-------|
+| Router (prefix-compressed radix trie) | ✅ Seed corpus | `turboapi-core/src/router.zig` | `fuzz_findRoute` — adversarial paths, null bytes, deep nesting |
+| HTTP percent-decoder | ✅ Seed corpus | `turboapi-core/src/http.zig` | `fuzz_percentDecode` — truncated sequences, invalid hex |
+| HTTP query string parser | ✅ Seed corpus | `turboapi-core/src/http.zig` | `fuzz_queryStringGet` — bounds verification |
+| HTTP request parser | ✅ Seed corpus | `zig/src/server.zig` | `fuzz_requestLineParsing` — malformed request lines |
+| dhi schema validator | ✅ Seed corpus | `zig/src/dhi_validator.zig` | `fuzz_validateJson` — malformed JSON, type confusion |
+| JSON body parser (depth bombs) | ❌ Not yet | — | Planned — see [#37](https://github.com/justrach/turboAPI/issues/37) |
 
 **Continuous fuzzing** (AFL++/honggfuzz in CI on every PR) is not yet configured — it's the remaining open item in [#37](https://github.com/justrach/turboAPI/issues/37).
 
 ---
 
----
 
 ## Deployment Recommendations
 
