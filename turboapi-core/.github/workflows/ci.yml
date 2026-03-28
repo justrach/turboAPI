@@ -44,7 +44,7 @@ jobs:
           }
 
           # 3. Performance regression gate (100ns threshold — generous for CI runners)
-          NS=$(echo "$OUTPUT" | grep "Anti-DCE" | sed -n 's/.*[[:space:]]\([0-9]*\)ns avg/\1/p')
+          NS=$(echo "$OUTPUT" | grep "Anti-DCE" -A 1 | grep "ns avg" | sed -n 's/.*[[:space:]]\([0-9]*\)ns avg/\1/p')
           echo "Anti-DCE benchmark: ${NS}ns per lookup"
           if [ -z "$NS" ]; then
             echo "FAIL: could not extract benchmark result"

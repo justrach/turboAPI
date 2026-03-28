@@ -137,7 +137,7 @@ jobs:
 
           # Extract Test 2 (anti-DCE) ns/op and verify it's under 100ns
           # (generous threshold — CI runners are slower than M3 Pro)
-          NS=$(echo "$OUTPUT" | grep "Anti-DCE" | sed -n 's/.*[[:space:]]\([0-9]*\)ns avg/\1/p')
+          NS=$(echo "$OUTPUT" | grep "Anti-DCE" -A 1 | grep "ns avg" | sed -n 's/.*[[:space:]]\([0-9]*\)ns avg/\1/p')
           echo "Anti-DCE benchmark: ${NS}ns per lookup"
           if [ "$NS" -gt 100 ]; then
             echo "FAIL: router benchmark regression — ${NS}ns > 100ns threshold"
