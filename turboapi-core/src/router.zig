@@ -6,6 +6,8 @@
 //   2. Child lookup via indices byte array — O(1) for <16 children
 //   3. Priority ordering — hot routes checked first
 //   4. Path walked as raw string — no segment splitting on lookup
+//   5. Method-indexed trees — one radix trie per HTTP method, eliminating
+//      per-node HashMap lookups on every findRoute call
 
 const std = @import("std");
 
@@ -86,35 +88,77 @@ pub const RouteMatch = struct {
     }
 };
 
+/// HTTP method enum — one radix trie per method for O(1) method dispatch.
+pub const Method = enum(u3) {
+    GET = 0,
+    POST = 1,
+    PUT = 2,
+    DELETE = 3,
+    PATCH = 4,
+    HEAD = 5,
+    OPTIONS = 6,
+    OTHER = 7,
+
+    pub fn fromString(s: []const u8) Method {
+        if (s.len < 3) return .OTHER;
+        // Fast switch on first byte + length to avoid full string compare for common methods
+        return switch (s[0]) {
+            'G' => if (s.len == 3 and s[1] == 'E' and s[2] == 'T') .GET else .OTHER,
+            'P' => switch (s.len) {
+                3 => if (s[1] == 'U' and s[2] == 'T') .PUT else .OTHER,
+                4 => if (s[1] == 'O' and s[2] == 'S' and s[3] == 'T') .POST else .OTHER,
+                5 => if (s[1] == 'A' and s[2] == 'T' and s[3] == 'C' and s[4] == 'H') .PATCH else .OTHER,
+                else => .OTHER,
+            },
+            'D' => if (s.len == 6 and std.mem.eql(u8, s, "DELETE")) .DELETE else .OTHER,
+            'H' => if (s.len == 4 and std.mem.eql(u8, s, "HEAD")) .HEAD else .OTHER,
+            'O' => if (s.len == 7 and std.mem.eql(u8, s, "OPTIONS")) .OPTIONS else .OTHER,
+            else => .OTHER,
+        };
+    }
+};
+
 pub const Router = struct {
-    root: *RouteNode,
+    trees: [8]?*RouteNode,
     alloc: Allocator,
 
     pub fn init(alloc: Allocator) Router {
-        const root = alloc.create(RouteNode) catch @panic("OOM");
-        root.* = RouteNode.initEmpty();
-        return .{ .root = root, .alloc = alloc };
+        return .{ .trees = .{null} ** 8, .alloc = alloc };
     }
 
     pub fn deinit(self: *Router) void {
-        self.root.deinitRecursive(self.alloc);
-        self.alloc.destroy(self.root);
+        for (&self.trees) |*tree| {
+            if (tree.*) |root| {
+                root.deinitRecursive(self.alloc);
+                self.alloc.destroy(root);
+                tree.* = null;
+            }
+        }
     }
 
     /// Add a route pattern. `handler_key` is stored as-is (e.g. "GET /users/{id}").
     /// `method` is the HTTP method (e.g. "GET"). Path must start with '/'.
     pub fn addRoute(self: *Router, method: []const u8, path: []const u8, handler_key: []const u8) !void {
         if (path.len == 0 or path[0] != '/') return error.InvalidPath;
-        try self.addRouteImpl(method, path[1..], handler_key, self.root);
+        const m = Method.fromString(method);
+        const idx = @intFromEnum(m);
+        if (self.trees[idx] == null) {
+            const root = try self.alloc.create(RouteNode);
+            root.* = RouteNode.initEmpty();
+            self.trees[idx] = root;
+        }
+        try self.addRouteImpl(path[1..], handler_key, self.trees[idx].?);
     }
 
     /// Find the handler key and extract path parameters for the given path.
     pub fn findRoute(self: *const Router, method: []const u8, path: []const u8) ?RouteMatch {
+        const m = Method.fromString(method);
+        const root = self.trees[@intFromEnum(m)] orelse return null;
         const search = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
         var params: RouteParams = .{};
         var owned: std.ArrayListUnmanaged([]const u8) = .empty;
-        if (self.getValue(self.root, search, method, &params, &owned)) |handler_key| {
+        if (self.getValue(root, search, &params, &owned)) |handler_key| {
             return RouteMatch{
                 .handler_key = handler_key,
                 .params = params,
@@ -128,10 +172,10 @@ pub const Router = struct {
 
     // ── addRoute internals ──────────────────────────────────────────────
 
-    fn addRouteImpl(self: *Router, method: []const u8, path: []const u8, handler_key: []const u8, node: *RouteNode) !void {
+    fn addRouteImpl(self: *Router, path: []const u8, handler_key: []const u8, node: *RouteNode) !void {
         // If path is empty, we've reached the target node — register the handler
         if (path.len == 0) {
-            return self.setHandler(node, method, handler_key);
+            return self.setHandler(node, handler_key);
         }
 
         // Check for param segment: {name}
@@ -147,7 +191,7 @@ pub const Router = struct {
                 child.param_name = try self.alloc.dupe(u8, param_name);
                 node.param_child = child;
             }
-            return self.addRouteImpl(method, rest_trimmed, handler_key, node.param_child.?);
+            return self.addRouteImpl(rest_trimmed, handler_key, node.param_child.?);
         }
 
         // Check for wildcard: *name
@@ -160,7 +204,7 @@ pub const Router = struct {
                 node.wildcard_child = c;
                 break :blk c;
             };
-            return self.setHandler(child, method, handler_key);
+            return self.setHandler(child, handler_key);
         }
 
         // Static path — find longest common prefix with existing children
@@ -175,7 +219,7 @@ pub const Router = struct {
                 // Child path fully matched — descend into it
                 const rest = path[common_len..];
                 const rest_trimmed = if (rest.len > 0 and rest[0] == '/') rest[1..] else rest;
-                try self.addRouteImpl(method, rest_trimmed, handler_key, child);
+                try self.addRouteImpl(rest_trimmed, handler_key, child);
                 self.incrementChildPrio(node, idx);
                 return;
             }
@@ -200,7 +244,7 @@ pub const Router = struct {
             // Insert new path remainder
             const rest = path[common_len..];
             const rest_trimmed = if (rest.len > 0 and rest[0] == '/') rest[1..] else rest;
-            try self.addRouteImpl(method, rest_trimmed, handler_key, split_child);
+            try self.addRouteImpl(rest_trimmed, handler_key, split_child);
             return;
         }
 
@@ -217,20 +261,17 @@ pub const Router = struct {
         try node.addChild(self.alloc, child);
 
         if (rest_trimmed.len == 0 and rest.len == 0) {
-            return self.setHandler(child, method, handler_key);
+            return self.setHandler(child, handler_key);
         }
 
-        try self.addRouteImpl(method, rest_trimmed, handler_key, child);
+        try self.addRouteImpl(rest_trimmed, handler_key, child);
     }
 
-    fn setHandler(self: *Router, node: *RouteNode, method: []const u8, handler_key: []const u8) !void {
-        const owned_method = try self.alloc.dupe(u8, method);
-        const owned_key = try self.alloc.dupe(u8, handler_key);
-        if (node.handlers.fetchRemove(owned_method)) |old| {
-            self.alloc.free(old.key);
-            self.alloc.free(old.value);
+    fn setHandler(self: *Router, node: *RouteNode, handler_key: []const u8) !void {
+        if (node.handler_key) |old| {
+            self.alloc.free(old);
         }
-        try node.handlers.put(self.alloc, owned_method, owned_key);
+        node.handler_key = try self.alloc.dupe(u8, handler_key);
     }
 
     fn incrementChildPrio(_: *Router, node: *RouteNode, idx: usize) void {
@@ -256,7 +297,6 @@ pub const Router = struct {
         self: *const Router,
         start_node: *const RouteNode,
         start_path: []const u8,
-        method: []const u8,
         params: *RouteParams,
         owned: *std.ArrayListUnmanaged([]const u8),
     ) ?[]const u8 {
@@ -265,7 +305,7 @@ pub const Router = struct {
 
         walk: while (true) {
             if (remaining.len == 0) {
-                return current.handlers.get(method);
+                return current.handler_key;
             }
 
             // 1. Try static children via indices lookup
@@ -295,7 +335,7 @@ pub const Router = struct {
                     params.put(pname, value);
                     const rest = if (seg_end < remaining.len) remaining[seg_end + 1 ..] else "";
 
-                    if (self.getValue(param_child, rest, method, params, owned)) |h| {
+                    if (self.getValue(param_child, rest, params, owned)) |h| {
                         return h;
                     }
                     params.removeLast();
@@ -305,7 +345,7 @@ pub const Router = struct {
             // 3. Try wildcard child (matches rest of path)
             if (current.wildcard_child) |wc| {
                 if (wc.param_name) |pname| {
-                    if (wc.handlers.get(method)) |handler_key| {
+                    if (wc.handler_key) |hk| {
                         // Reject path traversal
                         var check = remaining;
                         while (check.len > 0) {
@@ -318,7 +358,7 @@ pub const Router = struct {
                         const joined = self.alloc.dupe(u8, remaining) catch return null;
                         params.put(pname, joined);
                         owned.append(self.alloc, joined) catch return null;
-                        return handler_key;
+                        return hk;
                     }
                 }
             }
@@ -353,10 +393,8 @@ const RouteNode = struct {
     param_child: ?*RouteNode,
     wildcard_child: ?*RouteNode,
     param_name: ?[]const u8,
-    handlers: HandlerMap, // method -> handler_key
+    handler_key: ?[]const u8, // the handler for this method on this path (direct, no HashMap)
     priority: u32,
-
-    const HandlerMap = std.HashMapUnmanaged([]const u8, []const u8, std.hash_map.StringContext, std.hash_map.default_max_load_percentage);
 
     fn initEmpty() RouteNode {
         return .{
@@ -366,7 +404,7 @@ const RouteNode = struct {
             .param_child = null,
             .wildcard_child = null,
             .param_name = null,
-            .handlers = .empty,
+            .handler_key = null,
             .priority = 0,
         };
     }
@@ -419,12 +457,7 @@ const RouteNode = struct {
 
         if (self.path.len > 0) alloc.free(self.path);
         if (self.param_name) |pn| alloc.free(pn);
-        var hit = self.handlers.iterator();
-        while (hit.next()) |entry| {
-            alloc.free(entry.key_ptr.*);
-            alloc.free(entry.value_ptr.*);
-        }
-        self.handlers.deinit(alloc);
+        if (self.handler_key) |hk| alloc.free(hk);
     }
 };
 
