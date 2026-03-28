@@ -67,23 +67,23 @@ const html =
     \\      .nav-cta { margin: 8px 24px 12px; padding: 12px 20px; border-radius: 4px; text-align: center; }
     \\    }
     \\
-    \\    /* ── Hero ──────────────────────────────────── */
-    \\    .hero { background: var(--dark); padding: 80px 40px 0; max-width: 1100px; margin: 0 auto; }
+    \\    /* ── Hero (light) ─────────────────────────── */
+    \\    .hero { background: var(--bg); padding: 80px 40px 0; max-width: 1100px; margin: 0 auto; }
     \\    .hero-label { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
     \\    .hero-label::before { content: ''; display: inline-block; width: 20px; height: 1px; background: var(--accent); }
-    \\    .hero-headline { font-family: var(--display); font-size: clamp(44px, 7vw, 88px); font-weight: 800; letter-spacing: -0.04em; line-height: 0.95; color: #fff; margin-bottom: 16px; }
+    \\    .hero-headline { font-family: var(--display); font-size: clamp(44px, 7vw, 88px); font-weight: 800; letter-spacing: -0.04em; line-height: 0.95; color: var(--dark); margin-bottom: 16px; }
     \\    .hero-headline .hl { color: var(--accent); }
-    \\    .hero-sub { font-family: var(--mono); font-size: 12px; color: rgba(255,255,255,0.35); letter-spacing: 0.04em; margin-bottom: 64px; }
+    \\    .hero-sub { font-family: var(--mono); font-size: 12px; color: var(--muted); letter-spacing: 0.04em; margin-bottom: 64px; }
     \\
     \\    /* ── Stat row ─────────────────────────────── */
-    \\    .stat-row { display: grid; grid-template-columns: repeat(4,1fr); border-top: 1px solid rgba(255,255,255,0.08); }
+    \\    .stat-row { display: grid; grid-template-columns: repeat(4,1fr); border-top: 1px solid var(--border); }
     \\    @media (max-width: 700px) { .stat-row { grid-template-columns: repeat(2,1fr); } }
-    \\    .stat-cell { padding: 32px 0 40px; border-right: 1px solid rgba(255,255,255,0.08); padding-right: 32px; }
+    \\    .stat-cell { padding: 32px 0 40px; border-right: 1px solid var(--border); padding-right: 32px; }
     \\    .stat-cell:first-child { padding-left: 0; }
     \\    .stat-cell:last-child { border-right: none; }
-    \\    .stat-val { font-family: var(--display); font-size: clamp(32px, 4vw, 52px); font-weight: 800; letter-spacing: -0.04em; color: #fff; line-height: 1; margin-bottom: 4px; }
-    \\    .stat-val .unit { font-size: 0.45em; font-weight: 600; color: rgba(255,255,255,0.4); letter-spacing: 0; vertical-align: super; margin-left: 2px; }
-    \\    .stat-label { font-family: var(--mono); font-size: 11px; color: rgba(255,255,255,0.4); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 8px; }
+    \\    .stat-val { font-family: var(--display); font-size: clamp(32px, 4vw, 52px); font-weight: 800; letter-spacing: -0.04em; color: var(--dark); line-height: 1; margin-bottom: 4px; }
+    \\    .stat-val .unit { font-size: 0.45em; font-weight: 600; color: var(--muted); letter-spacing: 0; vertical-align: super; margin-left: 2px; }
+    \\    .stat-label { font-family: var(--mono); font-size: 11px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 8px; }
     \\    .stat-delta { font-family: var(--mono); font-size: 11px; color: var(--accent); letter-spacing: 0.02em; }
     \\
     \\    /* ── Bars (cream) ────────────────────────── */
@@ -169,7 +169,7 @@ const html =
     \\</nav>
     \\
     \\<!-- Hero -->
-    \\<div style="background:var(--dark);">
+    \\<div style="background:var(--bg);">
     \\  <div class="hero">
     \\    <div class="hero-label">turboapi-core</div>
     \\    <div class="hero-headline">
