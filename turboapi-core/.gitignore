@@ -1,2 +1,4 @@
 .zig-cache/
 zig-out/
+bench
+bench_adversarial
