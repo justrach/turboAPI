@@ -2,7 +2,7 @@ const mer = @import("mer");
 
 pub const meta: mer.Meta = .{
     .title = "HTTP Core",
-    .description = "turboapi-core — shared Zig HTTP primitives. Router benchmark: 19.2M lookups/sec vs Go, Node, Python.",
+    .description = "turboapi-core — shared Zig HTTP primitives. Router benchmark: 37M lookups/sec vs Go, Node, Python.",
 };
 
 pub const prerender = true;
@@ -173,29 +173,29 @@ const html =
     \\  <div class="hero">
     \\    <div class="hero-label">turboapi-core</div>
     \\    <div class="hero-headline">
-    \\      <span class="hl">19.2M</span> route<br>lookups/sec.
+    \\      <span class="hl">37M</span> route<br>lookups/sec.
     \\    </div>
     \\    <div class="hero-sub">Shared Zig HTTP core &nbsp;&middot;&nbsp; Zero dependencies &nbsp;&middot;&nbsp; Used by turboAPI + merjs</div>
     \\    <div class="stat-row">
     \\      <div class="stat-cell">
     \\        <div class="stat-label">Mixed workload</div>
-    \\        <div class="stat-val">19.2<span class="unit">M/s</span></div>
-    \\        <div class="stat-delta">52ns per lookup</div>
+    \\        <div class="stat-val">37<span class="unit">M/s</span></div>
+    \\        <div class="stat-delta">27ns per lookup</div>
     \\      </div>
     \\      <div class="stat-cell" style="padding-left:32px;">
     \\        <div class="stat-label">Static route</div>
-    \\        <div class="stat-val">33<span class="unit">M/s</span></div>
-    \\        <div class="stat-delta">30ns &middot; GET /health</div>
+    \\        <div class="stat-val">83<span class="unit">M/s</span></div>
+    \\        <div class="stat-delta">12ns &middot; GET /health</div>
     \\      </div>
     \\      <div class="stat-cell" style="padding-left:32px;">
     \\        <div class="stat-label">Param route</div>
-    \\        <div class="stat-val">18.5<span class="unit">M/s</span></div>
-    \\        <div class="stat-delta">54ns &middot; /users/{id}</div>
+    \\        <div class="stat-val">43<span class="unit">M/s</span></div>
+    \\        <div class="stat-delta">23ns &middot; /users/{id}</div>
     \\      </div>
     \\      <div class="stat-cell" style="padding-left:32px;">
     \\        <div class="stat-label">Wildcard route</div>
-    \\        <div class="stat-val">10.7<span class="unit">M/s</span></div>
-    \\        <div class="stat-delta">93ns &middot; /static/*path</div>
+    \\        <div class="stat-val">13.7<span class="unit">M/s</span></div>
+    \\        <div class="stat-delta">73ns &middot; /static/*path</div>
     \\      </div>
     \\    </div>
     \\  </div>
@@ -214,8 +214,8 @@ const html =
     \\    </div>
     \\    <div class="bar-row">
     \\      <div class="bar-name turbo">turboapi-core (Zig)</div>
-    \\      <div class="bar-track"><div class="bar-fill zig" data-pct="48"></div></div>
-    \\      <div class="bar-num turbo">19.2M/s &middot; 52ns</div>
+    \\      <div class="bar-track"><div class="bar-fill zig" data-pct="92"></div></div>
+    \\      <div class="bar-num turbo">37M/s &middot; 27ns</div>
     \\    </div>
     \\    <div class="bar-row">
     \\      <div class="bar-name">find-my-way (Node)</div>
@@ -344,10 +344,10 @@ const html =
     \\    options: opts(unit, rev || false),
     \\  });
     \\}
-    \\hbar('lpsChart', routerLabels, [40, 19.2, 10.5, 4], routerColors, 'M lookups/s');
-    \\hbar('nsChart', routerLabels, [25, 52, 95, 249], routerColors, 'ns/op', true);
-    \\hbar('typeChart', typeLabels, [33, 22, 18.5, 14, 10.7, 45], Array(6).fill(typeColor), 'M/s');
-    \\hbar('typeNsChart', typeLabels, [30, 45, 54, 71, 93, 22], Array(6).fill(typeColor), 'ns', true);
+    \\hbar('lpsChart', routerLabels, [40, 37, 10.5, 4], routerColors, 'M lookups/s');
+    \\hbar('nsChart', routerLabels, [25, 27, 95, 249], routerColors, 'ns/op', true);
+    \\hbar('typeChart', typeLabels, [83, 71, 43, 27, 13.7, 111], Array(6).fill(typeColor), 'M/s');
+    \\hbar('typeNsChart', typeLabels, [12, 14, 23, 37, 73, 9], Array(6).fill(typeColor), 'ns', true);
     \\// Burger
     \\(function() {
     \\  var burger = document.getElementById('burger');
