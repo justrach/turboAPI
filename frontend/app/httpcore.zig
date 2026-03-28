@@ -2,7 +2,7 @@ const mer = @import("mer");
 
 pub const meta: mer.Meta = .{
     .title = "HTTP Core",
-    .description = "turboapi-core — shared Zig HTTP primitives. Router benchmark: 37M lookups/sec vs Go, Node, Python.",
+    .description = "turboapi-core — shared Zig HTTP primitives. Router benchmark: 43.5M lookups/sec, faster than Go httprouter.",
 };
 
 pub const prerender = true;
@@ -173,29 +173,29 @@ const html =
     \\  <div class="hero">
     \\    <div class="hero-label">turboapi-core</div>
     \\    <div class="hero-headline">
-    \\      <span class="hl">37M</span> route<br>lookups/sec.
+    \\      <span class="hl">43.5M</span> route<br>lookups/sec.
     \\    </div>
-    \\    <div class="hero-sub">Shared Zig HTTP core &nbsp;&middot;&nbsp; Zero dependencies &nbsp;&middot;&nbsp; Used by turboAPI + merjs</div>
+    \\    <div class="hero-sub">Shared Zig HTTP core &nbsp;&middot;&nbsp; Zero dependencies &nbsp;&middot;&nbsp; Faster than Go httprouter</div>
     \\    <div class="stat-row">
     \\      <div class="stat-cell">
     \\        <div class="stat-label">Mixed workload</div>
-    \\        <div class="stat-val">37<span class="unit">M/s</span></div>
-    \\        <div class="stat-delta">27ns per lookup</div>
+    \\        <div class="stat-val">43.5<span class="unit">M/s</span></div>
+    \\        <div class="stat-delta">23ns per lookup</div>
     \\      </div>
     \\      <div class="stat-cell" style="padding-left:32px;">
     \\        <div class="stat-label">Static route</div>
-    \\        <div class="stat-val">83<span class="unit">M/s</span></div>
-    \\        <div class="stat-delta">12ns &middot; GET /health</div>
+    \\        <div class="stat-val">100<span class="unit">M/s</span></div>
+    \\        <div class="stat-delta">10ns &middot; GET /health</div>
     \\      </div>
     \\      <div class="stat-cell" style="padding-left:32px;">
     \\        <div class="stat-label">Param route</div>
-    \\        <div class="stat-val">43<span class="unit">M/s</span></div>
-    \\        <div class="stat-delta">23ns &middot; /users/{id}</div>
+    \\        <div class="stat-val">52<span class="unit">M/s</span></div>
+    \\        <div class="stat-delta">19ns &middot; /users/{id}</div>
     \\      </div>
     \\      <div class="stat-cell" style="padding-left:32px;">
     \\        <div class="stat-label">Wildcard route</div>
-    \\        <div class="stat-val">13.7<span class="unit">M/s</span></div>
-    \\        <div class="stat-delta">73ns &middot; /static/*path</div>
+    \\        <div class="stat-val">15.6<span class="unit">M/s</span></div>
+    \\        <div class="stat-delta">64ns &middot; /static/*path</div>
     \\      </div>
     \\    </div>
     \\  </div>
@@ -208,14 +208,14 @@ const html =
     \\    <div class="section-heading">Lookups per second &mdash; same routes, same machine</div>
     \\    <div class="bar-section-label">Higher is better &middot; M3 Pro &middot; 16 routes &middot; 5M iterations</div>
     \\    <div class="bar-row">
-    \\      <div class="bar-name turbo">Go httprouter</div>
-    \\      <div class="bar-track"><div class="bar-fill go" data-pct="100"></div></div>
-    \\      <div class="bar-num">40M/s &middot; 25ns</div>
+    \\      <div class="bar-name turbo">turboapi-core (Zig)</div>
+    \\      <div class="bar-track"><div class="bar-fill zig" data-pct="100"></div></div>
+    \\      <div class="bar-num turbo">43.5M/s &middot; 23ns</div>
     \\    </div>
     \\    <div class="bar-row">
-    \\      <div class="bar-name turbo">turboapi-core (Zig)</div>
-    \\      <div class="bar-track"><div class="bar-fill zig" data-pct="92"></div></div>
-    \\      <div class="bar-num turbo">37M/s &middot; 27ns</div>
+    \\      <div class="bar-name">Go httprouter</div>
+    \\      <div class="bar-track"><div class="bar-fill go" data-pct="92"></div></div>
+    \\      <div class="bar-num">40M/s &middot; 25ns</div>
     \\    </div>
     \\    <div class="bar-row">
     \\      <div class="bar-name">find-my-way (Node)</div>
@@ -316,8 +316,8 @@ const html =
     \\  });
     \\});
     \\// Chart config
-    \\const routerLabels = ['Go httprouter', 'turboapi-core', 'find-my-way', 'Starlette'];
-    \\const routerColors = ['#00add8', '#f7a41d', '#68a063', '#3776ab'];
+    \\const routerLabels = ['turboapi-core', 'Go httprouter', 'find-my-way', 'Starlette'];
+    \\const routerColors = ['#f7a41d', '#00add8', '#68a063', '#3776ab'];
     \\const typeLabels = ['Static', 'Deep static', '1-param', '2-param', 'Wildcard', 'Miss'];
     \\const typeColor = '#f7a41d';
     \\const opts = (unit, rev) => ({
@@ -344,10 +344,10 @@ const html =
     \\    options: opts(unit, rev || false),
     \\  });
     \\}
-    \\hbar('lpsChart', routerLabels, [40, 37, 10.5, 4], routerColors, 'M lookups/s');
-    \\hbar('nsChart', routerLabels, [25, 27, 95, 249], routerColors, 'ns/op', true);
-    \\hbar('typeChart', typeLabels, [83, 71, 43, 27, 13.7, 111], Array(6).fill(typeColor), 'M/s');
-    \\hbar('typeNsChart', typeLabels, [12, 14, 23, 37, 73, 9], Array(6).fill(typeColor), 'ns', true);
+    \\hbar('lpsChart', routerLabels, [43.5, 40, 10.5, 4], routerColors, 'M lookups/s');
+    \\hbar('nsChart', routerLabels, [23, 25, 95, 249], routerColors, 'ns/op', true);
+    \\hbar('typeChart', typeLabels, [100, 91, 52, 34, 15.6, 100], Array(6).fill(typeColor), 'M/s');
+    \\hbar('typeNsChart', typeLabels, [10, 11, 19, 29, 64, 10], Array(6).fill(typeColor), 'ns', true);
     \\// Burger
     \\(function() {
     \\  var burger = document.getElementById('burger');

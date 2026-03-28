@@ -104,6 +104,47 @@ jobs:
           print('All stress tests passed')
           "
 
+  turboapi-core-test:
+    name: "turboapi-core tests (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Run turboapi-core unit tests
+        run: cd turboapi-core && zig build test
+
+      - name: Run adversarial router benchmark (anti-cache verification)
+        run: |
+          cd turboapi-core
+          zig build-exe bench_adversarial.zig -OReleaseFast -lc
+          OUTPUT=$(./bench_adversarial 2>&1)
+          echo "$OUTPUT"
+
+          # Verify correctness passed
+          echo "$OUTPUT" | grep -q "PASS.*all correctness checks passed" || { echo "FAIL: correctness check failed"; exit 1; }
+
+          # Verify match/miss counts are correct (12 matches + 1 miss per iter)
+          echo "$OUTPUT" | grep -q "matches=60000000 misses=5000000" || { echo "FAIL: match/miss count wrong"; exit 1; }
+
+          # Extract Test 2 (anti-DCE) ns/op and verify it's under 100ns
+          # (generous threshold — CI runners are slower than M3 Pro)
+          NS=$(echo "$OUTPUT" | grep "Anti-DCE" | grep -oP '\d+ns avg' | grep -oP '\d+')
+          echo "Anti-DCE benchmark: ${NS}ns per lookup"
+          if [ "$NS" -gt 100 ]; then
+            echo "FAIL: router benchmark regression — ${NS}ns > 100ns threshold"
+            exit 1
+          fi
+          echo "PASS: router benchmark within threshold (${NS}ns < 100ns)"
+
   zig-test:
     name: "zig unit tests (${{ matrix.os }})"
     runs-on: ${{ matrix.os }}
