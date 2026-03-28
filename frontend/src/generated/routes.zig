@@ -7,6 +7,7 @@ const app_notes = @import("app/notes");
 const app_quickstart = @import("app/quickstart");
 const app_turbopg = @import("app/turbopg");
 const app_turboboto = @import("app/turboboto");
+const app_httpcore = @import("app/httpcore");
 
 pub const routes: []const Route = &.{
     .{ .path = "/benchmarks", .render = app_benchmarks.render, .render_stream = if (@hasDecl(app_benchmarks, "renderStream")) app_benchmarks.renderStream else null, .meta = if (@hasDecl(app_benchmarks, "meta")) app_benchmarks.meta else .{}, .prerender = if (@hasDecl(app_benchmarks, "prerender")) app_benchmarks.prerender else false },
@@ -16,6 +17,7 @@ pub const routes: []const Route = &.{
     .{ .path = "/quickstart", .render = app_quickstart.render, .render_stream = if (@hasDecl(app_quickstart, "renderStream")) app_quickstart.renderStream else null, .meta = if (@hasDecl(app_quickstart, "meta")) app_quickstart.meta else .{}, .prerender = if (@hasDecl(app_quickstart, "prerender")) app_quickstart.prerender else false },
     .{ .path = "/turbopg", .render = app_turbopg.render, .render_stream = if (@hasDecl(app_turbopg, "renderStream")) app_turbopg.renderStream else null, .meta = if (@hasDecl(app_turbopg, "meta")) app_turbopg.meta else .{}, .prerender = if (@hasDecl(app_turbopg, "prerender")) app_turbopg.prerender else false },
     .{ .path = "/turboboto", .render = app_turboboto.render, .render_stream = if (@hasDecl(app_turboboto, "renderStream")) app_turboboto.renderStream else null, .meta = if (@hasDecl(app_turboboto, "meta")) app_turboboto.meta else .{}, .prerender = if (@hasDecl(app_turboboto, "prerender")) app_turboboto.prerender else false },
+    .{ .path = "/httpcore", .render = app_httpcore.render, .render_stream = if (@hasDecl(app_httpcore, "renderStream")) app_httpcore.renderStream else null, .meta = if (@hasDecl(app_httpcore, "meta")) app_httpcore.meta else .{}, .prerender = if (@hasDecl(app_httpcore, "prerender")) app_httpcore.prerender else false },
 };
 
 const app_layout = @import("app/layout");
