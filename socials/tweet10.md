@@ -1,4 +1,4 @@
-# Tweet 10 — turboapi-core: a router library, not a server
+# Tweet 10 - turboapi-core: a router library, not a server
 
 **Best times to post (PST):** Tue-Thu, 8-10 AM
 **Best times to post (SGT):** Tue-Thu, 11 PM - 1 AM
@@ -11,64 +11,74 @@ I built a URL router in Zig that's faster than Go's httprouter.
 
 43.5M lookups/sec. 23ns per match. Adversarial-verified.
 
-It's not a server. It's not a framework. It's a library — you give it a path, it gives you a match.
+It's not a server. It's not a framework. It's a library. You give it a path, it gives you a match.
 
 ---
 
-## Tweet 2 (What it is)
+## Tweet 2 (Why)
+
+I'm building two things in Zig: a Python web framework (turboAPI) and a Zig-native full-stack framework (merjs).
+
+Both need URL routing. Both need percent-decoding. Both need query string parsing.
+
+I was writing the same code twice. So I pulled the shared bits into one library.
+
+---
+
+## Tweet 3 (What it is)
 
 turboapi-core. A Zig library. Zero dependencies.
 
-- Prefix-compressed radix trie (like Go's httprouter, but in Zig)
-- Method-indexed trees — one trie per GET/POST/PUT/etc
+- Prefix-compressed radix trie (same algorithm as Go's httprouter)
+- Method-indexed trees, one trie per GET/POST/PUT/etc
 - `{param}` extraction, `*wildcard` matching, path traversal rejection
 - HTTP utilities: percentDecode, queryStringGet, statusText
 
 530 lines of Zig. 23 tests. Fuzz-tested.
 
-Not an HTTP server. Not a framework. Just the routing + HTTP parsing bits that every server needs but nobody wants to rewrite.
+Not an HTTP server. Not a framework. Just the routing and HTTP parsing bits that every server needs but nobody wants to rewrite.
 
 ---
 
-## Tweet 3 (The benchmark story)
+## Tweet 4 (The benchmark story)
 
 How I got here:
 
-v1: Segment-by-segment trie + StringHashMap → 19M/s (52ns)
-v2: Prefix compression + indices array → 37M/s (27ns)
-v3: Method-indexed trees → 43.5M/s (23ns)
+v1: Segment-by-segment trie + StringHashMap. 19M/s (52ns)
+v2: Prefix compression + indices array. 37M/s (27ns)
+v3: Method-indexed trees. 43.5M/s (23ns)
 
 Go httprouter: 40M/s (25ns)
 
-Each optimization was inspired by reading Go's httprouter source. Zig just let me take the same ideas further — no GC, no interface dispatch, no sync.Pool overhead.
+Each optimization came from reading Go's httprouter source. Zig let me take the same ideas further. No GC, no interface dispatch, no sync.Pool overhead.
 
 ---
 
-## Tweet 4 (Honest numbers)
+## Tweet 5 (Honest numbers)
 
 I also wrote an adversarial benchmark to make sure the numbers aren't fake:
 
-- Anti-DCE: forces use of every result (handler key + params) → 41.7M/s
-- Runtime paths: generates new URLs every iteration (no string caching) → 28.6M/s
-- 100-route table: scaling test → 20M/s
+- Anti-DCE: forces use of every result (handler key + params). 41.7M/s
+- Runtime paths: generates new URLs every iteration, no string caching. 28.6M/s
+- 100-route table: scaling test. 20M/s
 
 The 43.5M headline is for a fixed 16-route API. Real traffic with varying param values is closer to 28M. Both beat Go.
 
 ---
 
-## Tweet 5 (Who uses it)
+## Tweet 6 (Who uses it)
 
 Two frameworks share this one library:
 
-turboAPI — Python web framework. 134k req/s. Uses turboapi-core for routing, HTTP utils, response cache.
+turboAPI. Python web framework. 134k req/s. Uses turboapi-core for routing, HTTP utils, response cache.
 
-merjs — Zig full-stack framework. 100/100 Lighthouse. Uses turboapi-core for the router (API method dispatch coming next).
+merjs. Zig full-stack framework. 100/100 Lighthouse. Uses turboapi-core for the router, API method dispatch coming next.
 
-Bug fix in the router → both frameworks get it. Fuzz test finds an edge case → both are covered.
+Bug fix in the router, both frameworks get it. Fuzz test finds an edge case, both are covered.
 
 ---
 
-## Tweet 6 (CTA)
+## Tweet 7 (CTA)
 
 https://github.com/justrach/turboapi-core
 
@@ -83,12 +93,8 @@ zig fetch --save=turboapi_core "git+https://github.com/justrach/turboapi-core.gi
 
 ## Alt: Single tweet
 
-Built a URL router in Zig that beats Go's httprouter.
+I'm building a Python web framework and a Zig full-stack framework. Both need URL routing. Both need percent-decoding. Was writing the same code twice.
 
-43.5M lookups/sec (23ns). Adversarial-verified — not cached, not fake.
-
-It's not a server. It's a library: prefix-compressed radix trie, method-indexed trees, fuzz-tested. 530 lines, zero deps.
-
-turboAPI and merjs both use it.
+Pulled it into one library: turboapi-core. 43.5M lookups/sec. Faster than Go's httprouter. 530 lines, zero deps, fuzz-tested.
 
 https://github.com/justrach/turboapi-core
