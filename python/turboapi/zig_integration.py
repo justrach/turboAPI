@@ -57,6 +57,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
     if has_depends:
         return "enhanced", {}, {}
 
+    has_implicit_header_params = False
     for param_name, param in sig.parameters.items():
         annotation = param.annotation
 
@@ -92,6 +93,11 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
             param_types[param_name] = "bool"
         elif annotation is str or annotation is inspect.Parameter.empty:
             param_types[param_name] = "str"
+            # Optional str params (with defaults) may be implicit header params.
+            # The Zig vectorcall path only extracts path/query params, so route
+            # these handlers through the enhanced path which also checks headers.
+            if param.default is not inspect.Parameter.empty:
+                has_implicit_header_params = True
 
     method = route.method.value.upper() if hasattr(route, "method") else "GET"
 
@@ -115,11 +121,15 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
             return "enhanced", param_types, {}
         return "body_sync", param_types, {}
 
+    # GET handlers with optional str params may use implicit header mapping —
+    # the Zig vectorcall path doesn't inspect headers, so use the enhanced path.
+    if has_implicit_header_params:
+        return "enhanced", param_types, {}
+
     # Zero-arg GET: use the PyObject_CallNoArgs fast path in Zig
     if not param_types:
         return "simple_sync_noargs", param_types, {}
     return "simple_sync", param_types, {}
-
 
 def _extract_model_schema(model_class) -> str | None:
     """Extract a JSON schema descriptor from a dhi BaseModel class for Zig-native validation.
@@ -641,18 +651,37 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 }
 
             # Run after_request
+            # JSON-serialize dict/list content so Response._render() gets a
+            # string it can .encode() — raw dicts crash on .encode().
+            raw_content = result.get("content", "")
+            if isinstance(raw_content, (dict, list)):
+                import json as _json
+                raw_content = _json.dumps(raw_content)
             response = Response(
-                content=result.get("content", ""),
+                content=raw_content,
                 status_code=result.get("status_code", 200),
                 headers={},
             )
             for mw in reversed(middleware_instances):
                 response = mw.after_request(request, response)
 
-            # Merge middleware-added headers back
+            # Merge middleware-modified content and headers back into result
             result["status_code"] = response.status_code
+            # Propagate any body mutation (e.g. GZipMiddleware replaces content
+            # with compressed bytes).
+            result["content"] = response.content
             if response.headers:
-                result["extra_headers"] = response.headers
+                # Filter out headers that Zig already emits from its fixed set
+                _ZIG_OWNED = frozenset({"content-length", "server", "date", "connection"})
+                extra = {k: v for k, v in response.headers.items()
+                         if k.lower() not in _ZIG_OWNED}
+                if extra:
+                    # Inject extra headers via content_type — Zig emits
+                    # "Content-Type: <ct>" so we append "\r\nKey: Value" pairs.
+                    # This avoids needing a Zig-side sendResponseExt function.
+                    ct = result.get("content_type", "application/json")
+                    suffix = "".join(f"\r\n{k}: {v}" for k, v in extra.items())
+                    result["content_type"] = ct + suffix
 
             return result
 
