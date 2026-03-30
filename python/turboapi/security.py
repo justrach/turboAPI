@@ -505,33 +505,28 @@ from .exceptions import HTTPException  # noqa: F401, E402
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """
-    Verify a password against a hash.
-
-    This is a placeholder — install a proper hashing library and replace:
-      - passlib with bcrypt: ``passlib.hash.bcrypt.verify(plain, hashed)``
-      - argon2-cffi: ``argon2.PasswordHasher().verify(hashed, plain)``
-    """
-    raise NotImplementedError(
-        "verify_password is not implemented. "
-        "Install passlib[bcrypt] or argon2-cffi and replace this function."
-    )
-
-
+    """Verify a password against a PBKDF2-HMAC-SHA256 hash."""
+    import hashlib
+    import secrets
+    try:
+        algorithm, iterations_str, salt_b64, hash_b64 = hashed_password.split("$")
+        if algorithm != "pbkdf2-sha256":
+            return False
+        iterations = int(iterations_str)
+        salt = bytes.fromhex(salt_b64)
+        expected = bytes.fromhex(hash_b64)
+        digest = hashlib.pbkdf2_hmac("sha256", plain_password.encode(), salt, iterations)
+        return secrets.compare_digest(digest, expected)
+    except Exception:
+        return False
 def get_password_hash(password: str) -> str:
-    """
-    Hash a password.
-
-    This is a placeholder — install a proper hashing library and replace:
-      - passlib with bcrypt: ``passlib.hash.bcrypt.hash(password)``
-      - argon2-cffi: ``argon2.PasswordHasher().hash(password)``
-    """
-    raise NotImplementedError(
-        "get_password_hash is not implemented. "
-        "Install passlib[bcrypt] or argon2-cffi and replace this function."
-    )
-
-
+    """Hash a password using PBKDF2-HMAC-SHA256."""
+    import hashlib
+    import os
+    iterations = 260_000
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+    return f"pbkdf2-sha256${iterations}${salt.hex()}${digest.hex()}"
 # ============================================================================
 # Dependency Injection Helper
 # ============================================================================

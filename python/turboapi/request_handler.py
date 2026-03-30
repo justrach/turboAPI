@@ -647,11 +647,19 @@ def create_enhanced_handler(original_handler, route_definition):
     for pname, param in sig.parameters.items():
         if isinstance(param.default, Header):
             _has_header_params = True
+        elif not (
+            _has_security
+            and (
+                isinstance(param.default, (Depends, SecurityBase))
+                or get_depends(param) is not None
+            )
+        ):
+            # Plain param (no explicit non-header marker) — may be an implicit header
+            _has_header_params = True
         if _has_security and (
             isinstance(param.default, (Depends, SecurityBase)) or get_depends(param) is not None
         ):
             _has_dependencies = True
-
     if is_async:
         # Create async enhanced handler for async original handlers
         async def enhanced_handler(**kwargs):

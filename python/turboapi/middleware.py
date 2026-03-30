@@ -183,7 +183,9 @@ class GZipMiddleware(Middleware):
 
     def after_request(self, request: Request, response: Response) -> Response:
         """Compress response if client accepts gzip."""
-        accept_encoding = request.headers.get("accept-encoding", "")
+        # Use get_header() for case-insensitive lookup — Zig passes headers
+        # with their original HTTP capitalisation (e.g. "Accept-Encoding").
+        accept_encoding = request.get_header("accept-encoding", "")
 
         if "gzip" not in accept_encoding.lower():
             return response
