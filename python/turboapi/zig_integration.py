@@ -612,10 +612,17 @@ class ZigIntegratedTurboAPI(TurboAPI):
         middleware_instances = self._middleware_instances
 
         def middleware_wrapped_handler(**kwargs):
+            def _sanitize_header_component(value: str) -> str:
+                # Prevent CRLF injection when extra headers are tunneled through
+                # the content_type field for the Zig response writer.
+                return value.replace("\r", "").replace("\n", "")
+
+            raw_headers = kwargs.get("headers", {})
+            normalized_headers = {k.lower(): v for k, v in raw_headers.items()}
             request = Request(
                 method=kwargs.get("method", ""),
                 path=kwargs.get("path", ""),
-                headers=kwargs.get("headers", {}),
+                headers=normalized_headers,
                 body=kwargs.get("body", b""),
                 query_string=kwargs.get("query_string", ""),
                 path_params=kwargs.get("path_params", {}),
@@ -673,15 +680,26 @@ class ZigIntegratedTurboAPI(TurboAPI):
             if response.headers:
                 # Filter out headers that Zig already emits from its fixed set
                 _ZIG_OWNED = frozenset({"content-length", "server", "date", "connection"})
-                extra = {k: v for k, v in response.headers.items()
-                         if k.lower() not in _ZIG_OWNED}
+                extra = {
+                    k: v for k, v in response.headers.items() if k.lower() not in _ZIG_OWNED
+                }
                 if extra:
                     # Inject extra headers via content_type — Zig emits
                     # "Content-Type: <ct>" so we append "\r\nKey: Value" pairs.
                     # This avoids needing a Zig-side sendResponseExt function.
                     ct = result.get("content_type", "application/json")
-                    suffix = "".join(f"\r\n{k}: {v}" for k, v in extra.items())
-                    result["content_type"] = ct + suffix
+                    extra_lines = []
+                    for key, value in extra.items():
+                        safe_key = _sanitize_header_component(str(key))
+                        safe_value = _sanitize_header_component(str(value))
+                        if safe_key.lower() == "content-type":
+                            ct = safe_value
+                            continue
+                        extra_lines.append(f"{safe_key}: {safe_value}")
+                    if extra_lines:
+                        result["content_type"] = ct + "\r\n" + "\r\n".join(extra_lines)
+                    else:
+                        result["content_type"] = ct
 
             return result
 

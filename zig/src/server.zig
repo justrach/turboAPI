@@ -1849,13 +1849,19 @@ fn callPythonHandler(tstate: ?*anyopaque, entry: HandlerEntry, method: []const u
         }
     }
 
-    // content — json.dumps() if not already a string
+    // content — json.dumps() if not already a string or raw bytes
     var body_slice: []const u8 = "null";
     if (c.PyDict_GetItemString(result, "content")) |content_obj| {
         if (c.PyUnicode_Check(content_obj) != 0) {
             // Already a string, use directly
             if (c.PyUnicode_AsUTF8(content_obj)) |cs| {
                 body_slice = std.mem.span(cs);
+            }
+        } else if (c.PyBytes_Check(content_obj) != 0) {
+            var size: c.Py_ssize_t = 0;
+            var buf: [*c]u8 = undefined;
+            if (c.PyBytes_AsStringAndSize(content_obj, @ptrCast(&buf), &size) == 0) {
+                body_slice = buf[0..@intCast(size)];
             }
         } else {
             // Serialize via json.dumps()
