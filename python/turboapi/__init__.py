@@ -40,7 +40,6 @@ from .jwt_auth import (
     create_access_token,
     create_refresh_token,
     decode_token,
-    hash_password,
 )
 
 # Middleware
@@ -81,6 +80,9 @@ from .security import (
     Security,
     SecurityScopes,
     verify_password,
+)
+from .security import (
+    get_password_hash as hash_password,
 )
 
 # SSE (Server-Sent Events)
