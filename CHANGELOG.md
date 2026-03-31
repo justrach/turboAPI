@@ -2,6 +2,18 @@
 
 All notable changes to TurboAPI are documented here.
 
+## [1.0.25] — 2026-04-01
+
+### Compatibility
+
+- Fixed package-level password helper exports so the top-level `turboapi` API no longer mixes implementations between `hash_password` and `verify_password`.
+- Removed stale `xfail` markers from the async handler suite for cases that now pass on current `main`, while keeping the remaining async error-handling gap explicit.
+
+### Closed Issues
+
+- [#116](https://github.com/justrach/turboAPI/issues/116) — package-level `turboapi.verify_password` resolved to the wrong helper
+- [#117](https://github.com/justrach/turboAPI/issues/117) — async handler suite contained stale `xfail` markers
+
 ## [1.0.24] — 2026-03-31
 
 ### Bug Fixes
