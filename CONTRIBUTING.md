@@ -29,6 +29,7 @@ Every PR description should include:
 - nearby non-regression checks proving the change did not just move the bug
 - whether the branch was rebased onto current `main`
 - whether any generated files, lockfiles, or benchmarks changed
+- explicit confirmation that the submission matches `CONTRIBUTING.md`
 
 If a PR does not map cleanly to an issue, open the issue first.
 
@@ -73,6 +74,8 @@ Bad PR scope:
 
 If a reviewer cannot explain the PR in one sentence, it is probably too large.
 
+Default rule: keep each PR under **500 changed lines** total unless there is a clear reason not to. If a larger PR is unavoidable, call that out explicitly in the PR body and justify why it was not split.
+
 ## Rebase Policy
 
 Before requesting review on any non-trivial PR:
@@ -89,6 +92,18 @@ Why this matters:
 - stale perf PRs become impossible to evaluate fairly
 
 If rebasing reveals unrelated conflicts, split the PR.
+
+## CI Before Review
+
+For runtime, compatibility, middleware, security, and perf-sensitive changes, run the narrowest relevant local checks before requesting review and include the commands/results in the PR body.
+
+At minimum:
+
+- the exact failing repro or test from before the fix
+- the passing rerun after the fix
+- the closest neighboring non-regression checks
+
+If the branch changes behavior that normally goes through GitHub Actions, do not request final review until the branch-level CI signal is green or any remaining failures are clearly explained in the PR description.
 
 ## Generated Files
 
