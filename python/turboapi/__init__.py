@@ -41,7 +41,6 @@ from .jwt_auth import (
     create_refresh_token,
     decode_token,
     hash_password,
-    verify_password,
 )
 
 # Middleware
@@ -81,6 +80,7 @@ from .security import (
     OAuth2PasswordBearer,
     Security,
     SecurityScopes,
+    verify_password,
 )
 
 # SSE (Server-Sent Events)

@@ -121,6 +121,14 @@ def test_verify_password_raises():
     h = get_password_hash("secret123")
     assert verify_password("secret123", h) is True
     assert verify_password("wrong", h) is False
+
+
+def test_top_level_verify_password_export_matches_security_module():
+    """Public turboapi.verify_password should match turboapi.security.verify_password."""
+    from turboapi import verify_password as package_verify_password
+    from turboapi.security import verify_password as security_verify_password
+
+    assert package_verify_password is security_verify_password
 # ── Bug #5: Port range validation ───────────────────────────────────────────
 # (Zig-side — tested via integration; can't unit test @intCast directly)
 
