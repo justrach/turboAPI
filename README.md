@@ -129,6 +129,10 @@ The app also exposes an ASGI `__call__` fallback — you can use `uvicorn main:a
 
 ## What's New
 
+### v1.0.24 — Zig gzip passthrough fix
+
+Restored gzip middleware body passthrough on the Zig runtime so compressed responses keep both the correct `Content-Encoding: gzip` header and the actual compressed body. This closes issue #96 on current `main`.
+
 ### v1.0.23 — Shared Zig core (`turboapi-core`)
 
 Extracted the radix trie router, HTTP utilities, and response cache into a standalone Zig library — [**turboapi-core**](turboapi-core/). Both turboAPI and [merjs](https://github.com/justrach/merjs) now share the same routing and HTTP primitives. Zero performance regression (134k req/s unchanged).
