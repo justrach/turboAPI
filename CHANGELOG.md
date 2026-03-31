@@ -2,6 +2,18 @@
 
 All notable changes to TurboAPI are documented here.
 
+## [1.0.24] — 2026-03-31
+
+### Bug Fixes
+
+- Restored Zig-runtime gzip middleware body passthrough so compressed responses keep the correct `Content-Encoding: gzip` header and the actual compressed body.
+- Normalized middleware-visible request headers to lowercase before Python-side processing.
+- Preserved raw `bytes` response bodies in the Zig bridge instead of JSON-serializing compressed middleware output to `null`.
+
+### Closed Issues
+
+- [#96](https://github.com/justrach/turboAPI/issues/96) — gzip middleware on Zig runtime dropped or mangled compressed responses
+
 ## [1.0.23] — 2026-03-27
 
 ### Architecture
