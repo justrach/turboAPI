@@ -15,9 +15,10 @@ import pytest
 import requests
 from turboapi import TurboAPI
 
-# Mark tests that require async handler body parameter support (in progress)
-ASYNC_BODY_PARAMS = pytest.mark.xfail(
-    reason="Async handlers with body parameters not yet fully implemented"
+# Only async error handling is still a known gap on current main.
+ASYNC_ERROR_HANDLING = pytest.mark.xfail(
+    strict=True,
+    reason="Async handler exceptions do not yet map cleanly to HTTP 500 responses"
 )
 
 
@@ -79,7 +80,6 @@ def test_sync_handler():
     return True
 
 
-@ASYNC_BODY_PARAMS
 def test_async_handler_basic():
     """Test that async handlers are properly awaited"""
     print("\n" + "=" * 70)
@@ -141,7 +141,6 @@ def test_async_handler_basic():
     return True
 
 
-@ASYNC_BODY_PARAMS
 def test_async_with_query_params():
     """Test async handlers with query parameters"""
     print("\n" + "=" * 70)
@@ -181,7 +180,6 @@ def test_async_with_query_params():
     return True
 
 
-@ASYNC_BODY_PARAMS
 def test_async_with_headers():
     """Test async handlers with headers"""
     print("\n" + "=" * 70)
@@ -232,7 +230,6 @@ def test_async_with_headers():
     return True
 
 
-@ASYNC_BODY_PARAMS
 def test_async_with_large_payload():
     """Test async handlers with large JSON payloads"""
     print("\n" + "=" * 70)
@@ -277,7 +274,6 @@ def test_async_with_large_payload():
     return True
 
 
-@ASYNC_BODY_PARAMS
 def test_mixed_sync_async():
     """Test mixing sync and async handlers in same app"""
     print("\n" + "=" * 70)
@@ -341,7 +337,7 @@ def test_mixed_sync_async():
     return True
 
 
-@ASYNC_BODY_PARAMS
+@ASYNC_ERROR_HANDLING
 def test_async_error_handling():
     """Test that async handlers properly handle errors"""
     print("\n" + "=" * 70)
