@@ -129,6 +129,10 @@ The app also exposes an ASGI `__call__` fallback — you can use `uvicorn main:a
 
 ## What's New
 
+### v1.0.26 — release metadata fix
+
+Re-cut the patch release after `v1.0.25` published stale `1.0.24` artifacts. `v1.0.26` syncs the package version across all release metadata files and adds a regression test so future release bumps fail fast if those files drift.
+
 ### v1.0.25 — yxlyx compatibility cleanup
 
 Fixed the top-level password helper exports so `turboapi.hash_password` and `turboapi.verify_password` stay coherent, and removed stale async-handler `xfail` markers for cases that already pass on current `main`. This closes issues #116 and #117.

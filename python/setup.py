@@ -6,7 +6,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="turboapi",
-    version="1.0.25",
+    version="1.0.26",
     description="A high-performance Python web framework for the no-GIL era",
     long_description=open("../README.md").read(),
     long_description_content_type="text/markdown",
