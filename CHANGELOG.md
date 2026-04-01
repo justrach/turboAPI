@@ -4,11 +4,29 @@ All notable changes to TurboAPI are documented here.
 
 ## [1.0.27] — 2026-04-01
 
-### Release Fixes
+### Since 1.0.24
+
+#### Compatibility
+
+- Fixed package-level password helper exports so the top-level `turboapi` API no longer mixes implementations between `hash_password` and `verify_password`.
+- Added regression coverage that locks the top-level password helpers to the `turboapi.security` implementation.
+
+#### Test Suite
+
+- Removed stale `xfail` markers from the async handler suite for cases that now pass on current `main`.
+- Kept the remaining async error-handling gap explicit with a strict `xfail` instead of silently masking newly passing behavior.
+- Added release metadata regression coverage so version declarations must stay aligned across packaging files.
+
+#### Release Fixes
 
 - Re-cut the patch release after both `v1.0.25` and `v1.0.26` published stale assets from older tag targets.
 - Added workflow checks so tag pushes fail if the tag version and repository version declarations do not match.
-- Fixed the manual release workflow so future bump automation updates all version declarations, not just `pyproject.toml`.
+- Fixed the manual release workflow so future bump automation updates `pyproject.toml`, `python/setup.py`, and `python/turboapi/__init__.py` together.
+
+#### Closed Issues
+
+- [#116](https://github.com/justrach/turboAPI/issues/116) — package-level `turboapi.verify_password` resolved to the wrong helper
+- [#117](https://github.com/justrach/turboAPI/issues/117) — async handler suite contained stale `xfail` markers
 
 ## [1.0.26] — 2026-04-01
 
