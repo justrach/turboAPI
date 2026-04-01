@@ -2,6 +2,14 @@
 
 All notable changes to TurboAPI are documented here.
 
+## [1.0.27] — 2026-04-01
+
+### Release Fixes
+
+- Re-cut the patch release after both `v1.0.25` and `v1.0.26` published stale assets from older tag targets.
+- Added workflow checks so tag pushes fail if the tag version and repository version declarations do not match.
+- Fixed the manual release workflow so future bump automation updates all version declarations, not just `pyproject.toml`.
+
 ## [1.0.26] — 2026-04-01
 
 ### Release Fixes

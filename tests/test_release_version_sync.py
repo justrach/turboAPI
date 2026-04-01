@@ -31,5 +31,5 @@ def test_release_versions_are_in_sync():
 
 
 def test_release_version_bumped_past_bad_1_0_25_publish():
-    """This release must move past the broken 1.0.25 artifact metadata."""
-    assert _read_pyproject_version() == "1.0.26"
+    """This release must move past the broken 1.0.25/1.0.26 artifact publishes."""
+    assert _read_pyproject_version() == "1.0.27"
