@@ -2,6 +2,14 @@
 
 All notable changes to TurboAPI are documented here.
 
+## [1.0.26] — 2026-04-01
+
+### Release Fixes
+
+- Re-cut the patch release after `v1.0.25` published assets with stale `1.0.24` version metadata.
+- Synced version declarations across `pyproject.toml`, `python/setup.py`, and `python/turboapi/__init__.py`.
+- Added a regression test that fails if release metadata files drift out of sync again.
+
 ## [1.0.25] — 2026-04-01
 
 ### Compatibility
