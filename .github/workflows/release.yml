@@ -46,6 +46,14 @@ jobs:
           [bumpversion:file:pyproject.toml]
           search = version = "{current_version}"
           replace = version = "{new_version}"
+
+          [bumpversion:file:python/setup.py]
+          search = version="{current_version}"
+          replace = version="{new_version}"
+
+          [bumpversion:file:python/turboapi/__init__.py]
+          search = __version__ = "{current_version}"
+          replace = __version__ = "{new_version}"
           EOF
 
           bump2version ${{ github.event.inputs.version_bump }} --allow-dirty
@@ -59,7 +67,7 @@ jobs:
           VERSION="${{ steps.bump.outputs.version }}"
           git config user.email "action@github.com"
           git config user.name "GitHub Action"
-          git add pyproject.toml .bumpversion.cfg
+          git add pyproject.toml python/setup.py python/turboapi/__init__.py .bumpversion.cfg
           git commit -m "release: v${VERSION}"
           git tag "v${VERSION}"
           git push && git push --tags

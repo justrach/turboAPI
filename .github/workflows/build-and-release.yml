@@ -21,6 +21,17 @@ jobs:
         id: version
         run: |
           VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)"/\1/')
+          SETUP_VERSION=$(grep -m1 'version="' python/setup.py | sed 's/.*version="\([^"]*\)".*/\1/')
+          INIT_VERSION=$(grep -m1 '__version__ = ' python/turboapi/__init__.py | sed 's/.*"\(.*\)"/\1/')
+
+          test "$VERSION" = "$SETUP_VERSION"
+          test "$VERSION" = "$INIT_VERSION"
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            test "$VERSION" = "$TAG_VERSION"
+          fi
+
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
 

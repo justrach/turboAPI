@@ -129,6 +129,10 @@ The app also exposes an ASGI `__call__` fallback — you can use `uvicorn main:a
 
 ## What's New
 
+### v1.0.27 — release guardrails
+
+Re-cut the patch release after bad `v1.0.25` and `v1.0.26` publishes. `v1.0.27` adds release guardrails so tag pushes fail on version drift and the manual release workflow updates every version declaration consistently.
+
 ### v1.0.26 — release metadata fix
 
 Re-cut the patch release after `v1.0.25` published stale `1.0.24` artifacts. `v1.0.26` syncs the package version across all release metadata files and adds a regression test so future release bumps fail fast if those files drift.
