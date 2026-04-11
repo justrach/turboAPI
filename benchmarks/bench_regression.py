@@ -17,7 +17,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 BENCH_DIR = os.path.dirname(os.path.abspath(__file__))
 BASELINE_FILE = os.path.join(BENCH_DIR, "baseline.json")
@@ -157,7 +157,7 @@ def load_thresholds(ci_mode=False):
 
 def save_history(results, detailed=None):
     os.makedirs(HISTORY_DIR, exist_ok=True)
-    ts = datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H-%M-%S")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")  # noqa: UP017
     history_file = os.path.join(HISTORY_DIR, f"{ts}.json")
     payload = {
         "timestamp": ts,
