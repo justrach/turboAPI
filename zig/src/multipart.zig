@@ -26,6 +26,10 @@ pub const UrlencodedResult = struct {
     fields: []FormField,
 
     pub fn deinit(self: *const UrlencodedResult, alloc: std.mem.Allocator) void {
+        for (self.fields) |f| {
+            alloc.free(f.name);
+            alloc.free(f.value);
+        }
         alloc.free(self.fields);
     }
 };
@@ -252,7 +256,7 @@ test "multipart: simple form field" {
     const body = "--boundary\r\n" ++
         \\Content-Disposition: form-data; name="username"
     ++
-        "\r\n" ++
+        "\r\n\r\n" ++
         \\john
     ++
         "\r\n--boundary--\r\n";
@@ -271,7 +275,7 @@ test "multipart: file upload" {
         "\r\n" ++
         \\Content-Type: text/plain
     ++
-        "\r\n" ++
+        "\r\n\r\n" ++
         \\hello world
     ++
         "\r\n--boundary--\r\n";
@@ -289,7 +293,7 @@ test "multipart: mixed fields and files" {
     const body = "--boundary\r\n" ++
         \\Content-Disposition: form-data; name="title"
     ++
-        "\r\n" ++
+        "\r\n\r\n" ++
         \\My Doc
     ++
         "\r\n--boundary\r\n" ++
@@ -298,7 +302,7 @@ test "multipart: mixed fields and files" {
         "\r\n" ++
         \\Content-Type: application/pdf
     ++
-        "\r\n" ++
+        "\r\n\r\n" ++
         \\%PDF-1.4
     ++
         "\r\n--boundary--\r\n";
