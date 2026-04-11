@@ -56,7 +56,7 @@ jobs:
 
       - name: Run regression benchmark (main - full)
         if: github.ref == 'refs/heads/main'
-        run: uv run --python 3.14t python benchmarks/bench_regression.py --ci --save --history
+        run: uv run --python 3.14t python benchmarks/bench_regression.py --save --history
         env:
           BENCH_THREADS: 4
           BENCH_CONNECTIONS: 100
