@@ -155,14 +155,21 @@ def load_thresholds(ci_mode=False):
     )
 
 
-def save_history(results):
+def save_history(results, detailed=None):
     os.makedirs(HISTORY_DIR, exist_ok=True)
     ts = datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H-%M-%S")
     history_file = os.path.join(HISTORY_DIR, f"{ts}.json")
     payload = {
         "timestamp": ts,
         "results": results,
+        "detailed": detailed or {},
         "commit": os.popen("git rev-parse HEAD 2>/dev/null").read().strip() or "unknown",
+        "runner": os.environ.get("BENCH_RUNNER", "local"),
+        "os": os.environ.get("BENCH_OS", "unknown"),
+        "vcpus": os.environ.get("BENCH_VCPUS", "unknown"),
+        "duration": DURATION,
+        "threads": THREADS,
+        "connections": CONNECTIONS,
     }
     with open(history_file, "w") as f:
         json.dump(payload, f, indent=2)
@@ -170,7 +177,12 @@ def save_history(results):
 
 
 def generate_pr_comment(results, detailed, thresholds, avg_threshold, regressions):
+    runner = os.environ.get("BENCH_RUNNER", "local")
+    duration = DURATION
     lines = ["## Performance Regression Report\n"]
+    lines.append(
+        f"> Runner: **{runner}** | Duration: **{duration}s** per endpoint | Threads: **{THREADS}** | Connections: **{CONNECTIONS}**\n"
+    )
     lines.append("| Endpoint | req/s | avg latency | p99 latency | threshold | status |")
     lines.append("|----------|------:|------------:|------------:|----------:|--------|")
     for name, path, method, body in BENCHMARKS:
@@ -278,7 +290,7 @@ def main():
         json.dump({"results": results, "detailed": detailed}, f, indent=2)
 
     if history_mode or save_mode:
-        save_history(results)
+        save_history(results, detailed)
 
     if ci_mode:
         generate_pr_comment(results, detailed, thresholds, avg_threshold, regressions)
