@@ -9,6 +9,7 @@ Usage:
     uv run --python 3.14t python benchmarks/bench_regression.py
     uv run --python 3.14t python benchmarks/bench_regression.py --save   # save as new baseline
     uv run --python 3.14t python benchmarks/bench_regression.py --ci     # exit(1) on regression
+    uv run --python 3.14t python benchmarks/bench_regression.py --history # save history snapshot
 """
 
 import json
@@ -16,24 +17,20 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 
-BASELINE_FILE = os.path.join(os.path.dirname(__file__), "baseline.json")
+BENCH_DIR = os.path.dirname(os.path.abspath(__file__))
+BASELINE_FILE = os.path.join(BENCH_DIR, "baseline.json")
+THRESHOLDS_FILE = os.path.join(BENCH_DIR, "thresholds.json")
+HISTORY_DIR = os.path.join(BENCH_DIR, "history")
+RESULTS_FILE = "/tmp/bench_results.json"
+PR_COMMENT_FILE = "/tmp/bench_pr_comment.md"
 
-# Minimum acceptable req/s per endpoint (updated by --save)
-DEFAULT_THRESHOLDS = {
-    "GET /health": 130_000,
-    "GET /": 125_000,
-    "GET /json": 125_000,
-    "GET /users/123": 125_000,
-    "POST /items": 110_000,
-    "GET /status201": 125_000,
-}
+DURATION = int(os.environ.get("BENCH_DURATION", "10"))
+THREADS = int(os.environ.get("BENCH_THREADS", "4"))
+CONNECTIONS = int(os.environ.get("BENCH_CONNECTIONS", "100"))
 
-DURATION = 10
-THREADS = 4
-CONNECTIONS = 100
-
-SERVER_CODE = '''
+SERVER_CODE = """
 from turboapi import TurboAPI, JSONResponse
 from dhi import BaseModel
 from typing import Optional
@@ -71,7 +68,7 @@ def status_201():
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=8001)
-'''
+"""
 
 BENCHMARKS = [
     ("GET /health", "/health", "GET", None),
@@ -84,7 +81,6 @@ BENCHMARKS = [
 
 
 def parse_wrk(output: str) -> dict:
-    """Parse wrk output into structured data."""
     result = {"requests_per_second": 0, "latency_avg_ms": 0, "latency_p99_ms": 0}
     for line in output.split("\n"):
         line = line.strip()
@@ -116,28 +112,100 @@ def run_wrk(url, method="GET", body=None):
     if method == "POST" and body:
         cmd += ["-s", "/tmp/_bench_post.lua"]
         with open("/tmp/_bench_post.lua", "w") as f:
-            f.write(f'wrk.method = "POST"\nwrk.headers["Content-Type"] = "application/json"\nwrk.body = \'{body}\'\n')
+            f.write(
+                f'wrk.method = "POST"\nwrk.headers["Content-Type"] = "application/json"\nwrk.body = \'{body}\'\n'
+            )
     cmd.append(url)
     out = subprocess.run(cmd, capture_output=True, text=True).stdout
     return parse_wrk(out)
 
 
-def load_thresholds():
-    if os.path.exists(BASELINE_FILE):
-        with open(BASELINE_FILE) as f:
-            data = json.load(f)
-        return {k: int(v * 0.90) for k, v in data.items()}  # 10% margin
-    return DEFAULT_THRESHOLDS
+def load_thresholds_config():
+    if os.path.exists(THRESHOLDS_FILE):
+        with open(THRESHOLDS_FILE) as f:
+            return json.load(f)
+    return {"margin_pct": 10, "average_threshold_rps": 130000, "endpoints": {}}
+
+
+def load_thresholds(ci_mode=False):
+    config = load_thresholds_config()
+    endpoint_thresholds = {}
+
+    if ci_mode and "ci" in config:
+        active = config["ci"]
+    else:
+        active = config
+
+    margin = active.get("margin_pct", config.get("margin_pct", 10)) / 100.0
+
+    if not (ci_mode and "ci" in config):
+        if os.path.exists(BASELINE_FILE):
+            with open(BASELINE_FILE) as f:
+                baseline = json.load(f)
+            for k, v in baseline.items():
+                endpoint_thresholds[k] = int(v * (1 - margin))
+
+    for k, v in active.get("endpoints", {}).items():
+        min_rps = v.get("min_rps", 0)
+        if k not in endpoint_thresholds or min_rps > endpoint_thresholds[k]:
+            endpoint_thresholds[k] = min_rps
+
+    return endpoint_thresholds, active.get(
+        "average_threshold_rps", config.get("average_threshold_rps", 130000)
+    )
+
+
+def save_history(results):
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    ts = datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H-%M-%S")
+    history_file = os.path.join(HISTORY_DIR, f"{ts}.json")
+    payload = {
+        "timestamp": ts,
+        "results": results,
+        "commit": os.popen("git rev-parse HEAD 2>/dev/null").read().strip() or "unknown",
+    }
+    with open(history_file, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"History snapshot saved to {history_file}")
+
+
+def generate_pr_comment(results, detailed, thresholds, avg_threshold, regressions):
+    lines = ["## Performance Regression Report\n"]
+    lines.append("| Endpoint | req/s | avg latency | p99 latency | threshold | status |")
+    lines.append("|----------|------:|------------:|------------:|----------:|--------|")
+    for name, path, method, body in BENCHMARKS:
+        d = detailed.get(name, {})
+        rps = d.get("requests_per_second", 0)
+        avg_l = d.get("latency_avg_ms", 0)
+        p99_l = d.get("latency_p99_ms", 0)
+        thresh = thresholds.get(name, 0)
+        status = "REGRESSED" if any(r[0] == name for r in regressions) else "OK"
+        lines.append(
+            f"| {name} | {rps:,.0f} | {avg_l:.2f}ms | {p99_l:.2f}ms | {thresh:,} | {status} |"
+        )
+    avg = sum(r.get("requests_per_second", 0) for r in detailed.values()) / max(len(detailed), 1)
+    lines.append(
+        f"| **AVERAGE** | **{avg:,.0f}** | | | **{avg_threshold:,}** | {'REGRESSED' if avg < avg_threshold else 'OK'} |"
+    )
+    lines.append("")
+    if regressions:
+        lines.append(f"> :warning: **{len(regressions)} endpoint(s) below threshold**")
+    else:
+        lines.append("> :white_check_mark: All endpoints pass regression thresholds")
+    comment = "\n".join(lines)
+    with open(PR_COMMENT_FILE, "w") as f:
+        f.write(comment)
+    return comment
 
 
 def main():
     save_mode = "--save" in sys.argv
     ci_mode = "--ci" in sys.argv
+    history_mode = "--history" in sys.argv
 
     with open("/tmp/turboapi_regbench.py", "w") as f:
         f.write(SERVER_CODE)
 
-    # Start server
     import urllib.error
     import urllib.request
 
@@ -147,7 +215,9 @@ def main():
     env["TURBO_DISABLE_CACHE"] = "1"
     proc = subprocess.Popen(
         [sys.executable, "/tmp/turboapi_regbench.py"],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     for _ in range(50):
         try:
@@ -160,14 +230,14 @@ def main():
         print("FAIL: server didn't start")
         sys.exit(1)
 
-    time.sleep(1)  # warmup
+    time.sleep(1)
 
-    # Run benchmarks
     results = {}
+    detailed = {}
     print(f"{'Endpoint':<25} {'req/s':>10} {'avg':>8} {'p99':>8} {'status':>8}")
     print("-" * 65)
 
-    thresholds = load_thresholds()
+    thresholds, avg_threshold = load_thresholds(ci_mode=ci_mode)
     regressions = []
 
     for name, path, method, body in BENCHMARKS:
@@ -175,6 +245,7 @@ def main():
         r = run_wrk(url, method, body)
         rps = r["requests_per_second"]
         results[name] = rps
+        detailed[name] = r
 
         threshold = thresholds.get(name, 0)
         passed = rps >= threshold
@@ -182,7 +253,9 @@ def main():
         if not passed:
             regressions.append((name, rps, threshold))
 
-        print(f"{name:<25} {rps:>10,.0f} {r['latency_avg_ms']:>6.2f}ms {r['latency_p99_ms']:>6.2f}ms {status:>8}")
+        print(
+            f"{name:<25} {rps:>10,.0f} {r['latency_avg_ms']:>6.2f}ms {r['latency_p99_ms']:>6.2f}ms {status:>8}"
+        )
 
     proc.kill()
     proc.wait()
@@ -191,21 +264,31 @@ def main():
     avg = sum(results.values()) / len(results)
     print(f"{'AVERAGE':<25} {avg:>10,.0f}")
 
+    avg_regressed = avg < avg_threshold
+    if avg_regressed:
+        regressions.append(("AVERAGE", avg, avg_threshold))
+        print(f"  AVERAGE {avg:,.0f} < {avg_threshold:,} (threshold)")
+
     if save_mode:
         with open(BASELINE_FILE, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nBaseline saved to {BASELINE_FILE}")
 
-    # Machine-readable output
-    with open("/tmp/bench_results.json", "w") as f:
-        json.dump(results, f, indent=2)
+    with open(RESULTS_FILE, "w") as f:
+        json.dump({"results": results, "detailed": detailed}, f, indent=2)
+
+    if history_mode or save_mode:
+        save_history(results)
+
+    if ci_mode:
+        generate_pr_comment(results, detailed, thresholds, avg_threshold, regressions)
 
     if regressions:
-        print(f"\n{'!'*60}")
+        print(f"\n{'!' * 60}")
         print(f"REGRESSION DETECTED in {len(regressions)} endpoint(s):")
         for name, actual, threshold in regressions:
             print(f"  {name}: {actual:,.0f} < {threshold:,.0f} (threshold)")
-        print(f"{'!'*60}")
+        print(f"{'!' * 60}")
         if ci_mode:
             sys.exit(1)
 

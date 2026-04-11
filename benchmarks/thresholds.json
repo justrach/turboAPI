@@ -1,0 +1,23 @@
+{
+  "margin_pct": 15,
+  "average_threshold_rps": 70000,
+  "ci": {
+    "average_threshold_rps": 50000,
+    "endpoints": {
+      "GET /health": { "min_rps": 80000 },
+      "GET /": { "min_rps": 80000 },
+      "GET /json": { "min_rps": 75000 },
+      "GET /users/123": { "min_rps": 75000 },
+      "POST /items": { "min_rps": 45000 },
+      "GET /status201": { "min_rps": 65000 }
+    }
+  },
+  "endpoints": {
+    "GET /health": { "min_rps": 130000 },
+    "GET /": { "min_rps": 125000 },
+    "GET /json": { "min_rps": 125000 },
+    "GET /users/123": { "min_rps": 125000 },
+    "POST /items": { "min_rps": 110000 },
+    "GET /status201": { "min_rps": 125000 }
+  }
+}
