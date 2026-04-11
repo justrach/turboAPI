@@ -31,7 +31,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
 
     Returns:
         (handler_type, param_types, model_info) where:
-        - handler_type: "simple_sync" | "body_sync" | "model_sync" | "simple_async" | "body_async" | "enhanced"
+        - handler_type: "simple_sync" | "body_sync" | "model_sync" | "form_sync" | "file_sync" | "simple_async" | "body_async" | "enhanced"
         - param_types: dict mapping param_name -> type hint string
         - model_info: dict with "param_name" and "model_class" for model handlers
     """
@@ -41,6 +41,8 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
     param_types = {}
     needs_body = False
     has_depends = False
+    has_form = False
+    has_file = False
     model_info = {}
 
     # Check for Depends/SecurityBase — forces enhanced path
@@ -57,9 +59,32 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
     if has_depends:
         return "enhanced", {}, {}
 
+    # Check for Form/File/UploadFile markers
+    try:
+        from .datastructures import File, Form, UploadFile
+
+        for pname, param in sig.parameters.items():
+            if isinstance(param.default, Form):
+                has_form = True
+                param_types[pname] = "form"
+            elif isinstance(param.default, File):
+                has_file = True
+                param_types[pname] = "file"
+            elif param.annotation is UploadFile or (
+                isinstance(param.annotation, type) and issubclass(param.annotation, UploadFile)
+            ):
+                has_file = True
+                param_types[pname] = "file"
+    except ImportError:
+        pass
+
     has_implicit_header_params = False
     for param_name, param in sig.parameters.items():
         annotation = param.annotation
+
+        if param_types.get(param_name) in ("form", "file"):
+            needs_body = True
+            continue
 
         # Check for dhi/Pydantic BaseModel
         try:
@@ -68,13 +93,10 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
                 and inspect.isclass(annotation)
                 and issubclass(annotation, BaseModel)
             ):
-                # Found a model parameter - use fast model path (sync only for now)
                 model_info = {"param_name": param_name, "model_class": annotation}
-                # For async handlers, model parsing needs the enhanced path
-                # since Zig-side model parsing only supports sync handlers
                 if is_async:
                     needs_body = True
-                continue  # Don't add to param_types
+                continue
         except TypeError:
             pass
 
@@ -93,13 +115,18 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
             param_types[param_name] = "bool"
         elif annotation is str or annotation is inspect.Parameter.empty:
             param_types[param_name] = "str"
-            # Optional str params (with defaults) may be implicit header params.
-            # The Zig vectorcall path only extracts path/query params, so route
-            # these handlers through the enhanced path which also checks headers.
             if param.default is not inspect.Parameter.empty:
                 has_implicit_header_params = True
 
     method = route.method.value.upper() if hasattr(route, "method") else "GET"
+
+    # Form/file handlers use dedicated dispatch (Zig parses multipart, fast resolve)
+    if has_file and not is_async and not has_depends:
+        if method in ("POST", "PUT", "PATCH", "DELETE"):
+            return "file_sync", param_types, {}
+    if has_form and not has_file and not is_async and not has_depends:
+        if method in ("POST", "PUT", "PATCH", "DELETE"):
+            return "form_sync", param_types, {}
 
     # Model handlers use fast model path (simd-json + model_validate) - sync only
     if model_info and not is_async:
@@ -130,6 +157,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
     if not param_types:
         return "simple_sync_noargs", param_types, {}
     return "simple_sync", param_types, {}
+
 
 def _extract_model_schema(model_class) -> str | None:
     """Extract a JSON schema descriptor from a dhi BaseModel class for Zig-native validation.
@@ -463,7 +491,15 @@ class ZigIntegratedTurboAPI(TurboAPI):
 
         return decorator
 
-    def db_query(self, method: str, path: str, *, sql: str, params: list[str] | None = None, single: bool = False):
+    def db_query(
+        self,
+        method: str,
+        path: str,
+        *,
+        sql: str,
+        params: list[str] | None = None,
+        single: bool = False,
+    ):
         """Zig-native custom SQL query. Supports pgvector, JSONB, full-text search, CTEs.
 
         Args:
@@ -520,7 +556,10 @@ class ZigIntegratedTurboAPI(TurboAPI):
                     # Use Zig-native CORS — pre-rendered headers, zero per-request overhead.
                     # Routes stay on the fast path (no downgrade to enhanced).
                     origins = kwargs.get("allow_origins", ["*"])
-                    methods_list = kwargs.get("allow_methods", ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"])
+                    methods_list = kwargs.get(
+                        "allow_methods",
+                        ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
+                    )
                     hdrs_list = kwargs.get("allow_headers", ["*"])
                     max_age = kwargs.get("max_age", 600)
                     creds = kwargs.get("allow_credentials", False)
@@ -560,7 +599,10 @@ class ZigIntegratedTurboAPI(TurboAPI):
             # Skip CORSMiddleware if handled natively by Zig
             self._middleware_instances = []
             for middleware_class, kwargs in self.middleware_stack:
-                if getattr(self, "_zig_cors_enabled", False) and middleware_class.__name__ == "CORSMiddleware":
+                if (
+                    getattr(self, "_zig_cors_enabled", False)
+                    and middleware_class.__name__ == "CORSMiddleware"
+                ):
                     continue  # handled in Zig
                 self._middleware_instances.append(middleware_class(**kwargs))
 
@@ -590,7 +632,9 @@ class ZigIntegratedTurboAPI(TurboAPI):
 
             # Enable response caching for noargs handlers (auto-cache after first call)
             # Disable with TURBO_DISABLE_CACHE=1 (e.g. for TFB compliance)
-            if not os.environ.get("TURBO_DISABLE_CACHE") and hasattr(self.zig_server, "enable_response_cache"):
+            if not os.environ.get("TURBO_DISABLE_CACHE") and hasattr(
+                self.zig_server, "enable_response_cache"
+            ):
                 self.zig_server.enable_response_cache()
 
             native_count = len(getattr(self, "_native_routes", []))
@@ -663,6 +707,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
             raw_content = result.get("content", "")
             if isinstance(raw_content, (dict, list)):
                 import json as _json
+
                 raw_content = _json.dumps(raw_content)
             response = Response(
                 content=raw_content,
@@ -680,9 +725,7 @@ class ZigIntegratedTurboAPI(TurboAPI):
             if response.headers:
                 # Filter out headers that Zig already emits from its fixed set
                 _ZIG_OWNED = frozenset({"content-length", "server", "date", "connection"})
-                extra = {
-                    k: v for k, v in response.headers.items() if k.lower() not in _ZIG_OWNED
-                }
+                extra = {k: v for k, v in response.headers.items() if k.lower() not in _ZIG_OWNED}
                 if extra:
                     # Inject extra headers via content_type — Zig emits
                     # "Content-Type: <ct>" so we append "\r\nKey: Value" pairs.
@@ -733,7 +776,9 @@ class ZigIntegratedTurboAPI(TurboAPI):
                             "{}",
                             route.handler,
                         )
-                        print(f"{CHECK_MARK} [model_sync+middleware→enhanced] {route.method.value} {route.path}")
+                        print(
+                            f"{CHECK_MARK} [model_sync+middleware→enhanced] {route.method.value} {route.path}"
+                        )
                     else:
                         # Minimal handler: json.loads → Model(**data) → handler(model) → json.dumps
                         enhanced_handler = create_fast_model_handler(
@@ -754,7 +799,9 @@ class ZigIntegratedTurboAPI(TurboAPI):
                                 route.handler,
                                 schema_json,
                             )
-                            print(f"{CHECK_MARK} [model_sync+dhi] {route.method.value} {route.path}")
+                            print(
+                                f"{CHECK_MARK} [model_sync+dhi] {route.method.value} {route.path}"
+                            )
                         else:
                             self.zig_server.add_route_model(
                                 route.method.value,
@@ -823,6 +870,25 @@ class ZigIntegratedTurboAPI(TurboAPI):
                         route.handler,  # Original async handler
                     )
                     print(f"{CHECK_MARK} [{handler_type}] {route.method.value} {route.path}")
+                elif handler_type in ("form_sync", "file_sync"):
+                    # FORM/FILE PATH: Enhanced handler with dedicated Zig dispatch
+                    # Zig skips DHI validation and parses multipart/urlencoded natively
+                    enhanced_handler = create_enhanced_handler(route.handler, route)
+                    if self._middleware_instances:
+                        enhanced_handler = self._wrap_with_middleware(enhanced_handler)
+                        registered_type = "enhanced"
+                    else:
+                        registered_type = handler_type
+                    param_types_json = json.dumps(param_types)
+                    self.zig_server.add_route_fast(
+                        route.method.value,
+                        route.path,
+                        enhanced_handler,
+                        registered_type,
+                        param_types_json,
+                        route.handler,
+                    )
+                    print(f"{CHECK_MARK} [{registered_type}] {route.method.value} {route.path}")
                 else:
                     # ENHANCED PATH: Full Python wrapper needed
                     enhanced_handler = create_enhanced_handler(route.handler, route)
@@ -903,7 +969,9 @@ class ZigIntegratedTurboAPI(TurboAPI):
         # Initialize Zig server
         if not self._initialize_zig_server(host, port):
             print(f"{CROSS_MARK} Failed to initialize Zig server")
-            print(f"   Use an ASGI server as fallback: uvicorn main:app --host {host} --port {port}")
+            print(
+                f"   Use an ASGI server as fallback: uvicorn main:app --host {host} --port {port}"
+            )
             return
 
         # Print integration info

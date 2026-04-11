@@ -9,6 +9,7 @@ const core = @import("turboapi-core");
 const router_mod = core.router;
 const dhi = @import("dhi_validator.zig");
 const db = @import("db.zig");
+const multipart_mod = @import("multipart.zig");
 
 const allocator = std.heap.c_allocator;
 
@@ -113,6 +114,8 @@ const HandlerType = enum(u8) {
     simple_sync,
     model_sync,
     body_sync,
+    form_sync,
+    file_sync,
     enhanced,
 };
 
@@ -121,6 +124,8 @@ fn parseHandlerType(s: []const u8) HandlerType {
     if (std.mem.eql(u8, s, "simple_sync")) return .simple_sync;
     if (std.mem.eql(u8, s, "model_sync")) return .model_sync;
     if (std.mem.eql(u8, s, "body_sync")) return .body_sync;
+    if (std.mem.eql(u8, s, "form_sync")) return .form_sync;
+    if (std.mem.eql(u8, s, "file_sync")) return .file_sync;
     return .enhanced;
 }
 
@@ -597,7 +602,8 @@ pub fn server_add_static_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c)
     const st: u16 = if (status >= 100 and status <= 599) @intCast(status) else 200;
 
     const status_text = statusText(st);
-    const response_bytes = std.fmt.allocPrint(allocator,
+    const response_bytes = std.fmt.allocPrint(
+        allocator,
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n{s}",
         .{ st, status_text, ct_s, body_s.len, body_s },
     ) catch return null;
@@ -650,12 +656,13 @@ pub fn server_configure_cors(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?
     var age_buf: [16]u8 = undefined;
     const age_str = std.fmt.bufPrint(&age_buf, "{d}", .{max_age}) catch "600";
 
-    cors_headers = std.fmt.allocPrint(allocator,
+    cors_headers = std.fmt.allocPrint(
+        allocator,
         "\r\nAccess-Control-Allow-Origin: {s}" ++
-        "\r\nAccess-Control-Allow-Methods: {s}" ++
-        "\r\nAccess-Control-Allow-Headers: {s}" ++
-        "{s}" ++
-        "\r\nAccess-Control-Max-Age: {s}",
+            "\r\nAccess-Control-Allow-Methods: {s}" ++
+            "\r\nAccess-Control-Allow-Headers: {s}" ++
+            "{s}" ++
+            "\r\nAccess-Control-Max-Age: {s}",
         .{ origins_s, methods_s, hdrs_s, cred_hdr, age_str },
     ) catch return null;
     cors_enabled = true;
@@ -703,10 +710,11 @@ fn renderResponse(status: u16, content_type: []const u8, body: []const u8) ?[]co
     const dw = [7][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
     const mn = [12][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
     const dt = std.fmt.bufPrint(&date_buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
-        dw[di], md.day_index + 1, mn[@intFromEnum(md.month) - 1], yd.year,
+        dw[di],               md.day_index + 1,        mn[@intFromEnum(md.month) - 1], yd.year,
         ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     }) catch "Thu, 01 Jan 2026 00:00:00 GMT";
-    return std.fmt.allocPrint(allocator,
+    return std.fmt.allocPrint(
+        allocator,
         "HTTP/1.1 {d} {s}\r\nServer: TurboAPI\r\nDate: {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive{s}\r\n\r\n{s}",
         .{ status, statusText(status), dt, content_type, body.len, cors, body },
     ) catch null;
@@ -826,7 +834,6 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     py.PyEval_RestoreThread(save);
     return py.pyNone();
 }
-
 
 const HeaderList = std.ArrayListUnmanaged(HeaderPair);
 
@@ -1104,15 +1111,18 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     }
 
     // DHI validation for model_sync — single parse, retain tree
+    // Skip for form/file routes (body is multipart/urlencoded, not JSON)
     var cached_parse: ?std.json.Parsed(std.json.Value) = null;
     defer if (cached_parse) |*cp| cp.deinit();
 
-    if (body.len > 0) {
+    if (body.len > 0 and entry.handler_tag != .form_sync and entry.handler_tag != .file_sync) {
         const ms = getModelSchemas();
         if (ms.get(match.handler_key)) |schema| {
             const vr = dhi.validateJsonRetainParsed(body, &schema);
             switch (vr) {
-                .ok => |parsed| { cached_parse = parsed; },
+                .ok => |parsed| {
+                    cached_parse = parsed;
+                },
                 .err => |ve| {
                     defer ve.deinit();
                     std.debug.print("[DHI] validation failed for {s}\n", .{match.handler_key});
@@ -1139,6 +1149,11 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         },
         .body_sync => {
             callPythonHandlerDirect(tstate, entry, query_string, body, &match.params, stream);
+        },
+        .form_sync, .file_sync => {
+            const resp = callPythonHandler(tstate, entry, method, path, query_string, body, headers.items, &match.params);
+            defer resp.deinit();
+            sendResponse(stream, resp.status_code, resp.content_type, resp.body);
         },
         .enhanced => {
             const resp = callPythonHandler(tstate, entry, method, path, query_string, body, headers.items, &match.params);
@@ -1798,6 +1813,93 @@ fn callPythonHandler(tstate: ?*anyopaque, entry: HandlerEntry, method: []const u
     }
     _ = c.PyDict_SetItemString(kwargs, "path_params", py_path_params);
 
+    // ── Multipart / urlencoded form parsing ──
+    var content_type_lower: [256]u8 = undefined;
+    var ct_len: usize = 0;
+    for (headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "content-type")) {
+            ct_len = @min(h.value.len, content_type_lower.len);
+            for (h.value[0..ct_len], 0..) |ch, i| {
+                content_type_lower[i] = std.ascii.toLower(ch);
+            }
+            break;
+        }
+    }
+    const req_ct_slice = content_type_lower[0..ct_len];
+
+    if (std.mem.startsWith(u8, req_ct_slice, "multipart/form-data")) {
+        if (multipart_mod.extractBoundary(req_ct_slice)) |boundary| {
+            if (body.len > 0) {
+                const mp_opt = multipart_mod.parseMultipart(allocator, body, boundary) catch null;
+                if (mp_opt) |mp| {
+                    defer mp.deinit(allocator);
+
+                    // form_fields dict: {name: value, ...}
+                    const py_form_fields = c.PyDict_New() orelse return errorResponse(err_ct, err_body);
+                    defer c.Py_DecRef(py_form_fields);
+                    for (mp.fields) |f| {
+                        const fk = py.newString(f.name) orelse continue;
+                        const fv = py.newString(f.value) orelse {
+                            c.Py_DecRef(fk);
+                            continue;
+                        };
+                        _ = c.PyDict_SetItem(py_form_fields, fk, fv);
+                        c.Py_DecRef(fk);
+                        c.Py_DecRef(fv);
+                    }
+                    _ = c.PyDict_SetItemString(kwargs, "form_fields", py_form_fields);
+
+                    // file_fields list: [{name, filename, content_type, body}, ...]
+                    const py_file_list = c.PyList_New(@intCast(mp.files.len)) orelse return errorResponse(err_ct, err_body);
+                    defer c.Py_DecRef(py_file_list);
+                    for (mp.files, 0..) |f, i| {
+                        const file_dict = c.PyDict_New() orelse continue;
+                        if (py.newString(f.name)) |v| {
+                            _ = c.PyDict_SetItemString(file_dict, "name", v);
+                            c.Py_DecRef(v);
+                        }
+                        if (py.newString(f.filename)) |v| {
+                            _ = c.PyDict_SetItemString(file_dict, "filename", v);
+                            c.Py_DecRef(v);
+                        }
+                        if (py.newString(f.content_type)) |v| {
+                            _ = c.PyDict_SetItemString(file_dict, "content_type", v);
+                            c.Py_DecRef(v);
+                        }
+                        const file_bytes = c.PyBytes_FromStringAndSize(@ptrCast(f.body.ptr), @intCast(f.body.len));
+                        if (file_bytes) |fb| {
+                            _ = c.PyDict_SetItemString(file_dict, "body", fb);
+                            c.Py_DecRef(fb);
+                        }
+                        _ = c.PyList_SetItem(py_file_list, @intCast(i), file_dict);
+                    }
+                    _ = c.PyDict_SetItemString(kwargs, "file_fields", py_file_list);
+                }
+            }
+        }
+    } else if (std.mem.startsWith(u8, req_ct_slice, "application/x-www-form-urlencoded")) {
+        if (body.len > 0) {
+            const ue_opt = multipart_mod.parseUrlencoded(allocator, body) catch null;
+            if (ue_opt) |ue| {
+                defer ue.deinit(allocator);
+
+                const py_form_fields = c.PyDict_New() orelse return errorResponse(err_ct, err_body);
+                defer c.Py_DecRef(py_form_fields);
+                for (ue.fields) |f| {
+                    const fk = py.newString(f.name) orelse continue;
+                    const fv = py.newString(f.value) orelse {
+                        c.Py_DecRef(fk);
+                        continue;
+                    };
+                    _ = c.PyDict_SetItem(py_form_fields, fk, fv);
+                    c.Py_DecRef(fk);
+                    c.Py_DecRef(fv);
+                }
+                _ = c.PyDict_SetItemString(kwargs, "form_fields", py_form_fields);
+            }
+        }
+    }
+
     // ── Call handler with PyObject_Call(handler, empty_tuple, kwargs) ──
     const empty_tuple = c.PyTuple_New(0) orelse return errorResponse(err_ct, err_body);
     defer c.Py_DecRef(empty_tuple);
@@ -1965,12 +2067,13 @@ pub fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u
     const mon_str = mon_names[@intFromEnum(month_day.month) - 1];
     // RFC 2822: "Wed, 19 Mar 2026 11:30:27 GMT"
     const date_str = std.fmt.bufPrint(&date_buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
-        dow_str, month_day.day_index + 1, mon_str, year_day.year,
+        dow_str,                    month_day.day_index + 1,       mon_str,                         year_day.year,
         day_secs.getHoursIntoDay(), day_secs.getMinutesIntoHour(), day_secs.getSecondsIntoMinute(),
     }) catch "Thu, 01 Jan 2026 00:00:00 GMT";
 
     var header_buf: [512]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf,
+    const header = std.fmt.bufPrint(
+        &header_buf,
         "HTTP/1.1 {d} {s}\r\nServer: TurboAPI\r\nDate: {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive",
         .{ status, statusText(status), date_str, content_type, body.len },
     ) catch return;
@@ -1982,15 +2085,15 @@ pub fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u
     if (total <= 4096) {
         var resp_buf: [4096]u8 = undefined;
         var pos: usize = 0;
-        @memcpy(resp_buf[pos..pos + header.len], header);
+        @memcpy(resp_buf[pos .. pos + header.len], header);
         pos += header.len;
         if (cors.len > 0) {
-            @memcpy(resp_buf[pos..pos + cors.len], cors);
+            @memcpy(resp_buf[pos .. pos + cors.len], cors);
             pos += cors.len;
         }
-        @memcpy(resp_buf[pos..pos + trailer.len], trailer);
+        @memcpy(resp_buf[pos .. pos + trailer.len], trailer);
         pos += trailer.len;
-        @memcpy(resp_buf[pos..pos + body.len], body);
+        @memcpy(resp_buf[pos .. pos + body.len], body);
         pos += body.len;
         stream.writeAll(resp_buf[0..pos]) catch return;
     } else {
@@ -2045,7 +2148,6 @@ test "response cache is safe under concurrent access" {
     try std.testing.expectEqualStrings("{\"item_id\":2}", getCachedResponse("GET /items/2").?);
 }
 
-
 // ── Fuzz tests ───────────────────────────────────────────────────────────────
 // Run: zig build fuzz-http  (then execute the binary with --fuzz)
 //
@@ -2061,54 +2163,58 @@ fn fuzz_percentDecode(_: void, input: []const u8) anyerror!void {
     try std.testing.expect(out.len <= buf.len);
     // Output must be a subslice of buf
     const buf_start = @intFromPtr(&buf);
-    const buf_end   = buf_start + buf.len;
+    const buf_end = buf_start + buf.len;
     const out_start = @intFromPtr(out.ptr);
     try std.testing.expect(out_start >= buf_start and out_start <= buf_end);
 }
 
 test "fuzz: percentDecode — output bounded, no OOB" {
-    try std.testing.fuzz({}, fuzz_percentDecode, .{ .corpus = &.{
-        "%00",                              // null byte
-        "%GG",                              // invalid hex digits
-        "%",                                // bare percent at end of input
-        "%2",                               // truncated percent sequence
-        "hello+world",                      // plus → space
-        "a%20b%20c",                        // spaces
-        "%FF%FE%FD",                        // high bytes
-        &([_]u8{'%'} ** 200),               // 200 bare percents
-        "%2F%2F..%2F..%2Fetc%2Fpasswd",    // path traversal
-        "%00%00%00",                        // three null bytes
-    }});
+    try std.testing.fuzz({}, fuzz_percentDecode, .{
+        .corpus = &.{
+            "%00", // null byte
+            "%GG", // invalid hex digits
+            "%", // bare percent at end of input
+            "%2", // truncated percent sequence
+            "hello+world", // plus → space
+            "a%20b%20c", // spaces
+            "%FF%FE%FD", // high bytes
+            &([_]u8{'%'} ** 200), // 200 bare percents
+            "%2F%2F..%2F..%2Fetc%2Fpasswd", // path traversal
+            "%00%00%00", // three null bytes
+        },
+    });
 }
 
 fn fuzz_queryStringGet(_: void, input: []const u8) anyerror!void {
     // Split: first 16 bytes = key, remainder = query string
     const split = @min(input.len, 16);
     const key = input[0..split];
-    const qs  = if (split < input.len) input[split..] else "";
+    const qs = if (split < input.len) input[split..] else "";
 
     const result = queryStringGet(qs, key);
     if (result) |v| {
         // Returned slice must be within the query string buffer
         const qs_start = @intFromPtr(qs.ptr);
-        const qs_end   = qs_start + qs.len;
-        const v_start  = @intFromPtr(v.ptr);
+        const qs_end = qs_start + qs.len;
+        const v_start = @intFromPtr(v.ptr);
         try std.testing.expect(v_start >= qs_start and v_start <= qs_end);
     }
 }
 
 test "fuzz: queryStringGet — result is within input, no panic" {
-    try std.testing.fuzz({}, fuzz_queryStringGet, .{ .corpus = &.{
-        "key" ++ "key=value",
-        "x"   ++ "x=1&y=2&z=3",
-        "a"   ++ "a=&b=c",
-        "k"   ++ "k",
-        ""    ++ "=value",
-        "foo" ++ "foo=bar&foo=baz",         // duplicate key
-        "q"   ++ "q=" ++ ("A" ** 2000),     // very long value
-        "k"   ++ "k=\x00\xFF",              // binary values
-        "k"   ++ "&&&&&",                   // no values, only separators
-    }});
+    try std.testing.fuzz({}, fuzz_queryStringGet, .{
+        .corpus = &.{
+            "key" ++ "key=value",
+            "x" ++ "x=1&y=2&z=3",
+            "a" ++ "a=&b=c",
+            "k" ++ "k",
+            "" ++ "=value",
+            "foo" ++ "foo=bar&foo=baz", // duplicate key
+            "q" ++ "q=" ++ ("A" ** 2000), // very long value
+            "k" ++ "k=\x00\xFF", // binary values
+            "k" ++ "&&&&&", // no values, only separators
+        },
+    });
 }
 
 fn fuzz_requestLineParsing(_: void, input: []const u8) anyerror!void {
@@ -2123,13 +2229,13 @@ fn fuzz_requestLineParsing(_: void, input: []const u8) anyerror!void {
     const first_line = input[0..first_line_end];
 
     var parts = std.mem.splitScalar(u8, first_line, ' ');
-    const method   = parts.next() orelse return;
+    const method = parts.next() orelse return;
     const raw_path = parts.next() orelse return;
     _ = method;
 
     // Split path from query string at '?'
-    const q_idx        = std.mem.indexOf(u8, raw_path, "?");
-    const path         = if (q_idx) |i| raw_path[0..i] else raw_path;
+    const q_idx = std.mem.indexOf(u8, raw_path, "?");
+    const path = if (q_idx) |i| raw_path[0..i] else raw_path;
     const query_string = if (q_idx) |i| raw_path[i + 1 ..] else "";
     _ = path;
     _ = query_string;
@@ -2150,38 +2256,40 @@ fn fuzz_requestLineParsing(_: void, input: []const u8) anyerror!void {
 }
 
 test "fuzz: HTTP request-line and header parsing — no panic on malformed input" {
-    try std.testing.fuzz({}, fuzz_requestLineParsing, .{ .corpus = &.{
-        // Minimal valid GET
-        "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        // Valid POST with body
-        "POST /items HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
-        // Missing HTTP version token
-        "GET /\r\n\r\n",
-        // Empty method
-        " / HTTP/1.1\r\n\r\n",
-        // Huge Content-Length (parser must cap it)
-        "POST / HTTP/1.1\r\nContent-Length: 99999999999999999999\r\n\r\n",
-        // Negative Content-Length (parseInt → error → 0)
-        "POST / HTTP/1.1\r\nContent-Length: -1\r\n\r\n",
-        // CRLF injection attempt in header value
-        "GET / HTTP/1.1\r\nX-Header: value\r\nInjected: header\r\n\r\n",
-        // Header with no colon (should be skipped)
-        "GET / HTTP/1.1\r\nMalformedHeaderLine\r\n\r\n",
-        // Null byte in path
-        "GET /\x00secret HTTP/1.1\r\n\r\n",
-        // Very long path (> 8KB header buffer)
-        "GET /" ++ ("a" ** 7000) ++ " HTTP/1.1\r\n\r\n",
-        // Very long header value
-        "GET / HTTP/1.1\r\nX-Custom: " ++ ("B" ** 7000) ++ "\r\n\r\n",
-        // Bare \n instead of \r\n
-        "GET / HTTP/1.1\nHost: x\n\n",
-        // No path at all
-        "GET HTTP/1.1\r\n\r\n",
-        // Method with no space
-        "GETHTTP/1.1\r\n\r\n",
-        // Percent-encoded path
-        "GET /users%2F42 HTTP/1.1\r\n\r\n",
-        // Query string with adversarial chars
-        "GET /search?q=%00&limit=-1&page=\xFF HTTP/1.1\r\n\r\n",
-    }});
+    try std.testing.fuzz({}, fuzz_requestLineParsing, .{
+        .corpus = &.{
+            // Minimal valid GET
+            "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            // Valid POST with body
+            "POST /items HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+            // Missing HTTP version token
+            "GET /\r\n\r\n",
+            // Empty method
+            " / HTTP/1.1\r\n\r\n",
+            // Huge Content-Length (parser must cap it)
+            "POST / HTTP/1.1\r\nContent-Length: 99999999999999999999\r\n\r\n",
+            // Negative Content-Length (parseInt → error → 0)
+            "POST / HTTP/1.1\r\nContent-Length: -1\r\n\r\n",
+            // CRLF injection attempt in header value
+            "GET / HTTP/1.1\r\nX-Header: value\r\nInjected: header\r\n\r\n",
+            // Header with no colon (should be skipped)
+            "GET / HTTP/1.1\r\nMalformedHeaderLine\r\n\r\n",
+            // Null byte in path
+            "GET /\x00secret HTTP/1.1\r\n\r\n",
+            // Very long path (> 8KB header buffer)
+            "GET /" ++ ("a" ** 7000) ++ " HTTP/1.1\r\n\r\n",
+            // Very long header value
+            "GET / HTTP/1.1\r\nX-Custom: " ++ ("B" ** 7000) ++ "\r\n\r\n",
+            // Bare \n instead of \r\n
+            "GET / HTTP/1.1\nHost: x\n\n",
+            // No path at all
+            "GET HTTP/1.1\r\n\r\n",
+            // Method with no space
+            "GETHTTP/1.1\r\n\r\n",
+            // Percent-encoded path
+            "GET /users%2F42 HTTP/1.1\r\n\r\n",
+            // Query string with adversarial chars
+            "GET /search?q=%00&limit=-1&page=\xFF HTTP/1.1\r\n\r\n",
+        },
+    });
 }

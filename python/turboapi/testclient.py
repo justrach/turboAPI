@@ -6,6 +6,7 @@ Uses the same interface as httpx/requests.
 
 import inspect
 import json
+import uuid
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -118,6 +119,7 @@ class TestClient:
         params: dict | None = None,
         json: Any = None,
         data: dict | None = None,
+        files: dict | None = None,
         headers: dict | None = None,
         cookies: dict | None = None,
         content: bytes | None = None,
@@ -125,23 +127,58 @@ class TestClient:
         """Execute a request against the app."""
         import asyncio
 
-        # Parse URL
         parsed = urlparse(url)
         path = parsed.path or "/"
         query_string = parsed.query or ""
 
-        # Add query params
         if params:
             if query_string:
                 query_string += "&" + urlencode(params)
             else:
                 query_string = urlencode(params)
 
-        # Build request body
         body = b""
         request_headers = dict(headers or {})
 
-        if json is not None:
+        if files is not None:
+            boundary = f"----TurboAPIBoundary{uuid.uuid4().hex[:16]}"
+            parts = []
+            for field_name, file_info in files.items():
+                if isinstance(file_info, tuple):
+                    filename, file_content = file_info
+                    if isinstance(file_content, str):
+                        file_content = file_content.encode("utf-8")
+                    file_ct = "application/octet-stream"
+                    if len(file_info) > 2:
+                        file_ct = file_info[2]
+                elif isinstance(file_info, dict):
+                    filename = file_info.get("filename", "upload")
+                    file_content = file_info.get("content", b"")
+                    if isinstance(file_content, str):
+                        file_content = file_content.encode("utf-8")
+                    file_ct = file_info.get("content_type", "application/octet-stream")
+                else:
+                    filename = "upload"
+                    file_content = file_info
+                    file_ct = "application/octet-stream"
+                parts.append(
+                    f"--{boundary}\r\n".encode()
+                    + f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode()
+                    + f"Content-Type: {file_ct}\r\n\r\n".encode()
+                    + file_content
+                    + b"\r\n"
+                )
+            if data:
+                for k, v in data.items():
+                    parts.append(
+                        f"--{boundary}\r\n".encode()
+                        + f'Content-Disposition: form-data; name="{k}"\r\n\r\n'.encode()
+                        + str(v).encode("utf-8")
+                        + b"\r\n"
+                    )
+            body = b"".join(parts) + f"--{boundary}--\r\n".encode()
+            request_headers.setdefault("content-type", f"multipart/form-data; boundary={boundary}")
+        elif json is not None:
             import json as json_module
 
             body = json_module.dumps(json).encode("utf-8")
@@ -161,12 +198,12 @@ class TestClient:
             request_headers["cookie"] = cookie_str
 
         # Issue #104: Check mounted apps (e.g. StaticFiles) before route matching
-        if hasattr(self.app, '_mounts'):
+        if hasattr(self.app, "_mounts"):
             for mount_path, mount_info in self.app._mounts.items():
                 if path.startswith(mount_path + "/") or path == mount_path:
-                    sub_path = path[len(mount_path):]
+                    sub_path = path[len(mount_path) :]
                     mounted_app = mount_info["app"]
-                    if hasattr(mounted_app, 'get_file'):
+                    if hasattr(mounted_app, "get_file"):
                         result = mounted_app.get_file(sub_path)
                         if result is not None:
                             content_bytes, content_type, size = result
@@ -177,17 +214,26 @@ class TestClient:
                             )
 
         # Issue #102: Serve docs and openapi URLs
-        if hasattr(self.app, 'openapi_url') and self.app.openapi_url and path == self.app.openapi_url:
+        if (
+            hasattr(self.app, "openapi_url")
+            and self.app.openapi_url
+            and path == self.app.openapi_url
+        ):
             import json as json_module
+
             schema = self.app.openapi()
             body = json_module.dumps(schema).encode("utf-8")
-            return TestResponse(status_code=200, content=body, headers={"content-type": "application/json"})
+            return TestResponse(
+                status_code=200, content=body, headers={"content-type": "application/json"}
+            )
 
-        if hasattr(self.app, 'docs_url') and self.app.docs_url and path == self.app.docs_url:
+        if hasattr(self.app, "docs_url") and self.app.docs_url and path == self.app.docs_url:
             html = f"""<!DOCTYPE html>
 <html><head><title>{self.app.title} - Swagger UI</title></head>
 <body><div id="swagger-ui"></div></body></html>"""
-            return TestResponse(status_code=200, content=html.encode("utf-8"), headers={"content-type": "text/html"})
+            return TestResponse(
+                status_code=200, content=html.encode("utf-8"), headers={"content-type": "text/html"}
+            )
 
         # Find matching route
         route, path_params = self._find_route(method.upper(), path)
@@ -195,9 +241,9 @@ class TestClient:
             return TestResponse(status_code=404, content=b'{"detail":"Not Found"}')
 
         # Issue #103: Enforce router-level dependencies
-        if hasattr(route, 'dependencies') and route.dependencies:
+        if hasattr(route, "dependencies") and route.dependencies:
             for dep in route.dependencies:
-                dep_fn = dep.dependency if hasattr(dep, 'dependency') else dep
+                dep_fn = dep.dependency if hasattr(dep, "dependency") else dep
                 if dep_fn is not None:
                     try:
                         if inspect.iscoroutinefunction(dep_fn):
@@ -289,7 +335,7 @@ class TestClient:
                 result = handler(**kwargs)
         except Exception as e:
             # Issue #100: Check registered custom exception handlers first
-            if hasattr(self.app, '_exception_handlers'):
+            if hasattr(self.app, "_exception_handlers"):
                 for exc_class, exc_handler in self.app._exception_handlers.items():
                     if isinstance(e, exc_class):
                         result = exc_handler(None, e)
