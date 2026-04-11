@@ -6,6 +6,8 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * 1'
 
 permissions:
   issues: write
@@ -41,12 +43,27 @@ jobs:
       - name: Install wrk
         run: sudo apt-get update && sudo apt-get install -y wrk
 
-      - name: Run regression benchmark
+      - name: Run regression benchmark (PR - quick)
+        if: github.event_name == 'pull_request'
         run: uv run --python 3.14t python benchmarks/bench_regression.py --ci
         env:
           BENCH_THREADS: 4
           BENCH_CONNECTIONS: 100
+          BENCH_DURATION: 5
+          BENCH_RUNNER: "ci-pr"
+          BENCH_VCPUS: "2"
+          BENCH_OS: "ubuntu-latest"
+
+      - name: Run regression benchmark (main - full)
+        if: github.ref == 'refs/heads/main'
+        run: uv run --python 3.14t python benchmarks/bench_regression.py --save --history
+        env:
+          BENCH_THREADS: 4
+          BENCH_CONNECTIONS: 100
           BENCH_DURATION: 10
+          BENCH_RUNNER: "ci-main"
+          BENCH_VCPUS: "2"
+          BENCH_OS: "ubuntu-latest"
 
       - name: Post PR comment with results
         if: github.event_name == 'pull_request'
@@ -67,10 +84,9 @@ jobs:
               body: comment,
             });
 
-      - name: Update baseline on main
+      - name: Commit baseline + history on main
         if: github.ref == 'refs/heads/main'
         run: |
-          uv run --python 3.14t python benchmarks/bench_regression.py --save --history
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add benchmarks/baseline.json benchmarks/history/
@@ -85,3 +101,39 @@ jobs:
           path: |
             /tmp/bench_results.json
             /tmp/bench_pr_comment.md
+
+  fastapi-comparison:
+    name: "TurboAPI vs FastAPI weekly"
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.14t (free-threaded)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14t'
+          allow-prereleases: true
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build turbonet extension
+        run: python zig/build_turbonet.py --install --release
+
+      - name: Install deps
+        run: |
+          pip install -e .
+          pip install uv fastapi pydantic
+
+      - name: Run FastAPI comparison
+        run: uv run --python 3.14t python benchmarks/bench_throughput.py
+
+      - name: Upload comparison results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastapi-comparison-results
+          path: /tmp/bench_results.json
