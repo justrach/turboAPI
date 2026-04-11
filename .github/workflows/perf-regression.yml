@@ -10,7 +10,7 @@ on:
 jobs:
   regression:
     name: "HTTP regression gate"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-4core
     steps:
       - uses: actions/checkout@v4
 
@@ -38,6 +38,10 @@ jobs:
 
       - name: Run regression benchmark
         run: uv run --python 3.14t python benchmarks/bench_regression.py --ci
+        env:
+          BENCH_THREADS: 4
+          BENCH_CONNECTIONS: 100
+          BENCH_DURATION: 10
 
       - name: Post PR comment with results
         if: github.event_name == 'pull_request'

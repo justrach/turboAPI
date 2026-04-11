@@ -26,9 +26,9 @@ HISTORY_DIR = os.path.join(BENCH_DIR, "history")
 RESULTS_FILE = "/tmp/bench_results.json"
 PR_COMMENT_FILE = "/tmp/bench_pr_comment.md"
 
-DURATION = 10
-THREADS = 4
-CONNECTIONS = 100
+DURATION = int(os.environ.get("BENCH_DURATION", "10"))
+THREADS = int(os.environ.get("BENCH_THREADS", "4"))
+CONNECTIONS = int(os.environ.get("BENCH_CONNECTIONS", "100"))
 
 SERVER_CODE = """
 from turboapi import TurboAPI, JSONResponse
@@ -127,23 +127,31 @@ def load_thresholds_config():
     return {"margin_pct": 10, "average_threshold_rps": 130000, "endpoints": {}}
 
 
-def load_thresholds():
+def load_thresholds(ci_mode=False):
     config = load_thresholds_config()
     endpoint_thresholds = {}
+
+    if ci_mode and "ci" in config:
+        active = config["ci"]
+    else:
+        active = config
+
+    margin = active.get("margin_pct", config.get("margin_pct", 10)) / 100.0
 
     if os.path.exists(BASELINE_FILE):
         with open(BASELINE_FILE) as f:
             baseline = json.load(f)
-        margin = config.get("margin_pct", 10) / 100.0
         for k, v in baseline.items():
             endpoint_thresholds[k] = int(v * (1 - margin))
 
-    for k, v in config.get("endpoints", {}).items():
+    for k, v in active.get("endpoints", {}).items():
         min_rps = v.get("min_rps", 0)
         if k not in endpoint_thresholds or min_rps > endpoint_thresholds[k]:
             endpoint_thresholds[k] = min_rps
 
-    return endpoint_thresholds, config.get("average_threshold_rps", 130000)
+    return endpoint_thresholds, active.get(
+        "average_threshold_rps", config.get("average_threshold_rps", 130000)
+    )
 
 
 def save_history(results):
@@ -228,7 +236,7 @@ def main():
     print(f"{'Endpoint':<25} {'req/s':>10} {'avg':>8} {'p99':>8} {'status':>8}")
     print("-" * 65)
 
-    thresholds, avg_threshold = load_thresholds()
+    thresholds, avg_threshold = load_thresholds(ci_mode=ci_mode)
     regressions = []
 
     for name, path, method, body in BENCHMARKS:
