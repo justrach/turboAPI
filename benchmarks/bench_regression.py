@@ -138,11 +138,12 @@ def load_thresholds(ci_mode=False):
 
     margin = active.get("margin_pct", config.get("margin_pct", 10)) / 100.0
 
-    if os.path.exists(BASELINE_FILE):
-        with open(BASELINE_FILE) as f:
-            baseline = json.load(f)
-        for k, v in baseline.items():
-            endpoint_thresholds[k] = int(v * (1 - margin))
+    if not (ci_mode and "ci" in config):
+        if os.path.exists(BASELINE_FILE):
+            with open(BASELINE_FILE) as f:
+                baseline = json.load(f)
+            for k, v in baseline.items():
+                endpoint_thresholds[k] = int(v * (1 - margin))
 
     for k, v in active.get("endpoints", {}).items():
         min_rps = v.get("min_rps", 0)
