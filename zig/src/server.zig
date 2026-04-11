@@ -114,6 +114,8 @@ const HandlerType = enum(u8) {
     simple_sync,
     model_sync,
     body_sync,
+    form_sync,
+    file_sync,
     enhanced,
 };
 
@@ -122,6 +124,8 @@ fn parseHandlerType(s: []const u8) HandlerType {
     if (std.mem.eql(u8, s, "simple_sync")) return .simple_sync;
     if (std.mem.eql(u8, s, "model_sync")) return .model_sync;
     if (std.mem.eql(u8, s, "body_sync")) return .body_sync;
+    if (std.mem.eql(u8, s, "form_sync")) return .form_sync;
+    if (std.mem.eql(u8, s, "file_sync")) return .file_sync;
     return .enhanced;
 }
 
@@ -1107,10 +1111,11 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     }
 
     // DHI validation for model_sync — single parse, retain tree
+    // Skip for form/file routes (body is multipart/urlencoded, not JSON)
     var cached_parse: ?std.json.Parsed(std.json.Value) = null;
     defer if (cached_parse) |*cp| cp.deinit();
 
-    if (body.len > 0) {
+    if (body.len > 0 and entry.handler_tag != .form_sync and entry.handler_tag != .file_sync) {
         const ms = getModelSchemas();
         if (ms.get(match.handler_key)) |schema| {
             const vr = dhi.validateJsonRetainParsed(body, &schema);
@@ -1144,6 +1149,11 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         },
         .body_sync => {
             callPythonHandlerDirect(tstate, entry, query_string, body, &match.params, stream);
+        },
+        .form_sync, .file_sync => {
+            const resp = callPythonHandler(tstate, entry, method, path, query_string, body, headers.items, &match.params);
+            defer resp.deinit();
+            sendResponse(stream, resp.status_code, resp.content_type, resp.body);
         },
         .enhanced => {
             const resp = callPythonHandler(tstate, entry, method, path, query_string, body, headers.items, &match.params);
