@@ -577,7 +577,6 @@ class ResponseHandler:
         return ResponseHandler.format_response(content, status_code, content_type)
 
 
-
 _json_dumps = __import__("json").dumps
 
 
@@ -636,6 +635,7 @@ def create_enhanced_handler(original_handler, route_definition):
     _param_names = set(sig.parameters.keys())
     _has_dependencies = False
     _has_header_params = False
+    _has_form_params = False
     from turboapi.datastructures import Header
 
     try:
@@ -644,17 +644,31 @@ def create_enhanced_handler(original_handler, route_definition):
         _has_security = True
     except ImportError:
         _has_security = False
+    try:
+        from turboapi.datastructures import File, Form
+        from turboapi.datastructures import UploadFile as _UploadFile
+
+        _has_form_types = True
+    except ImportError:
+        _has_form_types = False
+
     for pname, param in sig.parameters.items():
         if isinstance(param.default, Header):
             _has_header_params = True
+        elif _has_form_types and isinstance(param.default, (Form, File)):
+            _has_form_params = True
+        elif (
+            _has_form_types
+            and param.annotation is _UploadFile
+            or (isinstance(param.annotation, type) and issubclass(param.annotation, _UploadFile))
+        ):
+            _has_form_params = True
         elif not (
             _has_security
             and (
-                isinstance(param.default, (Depends, SecurityBase))
-                or get_depends(param) is not None
+                isinstance(param.default, (Depends, SecurityBase)) or get_depends(param) is not None
             )
         ):
-            # Plain param (no explicit non-header marker) — may be an implicit header
             _has_header_params = True
         if _has_security and (
             isinstance(param.default, (Depends, SecurityBase)) or get_depends(param) is not None
@@ -691,11 +705,66 @@ def create_enhanced_handler(original_handler, route_definition):
                         header_params = HeaderParser.parse_headers(headers_dict, sig)
                         parsed_params.update(header_params)
 
-                # 4. Parse request body (JSON)
+                # 3.5. Resolve Form / File / UploadFile parameters from Zig-parsed data
+                _form_fields = kwargs.get("form_fields", {})
+                _file_fields = kwargs.get("file_fields", [])
+                if _has_form_params:
+                    for pname, param in sig.parameters.items():
+                        if _has_form_types and isinstance(param.default, Form):
+                            key = param.default.alias or pname
+                            if key in _form_fields:
+                                parsed_params[pname] = _form_fields[key]
+                            elif param.default.default is not ...:
+                                parsed_params[pname] = param.default.default
+                        elif _has_form_types and isinstance(param.default, File):
+                            key = param.default.alias or pname
+                            matched = None
+                            for ff in _file_fields:
+                                if ff.get("name") == key:
+                                    matched = ff
+                                    break
+                            if matched:
+                                uf = _UploadFile(
+                                    filename=matched.get("filename"),
+                                    content_type=matched.get(
+                                        "content_type", "application/octet-stream"
+                                    ),
+                                    size=len(matched.get("body", b"")),
+                                )
+                                uf.file.write(matched.get("body", b""))
+                                uf.file.seek(0)
+                                parsed_params[pname] = uf
+                            elif param.default.default is not ...:
+                                parsed_params[pname] = param.default.default
+                        elif _has_form_types and (
+                            param.annotation is _UploadFile
+                            or (
+                                isinstance(param.annotation, type)
+                                and issubclass(param.annotation, _UploadFile)
+                            )
+                        ):
+                            key = pname
+                            matched = None
+                            for ff in _file_fields:
+                                if ff.get("name") == key:
+                                    matched = ff
+                                    break
+                            if matched:
+                                uf = _UploadFile(
+                                    filename=matched.get("filename"),
+                                    content_type=matched.get(
+                                        "content_type", "application/octet-stream"
+                                    ),
+                                    size=len(matched.get("body", b"")),
+                                )
+                                uf.file.write(matched.get("body", b""))
+                                uf.file.seek(0)
+                                parsed_params[pname] = uf
+
+                # 4. Parse request body (JSON) — skip if form data was already parsed
                 if "body" in kwargs:
                     body_data = kwargs["body"]
-
-                    if body_data:  # Only parse if body is not empty
+                    if body_data and not (_form_fields or _file_fields):
                         parsed_body = RequestBodyParser.parse_json_body(body_data, sig)
                         # Merge parsed body params (body params take precedence)
                         parsed_params.update(parsed_body)
@@ -793,9 +862,65 @@ def create_enhanced_handler(original_handler, route_definition):
                         header_params = HeaderParser.parse_headers(headers_dict, sig)
                         parsed_params.update(header_params)
 
-                # 4. Parse request body (JSON)
+                # 3.5. Resolve Form / File / UploadFile parameters from Zig-parsed data
+                _form_fields = kwargs.get("form_fields", {})
+                _file_fields = kwargs.get("file_fields", [])
+                if _has_form_params:
+                    for pname, param in sig.parameters.items():
+                        if _has_form_types and isinstance(param.default, Form):
+                            key = param.default.alias or pname
+                            if key in _form_fields:
+                                parsed_params[pname] = _form_fields[key]
+                            elif param.default.default is not ...:
+                                parsed_params[pname] = param.default.default
+                        elif _has_form_types and isinstance(param.default, File):
+                            key = param.default.alias or pname
+                            matched = None
+                            for ff in _file_fields:
+                                if ff.get("name") == key:
+                                    matched = ff
+                                    break
+                            if matched:
+                                uf = _UploadFile(
+                                    filename=matched.get("filename"),
+                                    content_type=matched.get(
+                                        "content_type", "application/octet-stream"
+                                    ),
+                                    size=len(matched.get("body", b"")),
+                                )
+                                uf.file.write(matched.get("body", b""))
+                                uf.file.seek(0)
+                                parsed_params[pname] = uf
+                            elif param.default.default is not ...:
+                                parsed_params[pname] = param.default.default
+                        elif _has_form_types and (
+                            param.annotation is _UploadFile
+                            or (
+                                isinstance(param.annotation, type)
+                                and issubclass(param.annotation, _UploadFile)
+                            )
+                        ):
+                            key = pname
+                            matched = None
+                            for ff in _file_fields:
+                                if ff.get("name") == key:
+                                    matched = ff
+                                    break
+                            if matched:
+                                uf = _UploadFile(
+                                    filename=matched.get("filename"),
+                                    content_type=matched.get(
+                                        "content_type", "application/octet-stream"
+                                    ),
+                                    size=len(matched.get("body", b"")),
+                                )
+                                uf.file.write(matched.get("body", b""))
+                                uf.file.seek(0)
+                                parsed_params[pname] = uf
+
+                # 4. Parse request body (JSON) — skip if form data was already parsed
                 body_data = kwargs.get("body", b"")
-                if body_data:
+                if body_data and not (_form_fields or _file_fields):
                     parsed_body = RequestBodyParser.parse_json_body(body_data, sig)
                     parsed_params.update(parsed_body)
 
@@ -857,6 +982,7 @@ def create_enhanced_handler(original_handler, route_definition):
                 )
 
         return enhanced_handler
+
 
 def create_pos_handler(original_handler):
     """Minimal positional wrapper for PyObject_Vectorcall dispatch.
