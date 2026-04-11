@@ -1,0 +1,12 @@
+{
+  "margin_pct": 10,
+  "average_threshold_rps": 130000,
+  "endpoints": {
+    "GET /health": { "min_rps": 130000 },
+    "GET /": { "min_rps": 125000 },
+    "GET /json": { "min_rps": 125000 },
+    "GET /users/123": { "min_rps": 125000 },
+    "POST /items": { "min_rps": 110000 },
+    "GET /status201": { "min_rps": 125000 }
+  }
+}
