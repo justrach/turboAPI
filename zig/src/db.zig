@@ -8,6 +8,7 @@ const py = @import("py.zig");
 const c = py.c;
 const router_mod = @import("turboapi-core").router;
 const dhi = @import("dhi_validator.zig");
+const logger = @import("logger.zig");
 
 // GIL release shim (C functions to avoid opaque PyThreadState in Zig cimport)
 extern fn py_gil_save() ?*anyopaque;
@@ -68,7 +69,7 @@ fn isDbCacheEnabled() bool {
         if (std.posix.getenv("TURBO_DISABLE_DB_CACHE")) |val| {
             if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
                 db_cache_enabled = false;
-                std.debug.print("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE\n", .{});
+                logger.info("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE", .{});
             }
         }
     }
@@ -1167,18 +1168,18 @@ pub fn db_configure(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         return null;
     };
 
-    std.debug.print("[DB] Pool initialized: {d} connections to {s}\n", .{ size, uri_str });
+    logger.info("[DB] Pool initialized: {d} connections to {s}", .{ size, uri_str });
 
     // Auto-check env vars for cache control
     if (std.posix.getenv("TURBO_DISABLE_DB_CACHE")) |val| {
         if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
             db_cache_enabled = false;
-            std.debug.print("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE\n", .{});
+            logger.info("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE", .{});
         }
     }
     if (std.posix.getenv("TURBO_DB_CACHE_TTL")) |val| {
         db_cache_ttl = std.fmt.parseInt(i64, val, 10) catch 30;
-        std.debug.print("[DB] Cache TTL set to {d}s\n", .{db_cache_ttl});
+        logger.info("[DB] Cache TTL set to {d}s", .{db_cache_ttl});
     }
 
     return py.pyNone();
@@ -1189,12 +1190,12 @@ pub fn db_check_cache_env(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyO
     if (std.posix.getenv("TURBO_DISABLE_DB_CACHE")) |val| {
         if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
             db_cache_enabled = false;
-            std.debug.print("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE\n", .{});
+            logger.info("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE", .{});
         }
     }
     if (std.posix.getenv("TURBO_DB_CACHE_TTL")) |val| {
         db_cache_ttl = std.fmt.parseInt(i64, val, 10) catch 30;
-        std.debug.print("[DB] Cache TTL set to {d}s\n", .{db_cache_ttl});
+        logger.info("[DB] Cache TTL set to {d}s", .{db_cache_ttl});
     }
     return py.pyNone();
 }
@@ -1314,7 +1315,7 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     const rt = @import("server.zig").getRouter();
     rt.addRoute(method_s, path_s, key) catch return null;
 
-    std.debug.print("[DB] Registered: {s} {s} -> {s}.{s} ({s})\n", .{ method_s, path_s, table_s, if (pk_col) |pk| pk else "*", op_s });
+    logger.debug("[DB] Registered: {s} {s} -> {s}.{s} ({s})", .{ method_s, path_s, table_s, if (pk_col) |pk| pk else "*", op_s });
     return py.pyNone();
 }
 
@@ -1353,7 +1354,6 @@ pub fn db_exec_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObjec
     }
     return py.pyNone();
 }
-
 
 // ── Raw query API (no HTTP, direct pg.zig from Python) ──────────────────────
 
@@ -1788,8 +1788,14 @@ pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
                 c.PyTuple_GetItem(row_obj, @intCast(ci))
             else
                 c.PyList_GetItem(row_obj, @intCast(ci));
-            if (item == null) { val_lens[cell_idx] = 0; continue; }
-            const str_obj = c.PyObject_Str(item.?) orelse { val_lens[cell_idx] = 0; continue; };
+            if (item == null) {
+                val_lens[cell_idx] = 0;
+                continue;
+            }
+            const str_obj = c.PyObject_Str(item.?) orelse {
+                val_lens[cell_idx] = 0;
+                continue;
+            };
             defer c.Py_DecRef(str_obj);
             if (c.PyUnicode_AsUTF8(str_obj)) |cs| {
                 const s = std.mem.span(cs);

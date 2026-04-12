@@ -10,6 +10,8 @@ const router_mod = core.router;
 const dhi = @import("dhi_validator.zig");
 const db = @import("db.zig");
 const multipart_mod = @import("multipart.zig");
+const logger = @import("logger.zig");
+const telemetry = @import("telemetry.zig");
 
 const allocator = std.heap.c_allocator;
 
@@ -340,6 +342,8 @@ pub fn server_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
     _ = getRoutes();
     _ = getNativeRoutes();
     _ = getStaticRoutes();
+
+    telemetry.init();
     _ = getResponseCache();
     _ = getModelSchemas();
     _ = getRouter();
@@ -496,7 +500,7 @@ pub fn server_add_route_model_validated(_: ?*c.PyObject, args: ?*c.PyObject) cal
     const schema_s = std.mem.span(schema_json);
     if (dhi.parseSchema(schema_s)) |schema| {
         getModelSchemas().put(key, schema) catch {};
-        std.debug.print("[DHI] Registered schema for {s}: {d} fields\n", .{ key, schema.fields.len });
+        logger.debug("[DHI] Registered schema for {s}: {d} fields", .{ key, schema.fields.len });
     }
 
     return py.pyNone();
@@ -579,7 +583,7 @@ pub fn server_add_native_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c)
         return null;
     };
 
-    std.debug.print("[FFI] Registered native handler: {s} {s} -> {s}:{s}\n", .{ method_s, path_s, lib_path_s, symbol_name_s });
+    logger.debug("[FFI] Registered native handler: {s} {s} -> {s}:{s}", .{ method_s, path_s, lib_path_s, symbol_name_s });
     return py.pyNone();
 }
 
@@ -619,7 +623,7 @@ pub fn server_add_static_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c)
     };
     getRouter().addRoute(method_s, path_s, key) catch return null;
 
-    std.debug.print("[STATIC] Registered: {s} {s} -> {d} ({d} bytes pre-rendered)\n", .{ method_s, path_s, st, response_bytes.len });
+    logger.debug("[STATIC] Registered: {s} {s} -> {d} ({d} bytes pre-rendered)", .{ method_s, path_s, st, response_bytes.len });
     return py.pyNone();
 }
 
@@ -667,7 +671,7 @@ pub fn server_configure_cors(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?
     ) catch return null;
     cors_enabled = true;
 
-    std.debug.print("[CORS] Zig-native CORS enabled: origin={s} methods={s}\n", .{ origins_s, methods_s });
+    logger.info("[CORS] Zig-native CORS enabled: origin={s} methods={s}", .{ origins_s, methods_s });
     return py.pyNone();
 }
 
@@ -686,12 +690,12 @@ pub fn server_enable_response_cache(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.
     if (std.posix.getenv("TURBO_DISABLE_RESPONSE_CACHE")) |val| {
         if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
             cache_noargs_responses = false;
-            std.debug.print("[CACHE] Response caching DISABLED via TURBO_DISABLE_RESPONSE_CACHE\n", .{});
+            logger.info("[CACHE] Response caching DISABLED via TURBO_DISABLE_RESPONSE_CACHE", .{});
             return py.pyNone();
         }
     }
     cache_noargs_responses = true;
-    std.debug.print("[CACHE] Response caching enabled for noargs handlers\n", .{});
+    logger.info("[CACHE] Response caching enabled for noargs handlers", .{});
     return py.pyNone();
 }
 
@@ -820,8 +824,8 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     // but py_interp is set before SaveThread so there's no race).
     pool.init(thread_count);
 
-    std.debug.print("🚀 TurboNet-Zig server listening on {s}:{d}\n", .{ server_host, server_port });
-    std.debug.print("🎯 Zig HTTP core active – {d}-thread pool, per-worker tstate!\n", .{pool.thread_count});
+    logger.info("TurboNet-Zig server listening on {s}:{d}", .{ server_host, server_port });
+    logger.info("Zig HTTP core active – {d}-thread pool, per-worker tstate!", .{pool.thread_count});
 
     // Release the GIL — workers acquire it per-request via AcquireThread.
     const save = py.PyEval_SaveThread();
@@ -915,7 +919,7 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     // can skip the expensive parseHeaders + body read entirely.
     const rt = getRouter();
     var match = rt.findRoute(method, path) orelse {
-        std.debug.print("[ZIG] 404 for {s} {s}\n", .{ method, path });
+        logger.debug("[ZIG] 404 for {s} {s}", .{ method, path });
         sendResponse(stream, 404, "application/json", "{\"error\": \"Not Found\"}");
         return;
     };
@@ -1005,7 +1009,7 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     // Python handler lookup
     const r = getRoutes();
     const entry = r.get(match.handler_key) orelse {
-        std.debug.print("[ZIG] handler entry missing for key: {s}\n", .{match.handler_key});
+        logger.warn("[ZIG] handler entry missing for key: {s}", .{match.handler_key});
         sendResponse(stream, 500, "application/json", "{\"error\": \"Internal Server Error\"}");
         return;
     };
@@ -1101,7 +1105,7 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         var body_read: usize = already_read_body.len;
         while (body_read < content_length) {
             const n = stream.read(full_body[body_read..content_length]) catch |err| {
-                std.debug.print("[ZIG] body read error: {}\n", .{err});
+                logger.err("[ZIG] body read error: {}", .{err});
                 return;
             };
             if (n == 0) break;
@@ -1125,7 +1129,7 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
                 },
                 .err => |ve| {
                     defer ve.deinit();
-                    std.debug.print("[DHI] validation failed for {s}\n", .{match.handler_key});
+                    logger.warn("[DHI] validation failed for {s}", .{match.handler_key});
                     sendResponse(stream, ve.status_code, "application/json", ve.body);
                     return;
                 },
