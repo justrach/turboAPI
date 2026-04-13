@@ -272,9 +272,8 @@ fn joinPath(parent: []const u8, child: []const u8) []const u8 {
 /// Parse a JSON schema descriptor (from Python) into a ModelSchema.
 pub fn parseSchema(schema_json: []const u8) ?ModelSchema {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, schema_json, .{}) catch return null;
-    const result = parseSchemaValue(parsed.value);
-    if (result == null) parsed.deinit();
-    return result;
+    defer parsed.deinit();
+    return parseSchemaValue(parsed.value);
 }
 
 fn parseSchemaValue(root: std.json.Value) ?ModelSchema {

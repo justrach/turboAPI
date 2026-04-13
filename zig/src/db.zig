@@ -490,10 +490,10 @@ pub fn handleDbRoute(
             if (query_string.len > 0) {
                 var qs_iter = std.mem.splitScalar(u8, query_string, '&');
                 while (qs_iter.next()) |pair| {
-                    if (std.mem.indexOf(u8, pair, "limit=")) |idx| {
-                        limit = pair[idx + 6 ..];
-                    } else if (std.mem.indexOf(u8, pair, "offset=")) |idx| {
-                        offset = pair[idx + 7 ..];
+                    if (std.mem.startsWith(u8, pair, "limit=")) {
+                        limit = pair[6..];
+                    } else if (std.mem.startsWith(u8, pair, "offset=")) {
+                        offset = pair[7..];
                     }
                 }
             }
@@ -595,6 +595,7 @@ pub fn handleDbRoute(
                 },
             };
 
+            var num_bufs: [16][64]u8 = undefined;
             var values: [16][]const u8 = undefined;
             const ncols = @min(entry.columns.len, 16);
 
@@ -602,8 +603,8 @@ pub fn handleDbRoute(
                 if (obj.get(col)) |val| {
                     values[i] = switch (val) {
                         .string => |s| s,
-                        .integer => |n| std.fmt.allocPrint(allocator, "{d}", .{n}) catch "",
-                        .float => |f| std.fmt.allocPrint(allocator, "{d}", .{f}) catch "",
+                        .integer => |n| std.fmt.bufPrint(&num_bufs[i], "{d}", .{n}) catch "",
+                        .float => |f| std.fmt.bufPrint(&num_bufs[i], "{d}", .{f}) catch "",
                         .bool => |b| if (b) "true" else "false",
                         .null => "null",
                         else => "",
@@ -1357,7 +1358,7 @@ pub fn db_exec_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObjec
 
 // ── Raw query API (no HTTP, direct pg.zig from Python) ──────────────────────
 
-const RawCell = struct { start: u32, len: u16, is_null: bool, oid: i32 };
+const RawCell = struct { start: u32, len: u32, is_null: bool, oid: i32 };
 const MAX_RAW_CELLS = 32768;
 pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var sql_ptr: [*c]const u8 = null;
@@ -1384,15 +1385,14 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
                 const item = c.PyList_GetItem(plist, @intCast(i));
                 if (item == null) continue;
                 // Handle bools specially (Python str(True) = "True", pg.zig needs "true")
-                if (c.Py_IsTrue(item) != 0) {
-                    @memcpy(param_bufs[param_count][0..4], "true");
-                    param_values[param_count] = param_bufs[param_count][0..4];
-                    param_count += 1;
-                    continue;
-                }
-                if (c.Py_IsFalse(item) != 0) {
-                    @memcpy(param_bufs[param_count][0..5], "false");
-                    param_values[param_count] = param_bufs[param_count][0..5];
+                if (c.PyBool_Check(item) != 0) {
+                    if (c.Py_IsTrue(item) != 0) {
+                        @memcpy(param_bufs[param_count][0..4], "true");
+                        param_values[param_count] = param_bufs[param_count][0..4];
+                    } else {
+                        @memcpy(param_bufs[param_count][0..5], "false");
+                        param_values[param_count] = param_bufs[param_count][0..5];
+                    }
                     param_count += 1;
                     continue;
                 }
