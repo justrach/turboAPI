@@ -247,10 +247,7 @@ class TestClient:
                 if dep_fn is not None:
                     try:
                         if inspect.iscoroutinefunction(dep_fn):
-                            try:
-                                asyncio.get_event_loop().run_until_complete(dep_fn())
-                            except RuntimeError:
-                                asyncio.run(dep_fn())
+                            asyncio.run(dep_fn())
                         else:
                             dep_fn()
                     except Exception as dep_exc:
@@ -314,10 +311,7 @@ class TestClient:
                 if dep is not None and dep.dependency is not None:
                     dep_fn = dep.dependency
                     if inspect.iscoroutinefunction(dep_fn):
-                        try:
-                            kwargs[param_name] = asyncio.run(dep_fn())
-                        except RuntimeError:
-                            kwargs[param_name] = dep_fn()
+                        kwargs[param_name] = asyncio.run(dep_fn())
                     else:
                         kwargs[param_name] = dep_fn()
         except ImportError:
@@ -326,11 +320,7 @@ class TestClient:
         # Call handler
         try:
             if inspect.iscoroutinefunction(handler):
-                try:
-                    loop = asyncio.get_running_loop()
-                    result = loop.run_until_complete(handler(**kwargs))
-                except RuntimeError:
-                    result = asyncio.run(handler(**kwargs))
+                result = asyncio.run(handler(**kwargs))
             else:
                 result = handler(**kwargs)
         except Exception as e:
@@ -340,10 +330,7 @@ class TestClient:
                     if isinstance(e, exc_class):
                         result = exc_handler(None, e)
                         if inspect.isawaitable(result):
-                            try:
-                                result = asyncio.get_event_loop().run_until_complete(result)
-                            except RuntimeError:
-                                result = asyncio.run(result)
+                            result = asyncio.run(result)
                         return self._build_response(result)
             # Check for HTTPException
             if hasattr(e, "status_code") and hasattr(e, "detail"):
