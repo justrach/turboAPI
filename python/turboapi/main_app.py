@@ -373,14 +373,14 @@ class TurboAPI(Router):
                 message = await receive()
                 if message["type"] == "lifespan.startup":
                     if lifespan_cm is not None:
-                        await lifespan_cm.__anext__()
+                        await lifespan_cm.__aenter__()
                     if self.startup_handlers:
                         await self._run_startup_handlers()
                     await send({"type": "lifespan.startup.complete"})
                 elif message["type"] == "lifespan.shutdown":
                     if lifespan_cm is not None:
                         try:
-                            await lifespan_cm.__anext__()
+                            await lifespan_cm.__aexit__(None, None, None)
                         except StopAsyncIteration:
                             pass
                     if self.shutdown_handlers:
