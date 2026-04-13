@@ -138,7 +138,7 @@ class Router:
                 request_model = None
 
                 for param_name, param in sig.parameters.items():
-                    if param_name in path:
+                    if f"{{{param_name}}}" in path:
                         # Path parameter
                         path_param = PathParameter(
                             name=param_name,

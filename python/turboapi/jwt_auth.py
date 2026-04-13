@@ -149,7 +149,6 @@ def create_refresh_token(
 
     key = settings.private_key or settings.secret_key
     return _jwt.encode(payload, key, algorithm=settings.algorithm)  # type: ignore[union-attr]
-    return _jwt.encode(payload, key, algorithm=settings.algorithm)
 
 
 # ---------------------------------------------------------------------------

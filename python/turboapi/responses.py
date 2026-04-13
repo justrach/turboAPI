@@ -26,11 +26,11 @@ class Response:
     ):
         self.status_code = status_code
         self.headers = headers or {}
+        self._cookies: list[str] = []
         if media_type is not None:
             self.media_type = media_type
         self._content = content  # Store original content for model_dump
         self.body = self._render(content)
-
     def _render(self, content: Any) -> bytes:
         if content is None:
             return b""
@@ -74,7 +74,7 @@ class Response:
             cookie += "; HttpOnly"
         if samesite:
             cookie += f"; SameSite={samesite}"
-        self.headers.setdefault("set-cookie", cookie)
+        self._cookies.append(cookie)
 
     def delete_cookie(self, key: str, path: str = "/", domain: str | None = None) -> None:
         """Delete a cookie."""
