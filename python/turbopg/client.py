@@ -135,12 +135,15 @@ class Database:
             "For zero-overhead queries, use TurboAPI's db_query/db_get decorators instead."
         )
     def _execute_native(self, sql: str, params: list) -> int:
+        if hasattr(self._native, "_db_exec_raw"):
+            return self._native._db_exec_raw(sql, params)
         if self._fallback_engine:
             return self._execute_fallback(sql, params)
         raise NotImplementedError(
             "Standalone TurboPG execute requires psycopg2-binary. "
             "Install it: pip install psycopg2-binary"
         )
+
     def _query_fallback(self, sql: str, params: list) -> list[dict]:
         """Query via Python DB driver (psycopg2/psycopg)."""
         # Convert $1, $2, ... to %s for psycopg2
