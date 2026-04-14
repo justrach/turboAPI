@@ -487,7 +487,7 @@ class TestClient:
         try:
             content = _json_encode(result)
             return TestResponse(status_code=200, content=content)
-        except TypeError, ValueError):
+        except TypeError, ValueError:
             return TestResponse(
                 status_code=200,
                 content=str(result).encode("utf-8"),
