@@ -225,7 +225,7 @@ class TurboAPI(Router):
                     if param_def and param_def.type is not str:
                         try:
                             param_value = param_def.type(param_value)
-                        except (ValueError, TypeError):
+                        except ValueError, TypeError:
                             return {
                                 "error": "Bad Request",
                                 "status_code": 400,
@@ -356,6 +356,140 @@ class TurboAPI(Router):
             if self.shutdown_handlers:
                 asyncio.run(self._run_shutdown_handlers())
 
+    async def _handle_websocket(self, scope: dict, receive: Callable, send: Callable) -> None:
+        """Handle WebSocket connections via ASGI."""
+        from .websockets import WebSocket, WebSocketDisconnect
+        from urllib.parse import parse_qs
+
+        path = scope.get("path", "")
+        handler = None
+        route_path = None
+
+        # Find matching WebSocket route
+        for route, h in self._websocket_routes.items():
+            if route == path:
+                handler = h
+                route_path = route
+                break
+
+        # Check for path parameter patterns
+        if handler is None:
+            for route, h in self._websocket_routes.items():
+                if self._match_websocket_path(route, path):
+                    handler = h
+                    route_path = route
+                    break
+
+        if handler is None:
+            await send({"type": "websocket.close", "code": 404})
+            return
+
+        websocket = WebSocket(scope)
+        path_params = self._extract_websocket_path_params(route_path, path)
+        if path_params:
+            websocket.path_params = path_params
+
+        query_string = scope.get("query_string", b"").decode("utf-8", errors="replace")
+        if query_string:
+            websocket.query_params = {
+                k: v[0] if v else ""
+                for k, v in parse_qs(query_string, keep_blank_values=True).items()
+            }
+
+        headers = {}
+        for hdr_name, hdr_val in scope.get("headers", []):
+            headers[hdr_name.decode("latin-1").lower()] = hdr_val.decode("latin-1")
+        websocket.headers = headers
+
+        message = await receive()
+        if message["type"] != "websocket.connect":
+            await send({"type": "websocket.close", "code": 1002})
+            return
+
+        # Setup send/receive hooks
+        class _WebSocketQueueProxy:
+            def __init__(self, asgi_send):
+                self._asgi_send = asgi_send
+
+            async def put(self, item):
+                await self._asgi_send(item)
+
+        class _WebSocketReceiveProxy:
+            def __init__(self, asgi_receive):
+                self._asgi_receive = asgi_receive
+
+            async def get(self):
+                msg = await self._asgi_receive()
+                if msg["type"] == "websocket.receive":
+                    if "text" in msg:
+                        return {"type": "text", "data": msg["text"]}
+                    elif "bytes" in msg:
+                        return {"type": "bytes", "data": msg["bytes"]}
+                elif msg["type"] == "websocket.disconnect":
+                    return {"type": "disconnect", "code": msg.get("code", 1000)}
+                return {"type": "unknown"}
+
+        async def asgi_send(data):
+            if isinstance(data, dict):
+                if data.get("type") == "text":
+                    await send({"type": "websocket.send", "text": data.get("data", "")})
+                elif data.get("type") == "bytes":
+                    await send({"type": "websocket.send", "bytes": data.get("data", b"")})
+
+        websocket._send_queue = _WebSocketQueueProxy(asgi_send)
+        websocket._receive_queue = _WebSocketReceiveProxy(receive)
+
+        try:
+            import inspect
+
+            sig = inspect.signature(handler)
+            kwargs = {}
+            if "websocket" in sig.parameters:
+                kwargs["websocket"] = websocket
+            for param_name, param_value in path_params.items():
+                if param_name in sig.parameters:
+                    kwargs[param_name] = param_value
+            for param_name in websocket.query_params:
+                if param_name in sig.parameters:
+                    kwargs[param_name] = websocket.query_params[param_name]
+
+            if asyncio.iscoroutinefunction(handler):
+                await handler(**kwargs)
+            else:
+                handler(**kwargs)
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+
+        if not websocket._closed:
+            await send({"type": "websocket.close", "code": 1000})
+
+    def _match_websocket_path(self, route: str, path: str) -> bool:
+        """Check if a route pattern matches a path."""
+        route_parts = route.split("/")
+        path_parts = path.split("/")
+        if len(route_parts) != len(path_parts):
+            return False
+        for r_part, p_part in zip(route_parts, path_parts):
+            if r_part.startswith("{") and r_part.endswith("}"):
+                continue
+            if r_part != p_part:
+                return False
+        return True
+
+    def _extract_websocket_path_params(self, route: str, path: str) -> dict:
+        """Extract path parameters from a matched path."""
+        params = {}
+        route_parts = route.split("/")
+        path_parts = path.split("/")
+        if len(route_parts) != len(path_parts):
+            return params
+        for r_part, p_part in zip(route_parts, path_parts):
+            if r_part.startswith("{") and r_part.endswith("}"):
+                param_name = r_part[1:-1]
+                params[param_name] = p_part
+        return params
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         """ASGI fallback — pure Python, ~100x slower than the Zig native backend.
@@ -388,6 +522,10 @@ class TurboAPI(Router):
                     await send({"type": "lifespan.shutdown.complete"})
                     return
 
+        if scope["type"] == "websocket":
+            await self._handle_websocket(scope, receive, send)
+            return
+
         if scope["type"] != "http":
             return
 
@@ -413,11 +551,13 @@ class TurboAPI(Router):
 
         if not match_result:
             resp_body = _json.dumps({"detail": "Not Found"}).encode("utf-8")
-            await send({
-                "type": "http.response.start",
-                "status": 404,
-                "headers": [[b"content-type", b"application/json"]],
-            })
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 404,
+                    "headers": [[b"content-type", b"application/json"]],
+                }
+            )
             await send({"type": "http.response.body", "body": resp_body})
             return
 
@@ -433,13 +573,15 @@ class TurboAPI(Router):
                 if param_def and param_def.type is not str:
                     try:
                         param_value = param_def.type(param_value)
-                    except (ValueError, TypeError):
+                    except ValueError, TypeError:
                         resp_body = _json.dumps({"detail": f"Invalid {param_name}"}).encode("utf-8")
-                        await send({
-                            "type": "http.response.start",
-                            "status": 422,
-                            "headers": [[b"content-type", b"application/json"]],
-                        })
+                        await send(
+                            {
+                                "type": "http.response.start",
+                                "status": 422,
+                                "headers": [[b"content-type", b"application/json"]],
+                            }
+                        )
                         await send({"type": "http.response.body", "body": resp_body})
                         return
                 call_args[param_name] = param_value
@@ -447,6 +589,7 @@ class TurboAPI(Router):
         # Parse query params
         if query_string:
             from urllib.parse import parse_qs
+
             qs = parse_qs(query_string, keep_blank_values=True)
             for param_name, param in sig.parameters.items():
                 if param_name not in call_args and param_name in qs:
@@ -463,7 +606,7 @@ class TurboAPI(Router):
                             call_args[param_name] = ann.model_validate(json_body)
                         elif param_name in (json_body if isinstance(json_body, dict) else {}):
                             call_args[param_name] = json_body[param_name]
-            except (_json.JSONDecodeError, Exception):
+            except _json.JSONDecodeError, Exception:
                 pass
 
         # Call handler
@@ -474,11 +617,13 @@ class TurboAPI(Router):
                 result = route.handler(**call_args)
         except Exception as e:
             resp_body = _json.dumps({"detail": str(e)}).encode("utf-8")
-            await send({
-                "type": "http.response.start",
-                "status": 500,
-                "headers": [[b"content-type", b"application/json"]],
-            })
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 500,
+                    "headers": [[b"content-type", b"application/json"]],
+                }
+            )
             await send({"type": "http.response.body", "body": resp_body})
             return
 
@@ -496,12 +641,14 @@ class TurboAPI(Router):
             resp_body = _json.dumps(result).encode("utf-8")
             content_type = b"application/json"
 
-        await send({
-            "type": "http.response.start",
-            "status": 200,
-            "headers": [
-                [b"content-type", content_type],
-                [b"server", b"TurboAPI"],
-            ],
-        })
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    [b"content-type", content_type],
+                    [b"server", b"TurboAPI"],
+                ],
+            }
+        )
         await send({"type": "http.response.body", "body": resp_body})
