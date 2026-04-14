@@ -40,8 +40,8 @@ from .jwt_auth import (
     create_access_token,
     create_refresh_token,
     decode_token,
-    hash_password,
-    verify_password,
+    hash_password as jwt_hash_password,
+    verify_password as jwt_verify_password,
 )
 
 # Middleware
@@ -81,6 +81,8 @@ from .security import (
     OAuth2PasswordBearer,
     Security,
     SecurityScopes,
+    get_password_hash,
+    verify_password,
 )
 
 # SSE (Server-Sent Events)
@@ -131,6 +133,8 @@ __all__ = [
     "OAuth2PasswordBearer",
     "Security",
     "SecurityScopes",
+    "get_password_hash",  # From security module - for password hashing
+    "verify_password",  # From security module - for password verification
     # Exceptions
     "RequestValidationError",
     "WebSocketException",
@@ -161,6 +165,4 @@ __all__ = [
     "create_access_token",
     "create_refresh_token",
     "decode_token",
-    "hash_password",
-    "verify_password",
 ]

@@ -120,6 +120,7 @@ class CORSMiddleware(Middleware):
 
         return response
 
+
 class TrustedHostMiddleware(Middleware):
     """
     Trusted Host middleware - prevents HTTP Host Header attacks.
@@ -183,24 +184,54 @@ class GZipMiddleware(Middleware):
 
     def after_request(self, request: Request, response: Response) -> Response:
         """Compress response if client accepts gzip."""
-        accept_encoding = request.headers.get("accept-encoding", "")
+        # Use case-insensitive header lookup
+        accept_encoding = ""
+        if hasattr(request, "get_header"):
+            accept_encoding = request.get_header("accept-encoding") or ""
+        else:
+            # Fallback for dict-like headers
+            for key, value in request.headers.items():
+                if key.lower() == "accept-encoding":
+                    accept_encoding = value
+                    break
 
         if "gzip" not in accept_encoding.lower():
             return response
 
-        # Check if response is large enough to compress
+        # Already compressed - don't double-compress
+        existing_encoding = (
+            response.get_header("content-encoding")
+            if hasattr(response, "get_header")
+            else response.headers.get("content-encoding")
+        )
+        if existing_encoding:
+            return response
+
+        # Get response content as bytes
+        content = None
         if hasattr(response, "body"):
-            content = response.body
+            body = response.body
+            if isinstance(body, bytes):
+                content = body
+            elif isinstance(body, str):
+                content = body.encode("utf-8")
 
-            if len(content) < self.minimum_size:
-                return response
+        if content is None:
+            return response
 
-            # Compress content
-            compressed = gzip.compress(content, compresslevel=self.compresslevel)
-            response.content = compressed
-            response.set_header("Content-Encoding", "gzip")
-            response.set_header("Content-Length", str(len(compressed)))
-            response.set_header("Vary", "Accept-Encoding")
+        # Check if response is large enough to compress
+        if len(content) < self.minimum_size:
+            return response
+
+        # Compress content
+        compressed = gzip.compress(content, compresslevel=self.compresslevel)
+
+        # Update response with compressed content
+        response.content = compressed
+
+        response.set_header("Content-Encoding", "gzip")
+        response.set_header("Content-Length", str(len(compressed)))
+        response.set_header("Vary", "Accept-Encoding")
 
         return response
 
@@ -332,6 +363,7 @@ class RateLimitMiddleware(Middleware):
             # Add this request
             self.requests[client_ip].append((now, 1))
 
+
 class LoggingMiddleware(Middleware):
     """
     Request logging middleware.
@@ -374,7 +406,6 @@ class CustomMiddleware(Middleware):
     async def __call__(self, request: Request, call_next: Callable) -> Response:
         """Execute custom middleware function."""
         return await self.func(request, call_next)
-
 
 
 class CSRFMiddleware(Middleware):
@@ -457,7 +488,5 @@ class CSRFMiddleware(Middleware):
             existing = self._get_cookie(request, self.cookie_name)
             if not existing or not self._validate_token(existing):
                 token = self._generate_token()
-                response.headers[
-                    "Set-Cookie"
-                ] = f"{self.cookie_name}={token}; Path=/; SameSite=Lax"
+                response.headers["Set-Cookie"] = f"{self.cookie_name}={token}; Path=/; SameSite=Lax"
         return response

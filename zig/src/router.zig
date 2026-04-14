@@ -356,6 +356,21 @@ fn parsePath(alloc: Allocator, path: []const u8) ![]const Segment {
     return segs;
 }
 
+fn wildcardMatchUnderAllocationPressure(alloc: Allocator) !void {
+    var r = Router.init(alloc);
+    defer r.deinit();
+
+    try r.addRoute("GET", "/files/*path", "GET /files/*path");
+
+    if (r.findRoute("GET", "/files/docs/readme.txt")) |match_c| {
+        var match = match_c;
+        defer match.deinit();
+        try std.testing.expectEqualStrings("docs/readme.txt", match.params.get("path").?);
+    } else {
+        return error.OutOfMemory;
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 test "static routes" {
@@ -427,6 +442,27 @@ test "wildcard routes" {
     defer m.deinit();
     try std.testing.expectEqualStrings("GET /files/*path", m.handler_key);
     try std.testing.expectEqualStrings("docs/readme.txt", m.params.get("path").?);
+}
+
+test "wildcard route re-registration replaces handler without leaks" {
+    const alloc = std.testing.allocator;
+    var r = Router.init(alloc);
+    defer r.deinit();
+
+    try r.addRoute("GET", "/files/*path", "GET /files/*path v1");
+    try r.addRoute("GET", "/files/*path", "GET /files/*path v2");
+
+    var m = r.findRoute("GET", "/files/docs/readme.txt").?;
+    defer m.deinit();
+    try std.testing.expectEqualStrings("GET /files/*path v2", m.handler_key);
+}
+
+test "wildcard route findRoute handles allocation failures without swallowing OOM" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        wildcardMatchUnderAllocationPressure,
+        .{},
+    );
 }
 
 test "static takes priority over param" {

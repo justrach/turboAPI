@@ -226,6 +226,32 @@ class TestClient:
         except ImportError:
             pass
 
+        # Run before_request middleware
+        from .models import Request
+
+        request_obj = Request(
+            method=method,
+            url=path,
+            headers=request_headers,
+            query_params=parse_qs(query_string) if query_string else {},
+        )
+
+        middleware_instances = []
+        for middleware_class, mw_kwargs in getattr(self.app, "middleware_stack", []):
+            try:
+                mw_instance = middleware_class(**mw_kwargs)
+                middleware_instances.append(mw_instance)
+                try:
+                    mw_instance.before_request(request_obj)
+                except Exception as e:
+                    # Middleware error - return error response
+                    return TestResponse(
+                        status_code=getattr(e, "status_code", 500),
+                        content=_json_encode({"detail": str(e)}),
+                    )
+            except Exception:
+                pass  # Skip middleware that fails to initialize
+
         # Call handler
         try:
             if inspect.iscoroutinefunction(handler):
@@ -240,15 +266,26 @@ class TestClient:
             # Check for HTTPException
             if hasattr(e, "status_code") and hasattr(e, "detail"):
                 error_body = {"detail": e.detail}
-                return TestResponse(
+                response = TestResponse(
                     status_code=e.status_code,
                     content=_json_encode(error_body),
                     headers=getattr(e, "headers", None) or {},
                 )
-            return TestResponse(
-                status_code=500,
-                content=_json_encode({"detail": str(e)}),
-            )
+            else:
+                response = TestResponse(
+                    status_code=500,
+                    content=_json_encode({"detail": str(e)}),
+                )
+
+            # Run after_request middleware on error response
+            for mw_instance in reversed(middleware_instances):
+                try:
+                    response = self._response_to_turbo_response(response)
+                    response = mw_instance.after_request(request_obj, response)
+                    response = self._turbo_response_to_test_response(response)
+                except Exception:
+                    pass
+            return response
 
         # Run background tasks if any
         for param_name, param in sig.parameters.items():
@@ -256,7 +293,18 @@ class TestClient:
                 kwargs[param_name].run_tasks()
 
         # Build response
-        return self._build_response(result)
+        response = self._build_response(result)
+
+        # Run after_request middleware
+        for mw_instance in reversed(middleware_instances):
+            try:
+                turbo_response = self._response_to_turbo_response(response)
+                processed = mw_instance.after_request(request_obj, turbo_response)
+                response = self._turbo_response_to_test_response(processed)
+            except Exception:
+                pass  # Skip middleware that fails
+
+        return response
 
     def _find_route(self, method: str, path: str):
         """Find a matching route for the given method and path."""
@@ -331,11 +379,30 @@ class TestClient:
         try:
             content = _json_encode(result)
             return TestResponse(status_code=200, content=content)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return TestResponse(
                 status_code=200,
                 content=str(result).encode("utf-8"),
             )
+
+    def _response_to_turbo_response(self, response: TestResponse):
+        """Convert TestResponse to TurboResponse for middleware processing."""
+        from .models import Response
+
+        turbo_response = Response(content=response.content, status_code=response.status_code)
+        turbo_response.headers = dict(response.headers)
+        return turbo_response
+
+    def _turbo_response_to_test_response(self, turbo_response) -> TestResponse:
+        """Convert TurboResponse back to TestResponse after middleware processing."""
+        content = getattr(turbo_response, "content", None) or getattr(turbo_response, "body", b"")
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        return TestResponse(
+            status_code=getattr(turbo_response, "status_code", 200),
+            content=content,
+            headers=dict(getattr(turbo_response, "headers", {})),
+        )
 
 
 def _json_encode(obj: Any) -> bytes:
