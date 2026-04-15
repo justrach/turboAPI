@@ -19,6 +19,23 @@ pub const FieldType = enum {
     any,
 };
 
+const field_type_map = std.StaticStringMap(FieldType).initComptime(.{
+    .{ "string", .string },
+    .{ "str", .string },
+    .{ "integer", .integer },
+    .{ "int", .integer },
+    .{ "number", .float },
+    .{ "float", .float },
+    .{ "boolean", .boolean },
+    .{ "bool", .boolean },
+    .{ "array", .array },
+    .{ "list", .array },
+    .{ "object", .object },
+    .{ "dict", .object },
+    .{ "union", .union_type },
+    .{ "any", .any },
+});
+
 pub const FieldConstraint = struct {
     name: []const u8,
     field_type: FieldType,
@@ -70,6 +87,7 @@ pub const ValidationError = struct {
 
 /// Validate raw JSON bytes against a runtime schema.
 pub fn validateJson(json_bytes: []const u8, schema: *const ModelSchema) ValidationResult {
+    // TODO: arena
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch {
         return .{ .err = makeError(422, "Invalid JSON") };
     };
@@ -250,10 +268,12 @@ fn validateNumericConstraints(v: f64, field: *const FieldConstraint, path: []con
 // ── Error formatting ────────────────────────────────────────────────────────
 
 fn makeError(status: u16, detail: []const u8) ValidationError {
-    const body = std.fmt.allocPrint(allocator,
+    var buf: [256]u8 = undefined;
+    const body = std.fmt.bufPrint(&buf,
         \\{{"detail":[{{"msg":"{s}","type":"value_error"}}]}}
     , .{detail}) catch "";
-    return .{ .status_code = status, .body = body };
+    const owned = allocator.dupe(u8, body) catch return .{ .status_code = status, .body = "" };
+    return .{ .status_code = status, .body = owned };
 }
 
 fn makePathError(status: u16, path: []const u8, msg: []const u8) ValidationError {
@@ -370,14 +390,7 @@ fn extractUsize(v_opt: ?std.json.Value) ?usize {
 }
 
 fn parseFieldType(s: []const u8) FieldType {
-    if (std.mem.eql(u8, s, "string") or std.mem.eql(u8, s, "str")) return .string;
-    if (std.mem.eql(u8, s, "integer") or std.mem.eql(u8, s, "int")) return .integer;
-    if (std.mem.eql(u8, s, "float") or std.mem.eql(u8, s, "number")) return .float;
-    if (std.mem.eql(u8, s, "boolean") or std.mem.eql(u8, s, "bool")) return .boolean;
-    if (std.mem.eql(u8, s, "array") or std.mem.eql(u8, s, "list")) return .array;
-    if (std.mem.eql(u8, s, "object") or std.mem.eql(u8, s, "dict")) return .object;
-    if (std.mem.eql(u8, s, "union")) return .union_type;
-    return .any;
+    return field_type_map.get(s) orelse .any;
 }
 
 // ── Fuzz tests ───────────────────────────────────────────────────────────────

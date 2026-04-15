@@ -153,21 +153,28 @@ fn writeLogEvent(writer: anytype, l: LogEvent) !void {
 
 fn writeJsonString(writer: anytype, s: []const u8) !void {
     try writer.writeByte('"');
-    for (s) |c| {
+    var pos: usize = 0;
+    while (pos < s.len) {
+        // Find the next character that needs escaping
+        const start = pos;
+        while (pos < s.len) : (pos += 1) {
+            const c = s[pos];
+            if (c == '"' or c == '\\' or c < 0x20) break;
+        }
+        // Bulk-copy the clean run
+        if (pos > start) try writer.writeAll(s[start..pos]);
+        if (pos >= s.len) break;
+        // Emit the escape sequence
+        const c = s[pos];
         switch (c) {
             '"' => try writer.writeAll("\\\""),
             '\\' => try writer.writeAll("\\\\"),
             '\n' => try writer.writeAll("\\n"),
             '\r' => try writer.writeAll("\\r"),
             '\t' => try writer.writeAll("\\t"),
-            else => {
-                if (c < 0x20) {
-                    try writer.print("\\u{x:0>4}", .{c});
-                } else {
-                    try writer.writeByte(c);
-                }
-            },
+            else => try writer.print("\\u{x:0>4}", .{c}),
         }
+        pos += 1;
     }
     try writer.writeByte('"');
 }
@@ -186,8 +193,8 @@ var stderr_exporter = Exporter{
 
 // ── Global state ─────────────────────────────────────────────────────────────
 
-var enabled: bool = false;
-var log_level: Level = .info;
+var enabled: std.atomic.Value(bool) = .init(false);
+var log_level: std.atomic.Value(Level) = .init(.info);
 var log_format: enum { text, json } = .text;
 var active_exporter: Exporter = undefined;
 
@@ -195,26 +202,26 @@ var active_exporter: Exporter = undefined;
 
 pub fn init() void {
     if (std.c.getenv("TURBO_LOG_LEVEL")) |_p| { const val = std.mem.span(_p);
-        if (std.mem.eql(u8, val, "debug")) log_level = .debug else if (std.mem.eql(u8, val, "info")) log_level = .info else if (std.mem.eql(u8, val, "warn")) log_level = .warn else if (std.mem.eql(u8, val, "error")) log_level = .err;
+        if (std.mem.eql(u8, val, "debug")) log_level.store(.debug, .release) else if (std.mem.eql(u8, val, "info")) log_level.store(.info, .release) else if (std.mem.eql(u8, val, "warn")) log_level.store(.warn, .release) else if (std.mem.eql(u8, val, "error")) log_level.store(.err, .release);
     }
     if (std.c.getenv("TURBO_LOG_FORMAT")) |_p| { const val = std.mem.span(_p);
         if (std.mem.eql(u8, val, "json")) log_format = .json;
     }
-    enabled = true;
+    enabled.store(true, .release);
     active_exporter = stderr_exporter;
 }
 
 pub fn pushEvent(event: Event) void {
-    if (!enabled) return;
+    if (!enabled.load(.acquire)) return;
     active_exporter.exportEvents(&.{event});
 }
 
 pub fn isEnabled() bool {
-    return enabled;
+    return enabled.load(.acquire);
 }
 
 pub fn getLevel() Level {
-    return log_level;
+    return log_level.load(.acquire);
 }
 
 pub fn getFormat() @TypeOf(log_format) {
