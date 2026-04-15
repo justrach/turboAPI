@@ -1,6 +1,6 @@
 // TurboServer – Zig HTTP server core.
 // Placeholder that registers routes and runs an event loop.
-// The actual HTTP serving uses Zig's std.net / std.http.
+// The actual HTTP serving uses Zig's std.Io.net (0.16+).
 
 const std = @import("std");
 const py = @import("py.zig");
@@ -10,8 +10,31 @@ const router_mod = core.router;
 const dhi = @import("dhi_validator.zig");
 const db = @import("db.zig");
 const multipart_mod = @import("multipart.zig");
+const logger = @import("logger.zig");
+const runtime = @import("runtime.zig");
+const telemetry = @import("telemetry.zig");
 
 const allocator = std.heap.c_allocator;
+const posix = std.posix;
+
+// Zig 0.16: std.posix.write removed, std.time.timestamp() removed.
+// Use C-level write() and clock_gettime() directly.
+extern "c" fn write(fd: c_int, buf: [*]const u8, nbytes: usize) isize;
+
+fn streamWriteAll(stream: std.Io.net.Stream, data: []const u8) !void {
+    var remaining = data;
+    while (remaining.len > 0) {
+        const n = write(stream.socket.handle, remaining.ptr, remaining.len);
+        if (n <= 0) return error.BrokenPipe;
+        remaining = remaining[@intCast(n)..];
+    }
+}
+
+fn timestampSeconds() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    return ts.sec;
+}
 
 // ── Route storage ───────────────────────────────────────────────────────────
 
@@ -25,11 +48,14 @@ const ParamMeta = struct {
     has_default: bool, // true → skip if missing (let Python use its own default)
 };
 
+const param_type_map = std.StaticStringMap(ParamType).initComptime(.{
+    .{ "int",   .int },
+    .{ "float", .float },
+    .{ "bool",  .bool_val },
+});
+
 fn parseParamType(s: []const u8) ParamType {
-    if (std.mem.eql(u8, s, "int")) return .int;
-    if (std.mem.eql(u8, s, "float")) return .float;
-    if (std.mem.eql(u8, s, "bool")) return .bool_val;
-    return .str;
+    return param_type_map.get(s) orelse .str;
 }
 
 /// Parse "name:type|name:type|..." into out[]. Returns count of parsed params.
@@ -84,6 +110,16 @@ fn percentDecode(src: []const u8, buf: []u8) []u8 {
     var out: usize = 0;
     var i: usize = 0;
     while (i < src.len and out < buf.len) {
+        // Bulk-copy clean bytes: SIMD-accelerated indexOfAny skips to next '%' or '+'
+        const next = std.mem.indexOfAny(u8, src[i..], "%+") orelse (src.len - i);
+        if (next > 0) {
+            const copy_len = @min(next, buf.len - out);
+            @memcpy(buf[out..][0..copy_len], src[i..][0..copy_len]);
+            out += copy_len;
+            i += copy_len;
+            if (copy_len < next) break; // buf full
+            continue;
+        }
         if (src[i] == '+') {
             buf[out] = ' ';
             out += 1;
@@ -119,14 +155,17 @@ const HandlerType = enum(u8) {
     enhanced,
 };
 
+const handler_type_map = std.StaticStringMap(HandlerType).initComptime(.{
+    .{ "simple_sync_noargs", .simple_sync_noargs },
+    .{ "simple_sync",        .simple_sync },
+    .{ "model_sync",         .model_sync },
+    .{ "body_sync",          .body_sync },
+    .{ "form_sync",          .form_sync },
+    .{ "file_sync",          .file_sync },
+});
+
 fn parseHandlerType(s: []const u8) HandlerType {
-    if (std.mem.eql(u8, s, "simple_sync_noargs")) return .simple_sync_noargs;
-    if (std.mem.eql(u8, s, "simple_sync")) return .simple_sync;
-    if (std.mem.eql(u8, s, "model_sync")) return .model_sync;
-    if (std.mem.eql(u8, s, "body_sync")) return .body_sync;
-    if (std.mem.eql(u8, s, "form_sync")) return .form_sync;
-    if (std.mem.eql(u8, s, "file_sync")) return .file_sync;
-    return .enhanced;
+    return handler_type_map.get(s) orelse .enhanced;
 }
 
 const HandlerEntry = struct {
@@ -207,7 +246,7 @@ var routes: ?std.StringHashMap(HandlerEntry) = null;
 var native_routes: ?std.StringHashMap(NativeHandlerEntry) = null;
 var static_routes: ?std.StringHashMap(StaticRouteEntry) = null;
 var response_cache: ?std.StringHashMap([]const u8) = null;
-var response_cache_lock: std.Thread.Mutex = .{};
+var response_cache_lock: std.Io.Mutex = .init;
 var response_cache_count: usize = 0;
 const MAX_CACHE_ENTRIES: usize = 10_000; // bounded to prevent OOM via unique paths
 var model_schemas: ?std.StringHashMap(dhi.ModelSchema) = null;
@@ -250,16 +289,16 @@ fn getResponseCache() *std.StringHashMap([]const u8) {
 }
 
 fn getCachedResponse(key: []const u8) ?[]const u8 {
-    response_cache_lock.lock();
-    defer response_cache_lock.unlock();
+    response_cache_lock.lockUncancelable(runtime.io);
+    defer response_cache_lock.unlock(runtime.io);
     if (response_cache == null) return null;
     return response_cache.?.get(key);
 }
 
 /// Cache a pre-rendered response, respecting MAX_CACHE_ENTRIES to prevent OOM.
 fn cacheResponse(key: []const u8, rendered: []const u8) void {
-    response_cache_lock.lock();
-    defer response_cache_lock.unlock();
+    response_cache_lock.lockUncancelable(runtime.io);
+    defer response_cache_lock.unlock(runtime.io);
 
     if (response_cache_count >= MAX_CACHE_ENTRIES) {
         allocator.free(rendered);
@@ -340,6 +379,8 @@ pub fn server_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
     _ = getRoutes();
     _ = getNativeRoutes();
     _ = getStaticRoutes();
+
+    telemetry.init();
     _ = getResponseCache();
     _ = getModelSchemas();
     _ = getRouter();
@@ -496,7 +537,7 @@ pub fn server_add_route_model_validated(_: ?*c.PyObject, args: ?*c.PyObject) cal
     const schema_s = std.mem.span(schema_json);
     if (dhi.parseSchema(schema_s)) |schema| {
         getModelSchemas().put(key, schema) catch {};
-        std.debug.print("[DHI] Registered schema for {s}: {d} fields\n", .{ key, schema.fields.len });
+        logger.debug("[DHI] Registered schema for {s}: {d} fields", .{ key, schema.fields.len });
     }
 
     return py.pyNone();
@@ -579,7 +620,7 @@ pub fn server_add_native_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c)
         return null;
     };
 
-    std.debug.print("[FFI] Registered native handler: {s} {s} -> {s}:{s}\n", .{ method_s, path_s, lib_path_s, symbol_name_s });
+    logger.debug("[FFI] Registered native handler: {s} {s} -> {s}:{s}", .{ method_s, path_s, lib_path_s, symbol_name_s });
     return py.pyNone();
 }
 
@@ -619,7 +660,7 @@ pub fn server_add_static_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c)
     };
     getRouter().addRoute(method_s, path_s, key) catch return null;
 
-    std.debug.print("[STATIC] Registered: {s} {s} -> {d} ({d} bytes pre-rendered)\n", .{ method_s, path_s, st, response_bytes.len });
+    logger.debug("[STATIC] Registered: {s} {s} -> {d} ({d} bytes pre-rendered)", .{ method_s, path_s, st, response_bytes.len });
     return py.pyNone();
 }
 
@@ -667,7 +708,7 @@ pub fn server_configure_cors(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?
     ) catch return null;
     cors_enabled = true;
 
-    std.debug.print("[CORS] Zig-native CORS enabled: origin={s} methods={s}\n", .{ origins_s, methods_s });
+    logger.info("[CORS] Zig-native CORS enabled: origin={s} methods={s}", .{ origins_s, methods_s });
     return py.pyNone();
 }
 
@@ -683,15 +724,15 @@ pub fn server_add_middleware(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.
 
 pub fn server_enable_response_cache(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     // Check if response cache is disabled via env var
-    if (std.posix.getenv("TURBO_DISABLE_RESPONSE_CACHE")) |val| {
+    if (std.c.getenv("TURBO_DISABLE_RESPONSE_CACHE")) |_p| { const val = std.mem.span(_p);
         if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
             cache_noargs_responses = false;
-            std.debug.print("[CACHE] Response caching DISABLED via TURBO_DISABLE_RESPONSE_CACHE\n", .{});
+            logger.info("[CACHE] Response caching DISABLED via TURBO_DISABLE_RESPONSE_CACHE", .{});
             return py.pyNone();
         }
     }
     cache_noargs_responses = true;
-    std.debug.print("[CACHE] Response caching enabled for noargs handlers\n", .{});
+    logger.info("[CACHE] Response caching enabled for noargs handlers", .{});
     return py.pyNone();
 }
 
@@ -700,7 +741,7 @@ fn renderResponse(status: u16, content_type: []const u8, body: []const u8) ?[]co
     const cors = cors_headers;
     // Note: Date is static for cached responses. TFB just needs the header present.
     var date_buf: [40]u8 = undefined;
-    const ts = std.time.timestamp();
+    const ts = timestampSeconds();
     const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(ts) };
     const ds = es.getDaySeconds();
     const ed = es.getEpochDay();
@@ -733,31 +774,31 @@ const ConnectionPool = struct {
     thread_count: usize = 0,
 
     const Queue = struct {
-        items: [4096]std.net.Stream = undefined,
+        items: [4096]std.Io.net.Stream = undefined,
         head: usize = 0,
         tail: usize = 0,
         count: usize = 0,
-        mutex: std.Thread.Mutex = .{},
-        not_empty: std.Thread.Condition = .{},
+        mutex: std.Io.Mutex = .init,
+        not_empty: std.Io.Condition = .init,
 
-        fn push(self: *Queue, stream: std.net.Stream) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        fn push(self: *Queue, stream: std.Io.net.Stream) void {
+            self.mutex.lockUncancelable(runtime.io);
+            defer self.mutex.unlock(runtime.io);
             if (self.count >= self.items.len) {
-                stream.close();
+                stream.close(runtime.io);
                 return;
             }
             self.items[self.tail] = stream;
             self.tail = (self.tail + 1) % self.items.len;
             self.count += 1;
-            self.not_empty.signal();
+            self.not_empty.signal(runtime.io);
         }
 
-        fn pop(self: *Queue) std.net.Stream {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        fn pop(self: *Queue) std.Io.net.Stream {
+            self.mutex.lockUncancelable(runtime.io);
+            defer self.mutex.unlock(runtime.io);
             while (self.count == 0) {
-                self.not_empty.wait(&self.mutex);
+                self.not_empty.waitUncancelable(runtime.io, &self.mutex);
             }
             const stream = self.items[self.head];
             self.head = (self.head + 1) % self.items.len;
@@ -765,6 +806,7 @@ const ConnectionPool = struct {
             return stream;
         }
     };
+
 
     fn init(self: *ConnectionPool, thread_count: usize) void {
         self.queue = .{};
@@ -795,23 +837,31 @@ const ConnectionPool = struct {
 var pool: ConnectionPool = undefined;
 
 pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
-    const addr = std.net.Address.parseIp4(server_host, server_port) catch {
+    // Initialize the shared Io runtime (no extra async threads — our ConnectionPool
+    // manages workers via std.Thread.spawn to hook per-worker PyThreadState lifecycle).
+    runtime.threaded = std.Io.Threaded.init(std.heap.c_allocator, .{
+        .async_limit = .nothing,
+    });
+    defer runtime.threaded.deinit();
+    runtime.io = runtime.threaded.io();
+
+    const ip_addr = std.Io.net.IpAddress.parse(server_host, server_port) catch {
         py.setError("Invalid address: {s}:{d}", .{ server_host, server_port });
         return null;
     };
 
-    var tcp_server = addr.listen(.{ .reuse_address = true }) catch {
+    var tcp_server = ip_addr.listen(runtime.io, .{ .reuse_address = true }) catch {
         py.setError("Failed to bind to {s}:{d}", .{ server_host, server_port });
         return null;
     };
-    defer tcp_server.deinit();
+    defer tcp_server.deinit(runtime.io);
 
     // Capture interpreter state before releasing the GIL.
     // Workers need this to create their own PyThreadState.
     py_interp = py.PyInterpreterState_Get();
 
     var thread_count: usize = DEFAULT_POOL_SIZE;
-    if (std.posix.getenv("TURBO_THREAD_POOL_SIZE")) |val| {
+    if (std.c.getenv("TURBO_THREAD_POOL_SIZE")) |_p| { const val = std.mem.span(_p);
         thread_count = std.fmt.parseInt(usize, val, 10) catch DEFAULT_POOL_SIZE;
         if (thread_count == 0) thread_count = DEFAULT_POOL_SIZE;
     }
@@ -820,15 +870,15 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     // but py_interp is set before SaveThread so there's no race).
     pool.init(thread_count);
 
-    std.debug.print("🚀 TurboNet-Zig server listening on {s}:{d}\n", .{ server_host, server_port });
-    std.debug.print("🎯 Zig HTTP core active – {d}-thread pool, per-worker tstate!\n", .{pool.thread_count});
+    logger.info("TurboNet-Zig server listening on {s}:{d}", .{ server_host, server_port });
+    logger.info("Zig HTTP core active – {d}-thread pool, per-worker tstate!", .{pool.thread_count});
 
     // Release the GIL — workers acquire it per-request via AcquireThread.
     const save = py.PyEval_SaveThread();
 
     while (true) {
-        const conn = tcp_server.accept() catch continue;
-        pool.queue.push(conn.stream);
+        const stream = tcp_server.accept(runtime.io) catch continue;
+        pool.queue.push(stream);
     }
 
     py.PyEval_RestoreThread(save);
@@ -859,20 +909,54 @@ fn parseHeaders(request_data: []const u8, first_line_end: usize, header_end_pos:
     return headers;
 }
 
-fn handleConnection(stream: std.net.Stream, tstate: ?*anyopaque) void {
-    defer stream.close();
+/// SIMD-accelerated search for the HTTP header-end sentinel "\r\n\r\n".
+/// Scans 16 bytes at a time looking for '\r' candidates, then scalar-verifies
+/// each hit. Roughly 4× faster than std.mem.indexOf for typical 300-2000 byte
+/// headers because most 16-byte windows contain no '\r' at all.
+inline fn findHeaderEnd(buf: []const u8) ?usize {
+    if (buf.len < 4) return null;
+    const vec_len = 16;
+    const V = @Vector(vec_len, u8);
+    const cr_splat: V = @splat(@as(u8, '\r'));
+
+    var i: usize = 0;
+    // Require 3 bytes past the end of each chunk so buf[i+k+3] is always valid.
+    while (i + vec_len + 3 <= buf.len) {
+        const chunk: V = buf[i..][0..vec_len].*;
+        if (@reduce(.Or, chunk == cr_splat)) {
+            for (0..vec_len) |k| {
+                if (buf[i + k] == '\r' and buf[i + k + 1] == '\n' and
+                    buf[i + k + 2] == '\r' and buf[i + k + 3] == '\n')
+                {
+                    return i + k;
+                }
+            }
+        }
+        i += vec_len;
+    }
+    // Scalar tail for the remaining < vec_len+3 bytes.
+    while (i + 3 < buf.len) {
+        if (buf[i] == '\r' and buf[i + 1] == '\n' and buf[i + 2] == '\r' and buf[i + 3] == '\n')
+            return i;
+        i += 1;
+    }
+    return null;
+}
+
+fn handleConnection(stream: std.Io.net.Stream, tstate: ?*anyopaque) void {
+    defer stream.close(runtime.io);
 
     // Slowloris protection: if client sends nothing for 30s, read() times out
     // and the worker is freed. No kqueue needed — just a socket option.
     const timeout = std.posix.timeval{ .sec = 30, .usec = 0 };
-    std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
     while (true) {
         handleOneRequest(stream, tstate) catch return;
     }
 }
 
-fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
+fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     // Phase 1: Read headers into a fixed buffer (headers are typically < 8KB)
     var header_buf: [8192]u8 = undefined;
     var total_read: usize = 0;
@@ -880,12 +964,12 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
 
     // Read until we find \r\n\r\n (end of headers) or fill the header buffer
     while (total_read < header_buf.len) {
-        const n = stream.read(header_buf[total_read..]) catch return error.ReadError;
+        const n = posix.read(stream.socket.handle, header_buf[total_read..]) catch return error.ReadError;
         if (n == 0) return error.ConnectionClosed;
         total_read += n;
 
         // Check if we've received the full headers
-        if (std.mem.indexOf(u8, header_buf[0..total_read], "\r\n\r\n")) |pos| {
+        if (findHeaderEnd(header_buf[0..total_read])) |pos| {
             header_end_pos = pos;
             break;
         }
@@ -915,7 +999,7 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     // can skip the expensive parseHeaders + body read entirely.
     const rt = getRouter();
     var match = rt.findRoute(method, path) orelse {
-        std.debug.print("[ZIG] 404 for {s} {s}\n", .{ method, path });
+        logger.debug("[ZIG] 404 for {s} {s}", .{ method, path });
         sendResponse(stream, 404, "application/json", "{\"error\": \"Not Found\"}");
         return;
     };
@@ -932,7 +1016,7 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     // Static routes — single writeAll of pre-rendered bytes
     const sr = getStaticRoutes();
     if (sr.get(match.handler_key)) |static_entry| {
-        stream.writeAll(static_entry.response_bytes) catch return;
+        streamWriteAll(stream, static_entry.response_bytes) catch return;
         return;
     }
 
@@ -988,7 +1072,7 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
                 @memcpy(full[0..db_already.len], db_already);
                 var br: usize = db_already.len;
                 while (br < db_cl) {
-                    const n = stream.read(full[br..db_cl]) catch return;
+                    const n = posix.read(stream.socket.handle, full[br..db_cl]) catch return;
                     if (n == 0) break;
                     br += n;
                 }
@@ -1005,7 +1089,7 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
     // Python handler lookup
     const r = getRoutes();
     const entry = r.get(match.handler_key) orelse {
-        std.debug.print("[ZIG] handler entry missing for key: {s}\n", .{match.handler_key});
+        logger.warn("[ZIG] handler entry missing for key: {s}", .{match.handler_key});
         sendResponse(stream, 500, "application/json", "{\"error\": \"Internal Server Error\"}");
         return;
     };
@@ -1100,8 +1184,8 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
         @memcpy(full_body[0..already_read_body.len], already_read_body);
         var body_read: usize = already_read_body.len;
         while (body_read < content_length) {
-            const n = stream.read(full_body[body_read..content_length]) catch |err| {
-                std.debug.print("[ZIG] body read error: {}\n", .{err});
+            const n = posix.read(stream.socket.handle, full_body[body_read..content_length]) catch |err| {
+                logger.err("[ZIG] body read error: {}", .{err});
                 return;
             };
             if (n == 0) break;
@@ -1125,7 +1209,7 @@ fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
                 },
                 .err => |ve| {
                     defer ve.deinit();
-                    std.debug.print("[DHI] validation failed for {s}\n", .{match.handler_key});
+                    logger.warn("[DHI] validation failed for {s}", .{match.handler_key});
                     sendResponse(stream, ve.status_code, "application/json", ve.body);
                     return;
                 },
@@ -1248,7 +1332,7 @@ fn ffiError() FfiResponse {
 // Python fast handlers return (status_code, content_type, body_str).
 // Unpack and send — no dict key lookups, no hash computation.
 
-fn sendTupleResponse(stream: std.net.Stream, result: *c.PyObject) void {
+fn sendTupleResponse(stream: std.Io.net.Stream, result: *c.PyObject) void {
     const sc_obj = py.PyTuple_GetItem(result, 0) orelse {
         sendResponse(stream, 500, "application/json", "{\"error\":\"bad tuple[0]\"}");
         return;
@@ -1284,7 +1368,7 @@ fn sendTupleResponse(stream: std.net.Stream, result: *c.PyObject) void {
 
 // ── simple_sync_noargs: PyObject_CallNoArgs — no tuple/dict construction ─────
 
-fn callPythonNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.net.Stream) void {
+fn callPythonNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.Io.net.Stream) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
 
@@ -1298,7 +1382,7 @@ fn callPythonNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.net.St
 }
 
 /// Like callPythonNoArgs but caches the pre-rendered response for subsequent calls.
-fn callPythonNoArgsCaching(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.net.Stream, handler_key: []const u8) void {
+fn callPythonNoArgsCaching(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.Io.net.Stream, handler_key: []const u8) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
 
@@ -1355,7 +1439,7 @@ fn callPythonVectorcall(
     entry: HandlerEntry,
     query_string: []const u8,
     params: *const router_mod.RouteParams,
-    stream: std.net.Stream,
+    stream: std.Io.net.Stream,
 ) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
@@ -1435,7 +1519,7 @@ fn callPythonVectorcallCaching(
     entry: HandlerEntry,
     query_string: []const u8,
     params: *const router_mod.RouteParams,
-    stream: std.net.Stream,
+    stream: std.Io.net.Stream,
     cache_key: []const u8,
 ) void {
     py.PyEval_AcquireThread(tstate);
@@ -1523,7 +1607,7 @@ fn callPythonVectorcallCaching(
 // ── Fast Python handler dispatch (simple_sync/body_sync) ─────────────────────
 // Calls Python with kwargs dict, unpacks 3-tuple response — zero extra allocs.
 
-fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_string: []const u8, body: []const u8, params: *const router_mod.RouteParams, stream: std.net.Stream) void {
+fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_string: []const u8, body: []const u8, params: *const router_mod.RouteParams, stream: std.Io.net.Stream) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
 
@@ -1634,7 +1718,7 @@ fn jsonValueToPyObject(val: std.json.Value) ?*c.PyObject {
 
 // ── model_sync fast dispatch: Zig-parsed JSON → Python dict (no json.loads) ──
 
-fn callPythonModelHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, body: []const u8, params: *const router_mod.RouteParams, stream: std.net.Stream) void {
+fn callPythonModelHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, body: []const u8, params: *const router_mod.RouteParams, stream: std.Io.net.Stream) void {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch {
         sendResponse(stream, 400, "application/json", "{\"error\":\"Invalid JSON\"}");
         return;
@@ -1695,7 +1779,7 @@ fn callPythonModelHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, body: 
 
 /// Single-parse variant: takes a pre-parsed std.json.Value from validateJsonRetainParsed.
 /// Eliminates the second JSON parse that callPythonModelHandlerDirect does.
-fn callPythonModelHandlerParsed(tstate: ?*anyopaque, entry: HandlerEntry, json_value: std.json.Value, params: *const router_mod.RouteParams, stream: std.net.Stream) void {
+fn callPythonModelHandlerParsed(tstate: ?*anyopaque, entry: HandlerEntry, json_value: std.json.Value, params: *const router_mod.RouteParams, stream: std.Io.net.Stream) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
 
@@ -2051,10 +2135,10 @@ fn statusText(status: u16) []const u8 {
 /// Zero-alloc response writer.  Header + body are concatenated into a stack
 /// buffer for a single write syscall (most API responses are <4KB).
 /// Falls back to two writes only for large responses.
-pub fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
+pub fn sendResponse(stream: std.Io.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
     // TFB requires Server + Date headers
     var date_buf: [40]u8 = undefined;
-    const timestamp = std.time.timestamp();
+    const timestamp = timestampSeconds();
     const epoch_secs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(timestamp) };
     const day_secs = epoch_secs.getDaySeconds();
     const epoch_day = epoch_secs.getEpochDay();
@@ -2095,12 +2179,12 @@ pub fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u
         pos += trailer.len;
         @memcpy(resp_buf[pos .. pos + body.len], body);
         pos += body.len;
-        stream.writeAll(resp_buf[0..pos]) catch return;
+        streamWriteAll(stream, resp_buf[0..pos]) catch return;
     } else {
-        stream.writeAll(header) catch return;
-        if (cors.len > 0) stream.writeAll(cors) catch return;
-        stream.writeAll(trailer) catch return;
-        if (body.len > 0) stream.writeAll(body) catch return;
+        streamWriteAll(stream, header) catch return;
+        if (cors.len > 0) streamWriteAll(stream, cors) catch return;
+        streamWriteAll(stream, trailer) catch return;
+        if (body.len > 0) streamWriteAll(stream, body) catch return;
     }
 }
 
@@ -2127,9 +2211,14 @@ fn cacheThreadWorker(ctx: *const CacheThreadCtx) void {
 }
 
 test "response cache is safe under concurrent access" {
+    // std.Io.Mutex requires an initialized runtime.io — set up a minimal threaded runtime.
+    runtime.threaded = std.Io.Threaded.init(std.heap.c_allocator, .{ .async_limit = .nothing });
+    defer runtime.threaded.deinit();
+    runtime.io = runtime.threaded.io();
+
     response_cache = null;
     response_cache_count = 0;
-    response_cache_lock = .{};
+    response_cache_lock = .init;
 
     var threads: [8]std.Thread = undefined;
     var ctxs: [8]CacheThreadCtx = undefined;
@@ -2154,7 +2243,8 @@ test "response cache is safe under concurrent access" {
 // These tests exercise the parsing functions used by handleOneRequest.
 // The invariants are: no panics, no out-of-bounds access, bounded output.
 
-fn fuzz_percentDecode(_: void, input: []const u8) anyerror!void {
+fn fuzz_percentDecode(_: void, smith: *std.testing.Smith) anyerror!void {
+    const input = smith.in orelse return;
     var buf: [4096]u8 = undefined;
     const out = percentDecode(input, &buf);
     // Decoded output is never longer than percent-encoded input
@@ -2185,7 +2275,8 @@ test "fuzz: percentDecode — output bounded, no OOB" {
     });
 }
 
-fn fuzz_queryStringGet(_: void, input: []const u8) anyerror!void {
+fn fuzz_queryStringGet(_: void, smith: *std.testing.Smith) anyerror!void {
+    const input = smith.in orelse return;
     // Split: first 16 bytes = key, remainder = query string
     const split = @min(input.len, 16);
     const key = input[0..split];
@@ -2217,7 +2308,8 @@ test "fuzz: queryStringGet — result is within input, no panic" {
     });
 }
 
-fn fuzz_requestLineParsing(_: void, input: []const u8) anyerror!void {
+fn fuzz_requestLineParsing(_: void, smith: *std.testing.Smith) anyerror!void {
+    const input = smith.in orelse return;
     if (input.len == 0) return;
 
     // The parser searches for \r\n\r\n to delimit headers from body.

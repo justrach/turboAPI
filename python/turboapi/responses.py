@@ -26,11 +26,11 @@ class Response:
     ):
         self.status_code = status_code
         self.headers = headers or {}
+        self._cookies: list[str] = []
         if media_type is not None:
             self.media_type = media_type
         self._content = content  # Store original content for model_dump
         self.body = self._render(content)
-
     def _render(self, content: Any) -> bytes:
         if content is None:
             return b""
@@ -74,7 +74,15 @@ class Response:
             cookie += "; HttpOnly"
         if samesite:
             cookie += f"; SameSite={samesite}"
-        self.headers.setdefault("set-cookie", cookie)
+        self._cookies.append(cookie)
+        # Also expose in headers dict for direct access (FastAPI compat)
+        existing = self.headers.get("set-cookie")
+        if existing is None:
+            self.headers["set-cookie"] = cookie
+        elif isinstance(existing, list):
+            existing.append(cookie)
+        else:
+            self.headers["set-cookie"] = [existing, cookie]
 
     def delete_cookie(self, key: str, path: str = "/", domain: str | None = None) -> None:
         """Delete a cookie."""
@@ -155,6 +163,8 @@ class StreamingResponse(Response):
             self.media_type = media_type
         self._content_iterator = content
         self.body = b""  # Will be streamed
+        self._cookies: list[str] = []
+
 
     async def body_iterator(self) -> AsyncIterator[bytes]:
         """Iterate over the response body chunks."""
@@ -208,3 +218,5 @@ class FileResponse(Response):
 
         with open(path, "rb") as f:
             self.body = f.read()
+        self._cookies: list[str] = []
+

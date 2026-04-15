@@ -80,8 +80,9 @@ pub fn statusText(status: u16) []const u8 {
 /// Format an RFC 2822 HTTP Date header value into buf.
 /// Returns the formatted slice (e.g. "Wed, 19 Mar 2026 11:30:27 GMT").
 pub fn formatHttpDate(buf: *[40]u8) []const u8 {
-    const ts = std.time.timestamp();
-    const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(ts) };
+    var ts_spec: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts_spec);
+    const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(ts_spec.sec) };
     const ds = es.getDaySeconds();
     const ed = es.getEpochDay();
     const yd = ed.calculateYearDay();
@@ -138,7 +139,8 @@ test "formatHttpDate returns valid format" {
 
 // ── Fuzz tests ──────────────────────────────────────────────────────────────
 
-fn fuzz_percentDecode(_: void, input: []const u8) anyerror!void {
+fn fuzz_percentDecode(_: void, smith: *std.testing.Smith) anyerror!void {
+    const input = smith.in orelse return;
     var out: [4096]u8 = undefined;
     const buf = if (input.len > 0) input[0..@min(input.len, 4096)] else input;
     const result = percentDecode(buf, &out);
@@ -164,7 +166,8 @@ test "fuzz: percentDecode — output bounded, no OOB" {
     }});
 }
 
-fn fuzz_queryStringGet(_: void, input: []const u8) anyerror!void {
+fn fuzz_queryStringGet(_: void, smith: *std.testing.Smith) anyerror!void {
+    const input = smith.in orelse return;
     if (input.len < 2) return;
     const split = input[0] % @as(u8, @intCast(@min(input.len, 255)));
     const key = input[1..@min(@as(usize, split) + 1, input.len)];

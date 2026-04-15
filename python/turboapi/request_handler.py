@@ -467,9 +467,27 @@ class ResponseHandler:
             body = result.body
             content_type = result.media_type
 
+            # Collect extra headers (non-empty headers dict + cookies)
+            extra_headers: dict = {}
+            for k, v in result.headers.items():
+                if k.lower() not in {"content-type", "content-length"}:
+                    extra_headers[k] = v
+            for cookie in getattr(result, "_cookies", []):
+                existing = extra_headers.get("set-cookie")
+                if existing is None:
+                    extra_headers["set-cookie"] = cookie
+                else:
+                    # Accumulate as list; caller handles multi-value emission
+                    if isinstance(existing, list):
+                        existing.append(cookie)
+                    else:
+                        extra_headers["set-cookie"] = [existing, cookie]
+
+            # For binary content types, return raw bytes
             # For binary content types, return raw bytes
             if content_type and _is_binary_content_type(content_type):
-                # Return raw bytes with content_type for binary responses
+                if extra_headers:
+                    return body, result.status_code, content_type, extra_headers
                 return body, result.status_code, content_type
 
             if isinstance(body, bytes):
@@ -484,10 +502,16 @@ class ResponseHandler:
                         body = body.decode("utf-8")
                     except UnicodeDecodeError:
                         # Binary data - return with content_type
+                        if extra_headers:
+                            return body, result.status_code, content_type, extra_headers
                         return body, result.status_code, content_type
                 except UnicodeDecodeError:
                     # Binary data - return with content_type
+                    if extra_headers:
+                        return body, result.status_code, content_type, extra_headers
                     return body, result.status_code, content_type
+            if extra_headers:
+                return body, result.status_code, content_type, extra_headers
             return body, result.status_code, content_type
 
         # Handle tuple returns: (content, status_code)
@@ -505,15 +529,19 @@ class ResponseHandler:
 
         # Handle dict with status_code key (internal format)
         if isinstance(result, dict) and "status_code" in result:
-            status = result.pop("status_code")
-            return result, status
+            status = result["status_code"]
+            content = {k: v for k, v in result.items() if k != "status_code"}
+            return content, status
 
         # Default: treat as 200 OK response
         return result, 200
 
     @staticmethod
     def format_response(
-        content: Any, status_code: int, content_type: str | None = None
+        content: Any,
+        status_code: int,
+        content_type: str | None = None,
+        extra_headers: dict | None = None,
     ) -> dict[str, Any]:
         """
         Format content as response. Handles both JSON and binary responses.
@@ -522,18 +550,21 @@ class ResponseHandler:
             content: Response content (can be dict, str, bytes, etc.)
             status_code: HTTP status code
             content_type: Optional content type (for binary responses)
+            extra_headers: Optional dict of extra response headers (e.g. Set-Cookie)
 
         Returns:
             Dictionary with properly formatted response
         """
         # For binary content (bytes with binary content_type), return directly
         if isinstance(content, bytes) and content_type and _is_binary_content_type(content_type):
-            # Return bytes directly - Zig will handle as raw binary
-            return {
+            result: dict[str, Any] = {
                 "content": content,  # Keep as bytes for Zig to extract
                 "status_code": status_code,
                 "content_type": content_type,
             }
+            if extra_headers:
+                result["extra_headers"] = extra_headers
+            return result
 
         # Handle Satya models
         if isinstance(content, Model):
@@ -563,18 +594,24 @@ class ResponseHandler:
 
         content = make_serializable(content)
 
-        return {
+        result = {
             "content": content,
             "status_code": status_code,
             "content_type": content_type or "application/json",
         }
+        if extra_headers:
+            result["extra_headers"] = extra_headers
+        return result
 
     @staticmethod
     def format_json_response(
-        content: Any, status_code: int, content_type: str | None = None
+        content: Any,
+        status_code: int,
+        content_type: str | None = None,
+        extra_headers: dict | None = None,
     ) -> dict[str, Any]:
         """Alias for format_response for backwards compatibility."""
-        return ResponseHandler.format_response(content, status_code, content_type)
+        return ResponseHandler.format_response(content, status_code, content_type, extra_headers)
 
 
 _json_dumps = __import__("json").dumps
@@ -657,9 +694,8 @@ def create_enhanced_handler(original_handler, route_definition):
             _has_header_params = True
         elif _has_form_types and isinstance(param.default, (Form, File)):
             _has_form_params = True
-        elif (
-            _has_form_types
-            and param.annotation is _UploadFile
+        elif _has_form_types and (
+            param.annotation is _UploadFile
             or (isinstance(param.annotation, type) and issubclass(param.annotation, _UploadFile))
         ):
             _has_form_params = True
@@ -794,15 +830,18 @@ def create_enhanced_handler(original_handler, route_definition):
                     except Exception:
                         pass
 
-                # Normalize response - may return (content, status) or (content, status, content_type)
+                # Normalize response - may return 2, 3, or 4-element tuple
                 normalized = ResponseHandler.normalize_response(result)
-                if len(normalized) == 3:
+                extra_headers = None
+                if len(normalized) == 4:
+                    content, status_code, content_type, extra_headers = normalized
+                elif len(normalized) == 3:
                     content, status_code, content_type = normalized
                 else:
                     content, status_code = normalized
                     content_type = None
 
-                return ResponseHandler.format_json_response(content, status_code, content_type)
+                return ResponseHandler.format_json_response(content, status_code, content_type, extra_headers)
 
             except ValueError as e:
                 return ResponseHandler.format_json_response(
@@ -951,15 +990,18 @@ def create_enhanced_handler(original_handler, route_definition):
                         except Exception:
                             pass
 
-                # Normalize response - may return (content, status) or (content, status, content_type)
+                # Normalize response - may return 2, 3, or 4-element tuple
                 normalized = ResponseHandler.normalize_response(result)
-                if len(normalized) == 3:
+                extra_headers = None
+                if len(normalized) == 4:
+                    content, status_code, content_type, extra_headers = normalized
+                elif len(normalized) == 3:
                     content, status_code, content_type = normalized
                 else:
                     content, status_code = normalized
                     content_type = None
 
-                return ResponseHandler.format_json_response(content, status_code, content_type)
+                return ResponseHandler.format_json_response(content, status_code, content_type, extra_headers)
 
             except ValueError as e:
                 return ResponseHandler.format_json_response(

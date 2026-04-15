@@ -1,6 +1,6 @@
 .{
     .name = .zig,
-    .version = "0.15.2",
+    .version = "0.16.0",
     .dependencies = .{
         .dhi = .{
             .url = "https://github.com/justrach/dhi/archive/refs/heads/main.tar.gz",

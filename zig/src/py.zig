@@ -30,7 +30,7 @@ pub fn decref(obj: *PyObject) void {
 }
 
 pub fn none() *PyObject {
-    return incref(@as(*PyObject, @ptrCast(c._Py_NoneStruct[0..])));
+    return incref(@as(*PyObject, @ptrCast(&c._Py_NoneStruct)));
 }
 
 pub fn pyNone() *PyObject {
