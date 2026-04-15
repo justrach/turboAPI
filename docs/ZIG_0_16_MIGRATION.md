@@ -2,324 +2,367 @@
 
 **From:** Zig 0.15.x  
 **To:** Zig 0.16.0  
-**Status:** 0.16.0 milestone complete (333/333 issues resolved); stable release imminent as of April 2026.
+**Status:** Complete — build clean, 341 tests passing as of 2026-04-15.
+
+This guide documents every breaking change encountered migrating TurboAPI (a Python/Zig hybrid
+HTTP framework) from 0.15.x to 0.16.0, with the verified fixes that produced a clean build.
+Intended as a reference for future agents or developers working in this codebase.
 
 ---
 
-## Summary
+## Summary of Breaking Changes
 
-The biggest change in 0.16 is the **networking API**. `std.net` is removed and replaced by
-`std.Io.net`, which pairs with a new `std.Io` runtime abstraction. For TurboAPI this means:
+0.16 has three major categories of breakage, each wider than the 0.15 changelog implies:
 
-- Every `std.net.Stream` type annotation → `std.Io.net.Stream`
-- The listen/accept loop in `server_run` needs an `std.Io` instance
-- `stream.close()` → `stream.deinit()`
-- The custom `ConnectionPool` **stays as-is** — `std.Thread.spawn` is not removed, and the
-  Python GIL integration (per-worker `PyThreadState`) requires manual thread lifecycle control
-  that `std.Io.Threaded`'s automatic pool doesn't expose
-
-Everything else — JSON parsing, request parsing, the radix router, dhi validation, `std.posix.*`,
-`std.Thread.Mutex/Condition`, `std.mem.*`, `std.fmt.*`, `std.ArrayListUnmanaged` — is unaffected.
+1. **`std.net` completely removed** — replaced by `std.Io.net`, which needs an `Io` instance.
+   `Io.net.Stream` has a different API: different close signature, no `.read()`/`.writeAll()`.
+2. **`std.io` (lowercase) completely removed** — `std.Io` (capital) is the new async IO module
+   but has totally different semantics. `std.fmt.bufPrint` replaces `fixedBufferStream`.
+3. **Time, threading, and POSIX API pruning** — `std.time.timestamp/milliTimestamp/nanoTimestamp`,
+   `std.Thread.Mutex/Condition/sleep`, `std.debug.lockStderrWriter`, `std.posix.write/connect/socket`,
+   and `std.crypto.random` all removed.
 
 ---
 
-## Breaking Changes at a Glance
+## 1. Networking: `std.net` → `std.Io.net`
 
-| Old (0.15) | New (0.16) | Where it hits |
-|---|---|---|
-| `std.net.Address.parseIp4(host, port)` | `std.Io.net.IpAddress.parse(host, port)` | `server.zig:802` |
-| `addr.listen(.{})` | `ip_addr.listen(io, .{})` | `server.zig:807` |
-| `tcp_server.accept()` → `Connection` | `tcp_server.accept()` → `Stream` directly | `server.zig:834` |
-| `conn.stream` | `conn` (stream is the accepted value) | `server.zig:835` |
-| `std.net.Stream` | `std.Io.net.Stream` | `server.zig` — dozens of annotations |
-| `stream.close()` | `stream.deinit()` | `server.zig:867` and every `handleConnection` |
-| `stream.handle` (raw fd) | `stream.handle` (likely unchanged, verify) | `server.zig:872` |
-| `std.heap.GeneralPurposeAllocator` | `std.heap.DebugAllocator` | not used in this repo currently |
-| `build.zig.zon` version `"0.15.2"` | `"0.16.0"` | `zig/build.zig.zon:3` |
+### 1a. Type rename: `std.net.Stream` → `std.Io.net.Stream`
 
----
-
-## File-by-File Changes
-
-### `zig/build.zig.zon`
-
-**Line 3** — bump version:
+Pure rename everywhere a stream type is annotated:
 
 ```zig
 // Before
-.version = "0.15.2",
+fn sendResponse(stream: std.net.Stream, ...) void { ... }
+stream: std.net.Stream,          // struct field
 
 // After
-.version = "0.16.0",
+fn sendResponse(stream: std.Io.net.Stream, ...) void { ... }
+stream: std.Io.net.Stream,       // struct field
 ```
 
-Dependency URLs and hashes (`dhi`, `pg.zig`, `turboapi_core`) will need re-verification once
-those libraries publish 0.16-compatible releases. Run `zig build` and update the `.hash` values
-if the fetch fails.
+### 1b. Accept loop: `std.net.Address` → `std.Io.net.IpAddress` + `io` argument
 
-> **Note:** `.name = .zig` (identifier syntax, not a quoted string) is already correct for
-> 0.14+ style and stays unchanged.
-
----
-
-### `zig/build.zig`
-
-The `build.zig` already uses the 0.14+ API (`b.addLibrary`, `b.createModule`,
-`.root_module` pattern). No changes required for the build itself.
-
-If any dependency's own `build.zig` is written for 0.15 you'll see compile errors fetching it —
-fix by pinning to a 0.16-compatible tag of that dependency.
-
----
-
-### `zig/src/server.zig`
-
-This is the file with the most changes. All are mechanical type renames except the
-`server_run` function which needs a new `std.Io` instance.
-
-#### 1. Add `std.Io` instance to `server_run` (lines 801–840)
-
-The whole listen/accept loop needs an `io` handle:
+The listen/accept loop must have an `Io` instance. Create a `std.Io.Threaded` runtime
+and store it in a module-global `runtime.zig` so worker threads can also access `io`.
 
 ```zig
 // Before (0.15)
-pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
-    const addr = std.net.Address.parseIp4(server_host, server_port) catch {
-        py.setError("Invalid address: {s}:{d}", .{ server_host, server_port });
-        return null;
-    };
-
-    var tcp_server = addr.listen(.{ .reuse_address = true }) catch {
-        py.setError("Failed to bind to {s}:{d}", .{ server_host, server_port });
-        return null;
-    };
-    defer tcp_server.deinit();
-
-    // ...
-
-    while (true) {
-        const conn = tcp_server.accept() catch continue;
-        pool.queue.push(conn.stream);         // <── conn.stream unpacking
-    }
+const addr = std.net.Address.parseIp4(host, port) catch { ... };
+var tcp_server = addr.listen(.{ .reuse_address = true }) catch { ... };
+while (true) {
+    const conn = tcp_server.accept() catch continue;
+    pool.queue.push(conn.stream);   // had .stream field
 }
-```
 
-```zig
 // After (0.16)
-pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
-    // One Io instance for the accept loop only. Worker threads use raw
-    // PyThreadState / std.Thread — std.Io.Threaded's pool cannot hook into
-    // the per-worker PyThreadState lifecycle, so the ConnectionPool stays.
-    var threaded_io = std.Io.Threaded.create(.{ .thread_count = 1 }) catch {
-        py.setError("Failed to create Io runtime", .{});
-        return null;
-    };
-    defer threaded_io.deinit();
-    const io = threaded_io.io();
-
-    const ip_addr = std.Io.net.IpAddress.parse(server_host, server_port) catch {
-        py.setError("Invalid address: {s}:{d}", .{ server_host, server_port });
-        return null;
-    };
-
-    var tcp_server = ip_addr.listen(io, .{ .reuse_address = true }) catch {
-        py.setError("Failed to bind to {s}:{d}", .{ server_host, server_port });
-        return null;
-    };
-    defer tcp_server.deinit();
-
-    // ...
-
-    while (true) {
-        const stream = tcp_server.accept() catch continue;  // stream directly, no .stream field
-        pool.queue.push(stream);
-    }
+const ip_addr = std.Io.net.IpAddress.parse(host, port) catch { ... };
+var tcp_server = ip_addr.listen(io, .{ .reuse_address = true }) catch { ... };
+while (true) {
+    const stream = tcp_server.accept() catch continue;  // returns Stream directly, no .stream
+    pool.queue.push(stream);
 }
 ```
 
-#### 2. `ConnectionPool.Queue` item type (lines 739–770)
+New shared `runtime.zig`:
 
 ```zig
-// Before
-items: [4096]std.net.Stream = undefined,
-
-fn push(self: *Queue, stream: std.net.Stream) void { ... }
-fn pop(self: *Queue) std.net.Stream { ... }
-
-// After
-items: [4096]std.Io.net.Stream = undefined,
-
-fn push(self: *Queue, stream: std.Io.net.Stream) void { ... }
-fn pop(self: *Queue) std.Io.net.Stream { ... }
+// zig/src/runtime.zig (new file)
+const std = @import("std");
+pub var threaded: std.Io.Threaded = undefined;
+pub var io: std.Io = undefined;
 ```
 
-#### 3. `stream.close()` → `stream.deinit()` (lines 867, 751)
-
-`std.Io.net.Stream` uses `deinit()` as the RAII destructor:
+### 1c. `stream.close()` → `stream.close(io)` — takes Io argument
 
 ```zig
 // Before
-fn handleConnection(stream: std.net.Stream, tstate: ?*anyopaque) void {
-    defer stream.close();
-    // ...
-}
-
-// Also in Queue.push when the queue is full (line 751):
 stream.close();
 
 // After
-fn handleConnection(stream: std.Io.net.Stream, tstate: ?*anyopaque) void {
-    defer stream.deinit();
-    // ...
+stream.close(runtime.io);   // must pass the Io instance
+```
+
+### 1d. Raw fd: `stream.handle` → `stream.socket.handle`
+
+```zig
+// Before
+std.posix.setsockopt(stream.handle, ...);
+
+// After
+std.posix.setsockopt(stream.socket.handle, ...);
+```
+
+### 1e. `Io.net.Stream` has NO `.read()` or `.writeAll()` methods
+
+Use raw C wrappers for blocking I/O in worker threads:
+
+```zig
+extern "c" fn write(fd: c_int, buf: [*]const u8, nbytes: usize) isize;
+
+fn streamWriteAll(stream: std.Io.net.Stream, data: []const u8) !void {
+    var remaining = data;
+    while (remaining.len > 0) {
+        const n = write(stream.socket.handle, remaining.ptr, remaining.len);
+        if (n <= 0) return error.BrokenPipe;
+        remaining = remaining[@intCast(n)..];
+    }
 }
 
-stream.deinit();  // reject when queue full
+// std.posix.read() still works (posix.read was NOT removed):
+const posix = std.posix;
+const n = posix.read(stream.socket.handle, buf) catch return error.ReadError;
 ```
 
-#### 4. All function signatures taking `std.net.Stream`
-
-Mechanical rename throughout the file:
-
-| Function | Line | Change |
-|---|---|---|
-| `handleConnection` | 866 | `std.net.Stream` → `std.Io.net.Stream` |
-| `handleOneRequest` | 879 | `std.net.Stream` → `std.Io.net.Stream` |
-| `sendResponse` | 2058 | `std.net.Stream` → `std.Io.net.Stream` |
-| `sendTupleResponse` | 1255 | `std.net.Stream` → `std.Io.net.Stream` |
-| `callPythonNoArgs` | 1291 | `std.net.Stream` → `std.Io.net.Stream` |
-| `callPythonNoArgsCaching` | 1305 | `std.net.Stream` → `std.Io.net.Stream` |
-| `callPythonHandlerDirect` | 1530 | `std.net.Stream` → `std.Io.net.Stream` |
-| `callPythonModelHandlerDirect` | 1641 | `std.net.Stream` → `std.Io.net.Stream` |
-| `callPythonModelHandlerParsed` | 1702 | `std.net.Stream` → `std.Io.net.Stream` |
-| Anonymous params at lines ~1362, ~1442 | various | rename |
-
-#### 5. Raw socket access for `setsockopt` (line 872)
-
-The Slowloris timeout sets `SO_RCVTIMEO` via raw fd:
+### 1f. `std.net.has_unix_sockets` → `std.Io.net.has_unix_sockets`
 
 ```zig
-// Current (unchanged for now — verify it still compiles)
-const timeout = std.posix.timeval{ .sec = 30, .usec = 0 };
-std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO,
-    std.mem.asBytes(&timeout)) catch {};
+if (comptime std.Io.net.has_unix_sockets == false ...) { ... }
 ```
 
-`std.Io.net.Stream` still exposes `.handle` in 0.16. **Verify this after renaming** — if
-the compiler rejects it, check whether the field is now `.socket`, `.fd`, or accessed via
-a method. The `std.posix.*` constants themselves (`SOL.SOCKET`, `SO.RCVTIMEO`, `timeval`)
-are unchanged.
-
-#### 6. `stream.read` and `stream.writeAll` — no changes needed
-
-`std.Io.net.Stream.read` and `writeAll` keep the same blocking signature in the `Threaded`
-backend. The calls in `handleOneRequest` (reads into `header_buf`) and in `sendResponse`
-(the `writeAll(resp_buf[0..pos])` single-copy fast path) compile unchanged.
-
----
-
-### `zig/src/db.zig`
-
-No `std.net` usage. No changes required.
-
-`std.posix.getenv` (lines 69, 81) and `std.Thread.Mutex` (line 56) both remain in 0.16.
-
----
-
-### `zig/src/dhi_validator.zig`, `multipart.zig`, `telemetry.zig`, `logger.zig`, `py.zig`, `response.zig`
-
-No `std.net` usage in any of these files. No changes required.
-
----
-
-### `CLAUDE.md`
-
-Update the requirements section:
-
-```diff
--**Zig 0.15+** (for building the native backend)
-+**Zig 0.16+** (for building the native backend)
-```
-
----
-
-## What Stays the Same
-
-- `std.Thread.spawn`, `std.Thread.Mutex`, `std.Thread.Condition` — all unchanged
-- `std.posix.getenv`, `std.posix.setsockopt`, `std.posix.timeval` — POSIX module unchanged
-- `std.mem.*`, `std.fmt.*`, `std.json.*`, `std.time.*` — unchanged
-- `std.ArrayListUnmanaged` with `.empty` initializer — already the correct 0.14+ style
-- `std.heap.c_allocator` — unchanged (the rename only affects `GeneralPurposeAllocator`)
-- `callconv(.c)` FFI exports to Python — unchanged
-- Build system: `b.addLibrary`, `b.createModule`, `b.dependency`, `b.installArtifact` — unchanged
-- Fuzz test setup (`zig build test --fuzz`) — unchanged
-
----
-
-## New Capabilities Worth Considering Post-Migration
-
-### `std.Io.Evented` — io_uring on Linux, GCD on macOS
-
-Once 0.16 is working, the accept loop can optionally move to the event-driven backend:
+### 1g. `std.net.connectUnixSocket/tcpConnectToHost` removed — use raw C externs
 
 ```zig
-// Linux (io_uring) or macOS (GCD) — same source code, different backend
-var evented_io = try std.Io.Evented.create(.{});
-const io = evented_io.io();
+extern "c" fn socket(domain: c_int, socket_type: c_int, protocol: c_int) c_int;
+extern "c" fn connect(sockfd: c_int, addr: *const anyopaque, addrlen: u32) c_int;
+
+// WARNING: if you name a local const socket or connect, the compiler errors:
+// "local constant shadows declaration of socket"
+// Use a different name (e.g. sock_fd) for local variables.
+
+fn connectUnixSocket(path: []const u8) !std.posix.socket_t {
+    const fd = socket(std.c.AF.UNIX, std.c.SOCK.STREAM, 0);
+    if (fd < 0) return error.SystemResources;
+    errdefer _ = std.c.close(fd);
+    // ... build SockaddrUn, call connect() ...
+    return fd;
+}
+
+fn tcpConnectToHost(host: []const u8, port: u16) !std.posix.socket_t {
+    // use std.c.getaddrinfo / freeaddrinfo
+    // iterate results, call socket() + connect()
+    return fd;
+}
 ```
 
-This eliminates `epoll`/`kqueue` overhead in the accept loop. With io_uring the kernel
-batches accept calls, reducing syscalls per connection. Could push ~140k req/s toward
-~200k+ on Linux hardware. **Benchmark before enabling** — the `Threaded` backend is simpler
-and already fast.
-
-### Replacing `ConnectionPool` with `std.Io.Group` — future option
-
-If Python's free-threaded mode (3.14t) eventually allows sub-interpreter isolation per
-connection, the manual pool could be replaced:
+`posix.close(fd)` → `_ = std.c.close(fd)` (`std.posix.close` was removed):
 
 ```zig
-var group = try io.group.create(allocator);
-try group.async(io, handleClient, .{ stream, sub_interp });
-try group.wait();
+// Before
+posix.close(self.socket);
+
+// After
+_ = std.c.close(self.socket);
 ```
 
-**Not yet feasible** because `std.Io.Group` doesn't expose thread lifecycle hooks needed
-for `PyThreadState_New` and `PyThreadState_DeleteCurrent`. Keep the manual pool.
+---
 
-### Faster incremental builds
+## 2. `std.io` (lowercase) completely removed
 
-0.16 ships incremental compilation by default (Zig compiler self-build: 75s → 20s).
-`python zig/build_turbonet.py --install` on a second run will be measurably faster.
+### 2a. `std.io.fixedBufferStream` → `std.fmt.bufPrint`
+
+```zig
+// Before (0.15)
+var str_buf: [512]u8 = undefined;
+var stream = std.io.fixedBufferStream(&str_buf);
+try std.fmt.format(stream.writer(), "{d}", .{value});
+return useSlice(stream.getWritten(), buf);
+
+// After (0.16)
+var str_buf: [512]u8 = undefined;
+const slice = try std.fmt.bufPrint(&str_buf, "{d}", .{value});
+return useSlice(slice, buf);
+```
+
+### 2b. `*std.io.Writer` vtable parameter → `*std.Io.Writer`
+
+```zig
+// Before
+pub fn drain(io_w: *std.io.Writer, ...) error{WriteFailed}!usize { ... }
+
+// After
+pub fn drain(io_w: *std.Io.Writer, ...) error{WriteFailed}!usize { ... }
+```
 
 ---
 
-## Migration Checklist
+## 3. Time APIs removed: use `clock_gettime`
 
-- [ ] Install Zig 0.16: `brew upgrade zig` or download from ziglang.org/download
-- [ ] Bump `zig/build.zig.zon` version to `"0.16.0"`
-- [ ] Run `zig build` — note all compile errors (most will be `std.net.*` type mismatches)
-- [ ] In `server.zig`: rename all `std.net.Stream` → `std.Io.net.Stream`
-- [ ] In `server.zig:server_run`: add `std.Io.Threaded.create` + pass `io` to `ip_addr.listen`
-- [ ] In `server.zig:server_run`: `parseIp4(host, port)` → `IpAddress.parse(host, port)`
-- [ ] In `server.zig:server_run`: `conn.stream` → `conn` (accept returns stream directly)
-- [ ] In `server.zig`: `stream.close()` → `stream.deinit()` everywhere
-- [ ] Verify `stream.handle` still compiles for the `setsockopt` call (line 872)
-- [ ] Update dependency hashes in `build.zig.zon` if dhi/pg.zig need 0.16 bumps
-- [ ] Run `zig build test` — all unit tests and fuzz seed corpus should pass
-- [ ] Run `uv run --python 3.14t python -m pytest tests/ -p no:anchorpy --deselect tests/test_fastapi_parity.py::TestWebSocket`
-- [ ] Benchmark: `uv run --python 3.14t python benchmarks/run_benchmarks.py`
-  — ~140k req/s baseline should hold; any regression means the Io integration needs tuning
-- [ ] Update `CLAUDE.md`: `Zig 0.15+` → `Zig 0.16+`
+`std.time.timestamp()`, `milliTimestamp()`, and `nanoTimestamp()` are all removed.
+
+```zig
+fn timestampSeconds() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    return ts.sec;
+}
+
+fn milliTimestamp() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+}
+
+fn nanoTimestamp() i128 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    return @as(i128, ts.sec) * 1_000_000_000 + @as(i128, ts.nsec);
+}
+```
+
+`ts.nsec` is signed — use `@divTrunc` not `/` for division (0.16 enforces this):
+
+```zig
+// WRONG — compile error: "signed integer division"
+@as(i64, ts.nsec) / 1_000_000
+
+// RIGHT
+@divTrunc(@as(i64, ts.nsec), 1_000_000)
+```
 
 ---
 
-## Dependency Compatibility
+## 4. Thread primitives removed: use POSIX pthreads
 
-| Dependency | Current pin | Action |
-|---|---|---|
-| `dhi` (JSON validator) | `justrach/dhi` main | Check for a `zig-0.16` branch/tag; update hash if it fails to fetch |
-| `pg.zig` (Postgres) | specific commit hash | Re-verify; pg.zig uses `std.net` internally — may need its own migration |
-| `turboapi-core` (local) | `../turboapi-core` path | Also Zig source; apply the same `std.net` renames if it uses networking |
+`std.Thread.Mutex`, `std.Thread.Condition`, and `std.Thread.sleep` are removed.
+The replacement (`std.Io.Mutex/Condition`) requires an `Io` instance — unavailable in
+vendored dependencies. Use POSIX pthread shims:
 
-The local `turboapi-core` dependency is the most likely to need parallel work since it
-contains the radix router, which may or may not use `std.net` depending on how it's structured.
+```zig
+const PthreadMutex = struct {
+    inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+    pub fn lock(m: *PthreadMutex) void { _ = std.c.pthread_mutex_lock(&m.inner); }
+    pub fn unlock(m: *PthreadMutex) void { _ = std.c.pthread_mutex_unlock(&m.inner); }
+    pub fn tryLock(m: *PthreadMutex) bool {
+        return @intFromEnum(std.c.pthread_mutex_trylock(&m.inner)) == 0;
+    }
+};
+
+const PthreadCondition = struct {
+    inner: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER,
+    pub fn timedWait(cond: *PthreadCondition, mutex: *PthreadMutex, timeout_ns: u64) !void {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.REALTIME, &ts);
+        const now_ns: u128 = @as(u128, @intCast(ts.sec)) * 1_000_000_000 +
+                              @as(u128, @intCast(ts.nsec));
+        const deadline_ns: u128 = now_ns + timeout_ns;
+        const abs_time = std.c.timespec{
+            .sec = @intCast(deadline_ns / 1_000_000_000),
+            .nsec = @intCast(deadline_ns % 1_000_000_000),
+        };
+        const rc = std.c.pthread_cond_timedwait(&cond.inner, &mutex.inner, &abs_time);
+        if (@intFromEnum(rc) == @intFromEnum(std.c.E.TIMEDOUT)) return error.Timeout;
+    }
+    pub fn signal(cond: *PthreadCondition) void { _ = std.c.pthread_cond_signal(&cond.inner); }
+    pub fn broadcast(cond: *PthreadCondition) void { _ = std.c.pthread_cond_broadcast(&cond.inner); }
+};
+```
+
+`std.Thread.sleep(ns)` → nanosleep:
+
+```zig
+fn threadSleep(ns: u64) void {
+    const ts = std.c.timespec{
+        .sec = @intCast(ns / std.time.ns_per_s),
+        .nsec = @intCast(ns % std.time.ns_per_s),
+    };
+    _ = std.c.nanosleep(&ts, null);
+}
+```
+
+---
+
+## 5. `std.debug.lockStderrWriter` → `std.debug.lockStderr`
+
+```zig
+// Before (0.15)
+const stderr = std.debug.lockStderrWriter();
+defer std.debug.unlockStderr();
+try stderr.print("...", .{});
+
+// After (0.16)
+var buffer: [4096]u8 = undefined;
+const stderr = std.debug.lockStderr(&buffer);
+defer std.debug.unlockStderr();
+// stderr.file_writer is a File.Writer; its .interface is an Io.Writer
+writeEvent(&stderr.file_writer.interface, event) catch {};
+```
+
+---
+
+## 6. `std.crypto.random` removed
+
+```zig
+// Before
+std.crypto.random.bytes(&nonce);
+
+// After — arc4random_buf is available on macOS and Linux glibc 2.36+
+extern "c" fn arc4random_buf(buf: *anyopaque, nbytes: usize) void;
+// ...
+arc4random_buf(&nonce, nonce.len);
+```
+
+Note: `std.posix.getrandom` does NOT exist in 0.16 (despite its name). For Linux-only
+targets, use `std.os.linux.getrandom(buf.ptr, buf.len, 0)`.
+
+---
+
+## 7. `ArrayListUnmanaged` empty init changed
+
+```zig
+// Before (0.15) — .{} worked as zero-init
+._list = .{},
+
+// After (0.16) — explicit fields required
+._list = .{ .items = &.{}, .capacity = 0 },
+```
+
+---
+
+## 8. Local constants cannot shadow module-level `extern` declarations
+
+If a function declares a local `const` with the same name as a module-level `extern fn`,
+it is a compile error in 0.16 (even if the extern is declared later in the file):
+
+```zig
+extern "c" fn socket(...) c_int;   // module level
+
+fn connect(...) !void {
+    // WRONG: "local constant shadows declaration of socket"
+    const socket = blk: { ... };
+
+    // RIGHT: rename local variable
+    const sock_fd = blk: { ... };
+}
+```
+
+---
+
+## File-by-File Summary
+
+| File | Changes |
+|---|---|
+| `zig/src/server.zig` | `std.net.Stream`→`std.Io.net.Stream`; `stream.close()`→`stream.close(runtime.io)`; `stream.handle`→`stream.socket.handle`; add `streamWriteAll` + `posix.read`; `std.time.timestamp()`→`timestampSeconds()`; add `const posix = std.posix;` |
+| `zig/src/runtime.zig` | **New**: shared `std.Io.Threaded` + `std.Io` globals |
+| `zig/src/telemetry.zig` | `lockStderrWriter`→`lockStderr(&buf)` + `.file_writer.interface`; `milliTimestamp()` helper; `@divTrunc` for signed division |
+| `zig/src/db.zig` | `std.net.Stream`→`std.Io.net.Stream`; `std.time.milliTimestamp()`→clock_gettime helper |
+| `zig/zig-pkg/pg-*/src/stream.zig` | Replace `std.net.connectUnixSocket/tcpConnectToHost` with raw C externs; `posix.close`→`std.c.close`; rename local `socket`→`sock_fd`; `std.net.has_unix_sockets`→`std.Io.net.has_unix_sockets` |
+| `zig/zig-pkg/pg-*/src/conn.zig` | `std.time.timestamp()`→`posixTimestamp()` helper; `ArrayListUnmanaged` empty init fix |
+| `zig/zig-pkg/pg-*/src/pool.zig` | `Thread.Mutex/Condition`→`PthreadMutex/PthreadCondition` shims; helpers for nanoTimestamp/threadSleep |
+| `zig/zig-pkg/pg-*/src/auth.zig` | `std.crypto.random.bytes`→`arc4random_buf` |
+| `zig/zig-pkg/pg-*/src/types/numeric.zig` | `std.io.fixedBufferStream`→`std.fmt.bufPrint` |
+| `zig/zig-pkg/N-V-.../src/buffer.zig` | `*std.io.Writer`→`*std.Io.Writer` in drain vtable |
+
+---
+
+## What Did NOT Change
+
+- `std.posix.read` — still present (only `posix.write/connect/socket/close` removed)
+- `std.posix.setsockopt`, `std.posix.timeval`, `std.posix.SOL/SO` — unchanged
+- `std.posix.socket_t` (`= fd_t = c_int`) — unchanged
+- `std.mem.*`, `std.fmt.*`, `std.json.*` — unchanged
+- `std.c.getaddrinfo/freeaddrinfo`, `std.c.AF.*`, `std.c.SOCK.*`, `std.c.close` — all present
+- `std.time.ns_per_s` constant — still present
+- `std.Thread.spawn` — unchanged
+- `callconv(.c)` FFI exports — unchanged
+- Build system (`b.addLibrary`, `b.createModule`, etc.) — unchanged
+- `std.heap.c_allocator` — unchanged
