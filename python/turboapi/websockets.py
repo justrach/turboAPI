@@ -42,11 +42,23 @@ class WebSocket:
         """Accept the WebSocket connection."""
         self._accepted = True
         self.client_state = "connected"
+        if hasattr(self, "_asgi_send"):
+            accept_msg: dict[str, Any] = {"type": "websocket.accept"}
+            if subprotocol:
+                accept_msg["subprotocol"] = subprotocol
+            if headers:
+                accept_msg["headers"] = [[k.encode(), v.encode()] for k, v in headers.items()]
+            await self._asgi_send(accept_msg)
 
     async def close(self, code: int = 1000, reason: str | None = None) -> None:
         """Close the WebSocket connection."""
         self._closed = True
         self.client_state = "disconnected"
+        if hasattr(self, "_asgi_send"):
+            close_msg: dict[str, Any] = {"type": "websocket.close", "code": code}
+            if reason:
+                close_msg["reason"] = reason
+            await self._asgi_send(close_msg)
 
     async def send_text(self, data: str) -> None:
         """Send a text message."""

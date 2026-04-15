@@ -225,7 +225,7 @@ class TurboAPI(Router):
                     if param_def and param_def.type is not str:
                         try:
                             param_value = param_def.type(param_value)
-                        except (ValueError, TypeError):
+                        except ValueError, TypeError:
                             return {
                                 "error": "Bad Request",
                                 "status_code": 400,
@@ -385,6 +385,7 @@ class TurboAPI(Router):
             return
 
         websocket = WebSocket(scope)
+        websocket._asgi_send = send
         path_params = self._extract_websocket_path_params(route_path, path)
         if path_params:
             websocket.path_params = path_params
@@ -573,7 +574,7 @@ class TurboAPI(Router):
                 if param_def and param_def.type is not str:
                     try:
                         param_value = param_def.type(param_value)
-                    except (ValueError, TypeError):
+                    except ValueError, TypeError:
                         resp_body = _json.dumps({"detail": f"Invalid {param_name}"}).encode("utf-8")
                         await send(
                             {
@@ -606,7 +607,7 @@ class TurboAPI(Router):
                             call_args[param_name] = ann.model_validate(json_body)
                         elif param_name in (json_body if isinstance(json_body, dict) else {}):
                             call_args[param_name] = json_body[param_name]
-            except (_json.JSONDecodeError, Exception):
+            except _json.JSONDecodeError, Exception:
                 pass
 
         # Call handler
