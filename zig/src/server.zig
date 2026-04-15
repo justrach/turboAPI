@@ -1,6 +1,6 @@
 // TurboServer – Zig HTTP server core.
 // Placeholder that registers routes and runs an event loop.
-// The actual HTTP serving uses Zig's std.net / std.http.
+// The actual HTTP serving uses Zig's std.Io.net (0.16+).
 
 const std = @import("std");
 const py = @import("py.zig");
@@ -737,18 +737,18 @@ const ConnectionPool = struct {
     thread_count: usize = 0,
 
     const Queue = struct {
-        items: [4096]std.net.Stream = undefined,
+        items: [4096]std.Io.net.Stream = undefined,
         head: usize = 0,
         tail: usize = 0,
         count: usize = 0,
         mutex: std.Thread.Mutex = .{},
         not_empty: std.Thread.Condition = .{},
 
-        fn push(self: *Queue, stream: std.net.Stream) void {
+        fn push(self: *Queue, stream: std.Io.net.Stream) void {
             self.mutex.lock();
             defer self.mutex.unlock();
             if (self.count >= self.items.len) {
-                stream.close();
+                stream.deinit();
                 return;
             }
             self.items[self.tail] = stream;
@@ -757,7 +757,7 @@ const ConnectionPool = struct {
             self.not_empty.signal();
         }
 
-        fn pop(self: *Queue) std.net.Stream {
+        fn pop(self: *Queue) std.Io.net.Stream {
             self.mutex.lock();
             defer self.mutex.unlock();
             while (self.count == 0) {
@@ -799,12 +799,23 @@ const ConnectionPool = struct {
 var pool: ConnectionPool = undefined;
 
 pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
-    const addr = std.net.Address.parseIp4(server_host, server_port) catch {
+    // One Io instance drives the accept loop only. Worker threads keep using
+    // raw std.Thread.spawn so per-worker PyThreadState lifecycle (PyThreadState_New /
+    // PyThreadState_DeleteCurrent) stays under our control — std.Io.Threaded's
+    // automatic pool cannot hook into it.
+    var threaded_io = std.Io.Threaded.create(.{ .thread_count = 1 }) catch {
+        py.setError("Failed to create Io runtime", .{});
+        return null;
+    };
+    defer threaded_io.deinit();
+    const io = threaded_io.io();
+
+    const ip_addr = std.Io.net.IpAddress.parse(server_host, server_port) catch {
         py.setError("Invalid address: {s}:{d}", .{ server_host, server_port });
         return null;
     };
 
-    var tcp_server = addr.listen(.{ .reuse_address = true }) catch {
+    var tcp_server = ip_addr.listen(io, .{ .reuse_address = true }) catch {
         py.setError("Failed to bind to {s}:{d}", .{ server_host, server_port });
         return null;
     };
@@ -831,8 +842,9 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     const save = py.PyEval_SaveThread();
 
     while (true) {
-        const conn = tcp_server.accept() catch continue;
-        pool.queue.push(conn.stream);
+        // 0.16: tcp_server.accept() returns the stream directly; no .stream field
+        const stream = tcp_server.accept() catch continue;
+        pool.queue.push(stream);
     }
 
     py.PyEval_RestoreThread(save);
@@ -863,8 +875,8 @@ fn parseHeaders(request_data: []const u8, first_line_end: usize, header_end_pos:
     return headers;
 }
 
-fn handleConnection(stream: std.net.Stream, tstate: ?*anyopaque) void {
-    defer stream.close();
+fn handleConnection(stream: std.Io.net.Stream, tstate: ?*anyopaque) void {
+    defer stream.deinit();
 
     // Slowloris protection: if client sends nothing for 30s, read() times out
     // and the worker is freed. No kqueue needed — just a socket option.
@@ -876,7 +888,7 @@ fn handleConnection(stream: std.net.Stream, tstate: ?*anyopaque) void {
     }
 }
 
-fn handleOneRequest(stream: std.net.Stream, tstate: ?*anyopaque) !void {
+fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     // Phase 1: Read headers into a fixed buffer (headers are typically < 8KB)
     var header_buf: [8192]u8 = undefined;
     var total_read: usize = 0;
@@ -1252,7 +1264,7 @@ fn ffiError() FfiResponse {
 // Python fast handlers return (status_code, content_type, body_str).
 // Unpack and send — no dict key lookups, no hash computation.
 
-fn sendTupleResponse(stream: std.net.Stream, result: *c.PyObject) void {
+fn sendTupleResponse(stream: std.Io.net.Stream, result: *c.PyObject) void {
     const sc_obj = py.PyTuple_GetItem(result, 0) orelse {
         sendResponse(stream, 500, "application/json", "{\"error\":\"bad tuple[0]\"}");
         return;
@@ -1288,7 +1300,7 @@ fn sendTupleResponse(stream: std.net.Stream, result: *c.PyObject) void {
 
 // ── simple_sync_noargs: PyObject_CallNoArgs — no tuple/dict construction ─────
 
-fn callPythonNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.net.Stream) void {
+fn callPythonNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.Io.net.Stream) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
 
@@ -1302,7 +1314,7 @@ fn callPythonNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.net.St
 }
 
 /// Like callPythonNoArgs but caches the pre-rendered response for subsequent calls.
-fn callPythonNoArgsCaching(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.net.Stream, handler_key: []const u8) void {
+fn callPythonNoArgsCaching(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.Io.net.Stream, handler_key: []const u8) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
 
@@ -1359,7 +1371,7 @@ fn callPythonVectorcall(
     entry: HandlerEntry,
     query_string: []const u8,
     params: *const router_mod.RouteParams,
-    stream: std.net.Stream,
+    stream: std.Io.net.Stream,
 ) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
@@ -1439,7 +1451,7 @@ fn callPythonVectorcallCaching(
     entry: HandlerEntry,
     query_string: []const u8,
     params: *const router_mod.RouteParams,
-    stream: std.net.Stream,
+    stream: std.Io.net.Stream,
     cache_key: []const u8,
 ) void {
     py.PyEval_AcquireThread(tstate);
@@ -1527,7 +1539,7 @@ fn callPythonVectorcallCaching(
 // ── Fast Python handler dispatch (simple_sync/body_sync) ─────────────────────
 // Calls Python with kwargs dict, unpacks 3-tuple response — zero extra allocs.
 
-fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_string: []const u8, body: []const u8, params: *const router_mod.RouteParams, stream: std.net.Stream) void {
+fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_string: []const u8, body: []const u8, params: *const router_mod.RouteParams, stream: std.Io.net.Stream) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
 
@@ -1638,7 +1650,7 @@ fn jsonValueToPyObject(val: std.json.Value) ?*c.PyObject {
 
 // ── model_sync fast dispatch: Zig-parsed JSON → Python dict (no json.loads) ──
 
-fn callPythonModelHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, body: []const u8, params: *const router_mod.RouteParams, stream: std.net.Stream) void {
+fn callPythonModelHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, body: []const u8, params: *const router_mod.RouteParams, stream: std.Io.net.Stream) void {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch {
         sendResponse(stream, 400, "application/json", "{\"error\":\"Invalid JSON\"}");
         return;
@@ -1699,7 +1711,7 @@ fn callPythonModelHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, body: 
 
 /// Single-parse variant: takes a pre-parsed std.json.Value from validateJsonRetainParsed.
 /// Eliminates the second JSON parse that callPythonModelHandlerDirect does.
-fn callPythonModelHandlerParsed(tstate: ?*anyopaque, entry: HandlerEntry, json_value: std.json.Value, params: *const router_mod.RouteParams, stream: std.net.Stream) void {
+fn callPythonModelHandlerParsed(tstate: ?*anyopaque, entry: HandlerEntry, json_value: std.json.Value, params: *const router_mod.RouteParams, stream: std.Io.net.Stream) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
 
@@ -2055,7 +2067,7 @@ fn statusText(status: u16) []const u8 {
 /// Zero-alloc response writer.  Header + body are concatenated into a stack
 /// buffer for a single write syscall (most API responses are <4KB).
 /// Falls back to two writes only for large responses.
-pub fn sendResponse(stream: std.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
+pub fn sendResponse(stream: std.Io.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
     // TFB requires Server + Date headers
     var date_buf: [40]u8 = undefined;
     const timestamp = std.time.timestamp();
