@@ -48,11 +48,14 @@ const ParamMeta = struct {
     has_default: bool, // true → skip if missing (let Python use its own default)
 };
 
+const param_type_map = std.StaticStringMap(ParamType).initComptime(.{
+    .{ "int",   .int },
+    .{ "float", .float },
+    .{ "bool",  .bool_val },
+});
+
 fn parseParamType(s: []const u8) ParamType {
-    if (std.mem.eql(u8, s, "int")) return .int;
-    if (std.mem.eql(u8, s, "float")) return .float;
-    if (std.mem.eql(u8, s, "bool")) return .bool_val;
-    return .str;
+    return param_type_map.get(s) orelse .str;
 }
 
 /// Parse "name:type|name:type|..." into out[]. Returns count of parsed params.
@@ -152,14 +155,17 @@ const HandlerType = enum(u8) {
     enhanced,
 };
 
+const handler_type_map = std.StaticStringMap(HandlerType).initComptime(.{
+    .{ "simple_sync_noargs", .simple_sync_noargs },
+    .{ "simple_sync",        .simple_sync },
+    .{ "model_sync",         .model_sync },
+    .{ "body_sync",          .body_sync },
+    .{ "form_sync",          .form_sync },
+    .{ "file_sync",          .file_sync },
+});
+
 fn parseHandlerType(s: []const u8) HandlerType {
-    if (std.mem.eql(u8, s, "simple_sync_noargs")) return .simple_sync_noargs;
-    if (std.mem.eql(u8, s, "simple_sync")) return .simple_sync;
-    if (std.mem.eql(u8, s, "model_sync")) return .model_sync;
-    if (std.mem.eql(u8, s, "body_sync")) return .body_sync;
-    if (std.mem.eql(u8, s, "form_sync")) return .form_sync;
-    if (std.mem.eql(u8, s, "file_sync")) return .file_sync;
-    return .enhanced;
+    return handler_type_map.get(s) orelse .enhanced;
 }
 
 const HandlerEntry = struct {
