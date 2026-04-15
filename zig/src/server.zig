@@ -2211,6 +2211,11 @@ fn cacheThreadWorker(ctx: *const CacheThreadCtx) void {
 }
 
 test "response cache is safe under concurrent access" {
+    // std.Io.Mutex requires an initialized runtime.io — set up a minimal threaded runtime.
+    runtime.threaded = std.Io.Threaded.init(std.heap.c_allocator, .{ .async_limit = .nothing });
+    defer runtime.threaded.deinit();
+    runtime.io = runtime.threaded.io();
+
     response_cache = null;
     response_cache_count = 0;
     response_cache_lock = .init;
@@ -2238,7 +2243,8 @@ test "response cache is safe under concurrent access" {
 // These tests exercise the parsing functions used by handleOneRequest.
 // The invariants are: no panics, no out-of-bounds access, bounded output.
 
-fn fuzz_percentDecode(_: void, input: []const u8) anyerror!void {
+fn fuzz_percentDecode(_: void, smith: *std.testing.Smith) anyerror!void {
+    const input = smith.in orelse return;
     var buf: [4096]u8 = undefined;
     const out = percentDecode(input, &buf);
     // Decoded output is never longer than percent-encoded input
@@ -2269,7 +2275,8 @@ test "fuzz: percentDecode — output bounded, no OOB" {
     });
 }
 
-fn fuzz_queryStringGet(_: void, input: []const u8) anyerror!void {
+fn fuzz_queryStringGet(_: void, smith: *std.testing.Smith) anyerror!void {
+    const input = smith.in orelse return;
     // Split: first 16 bytes = key, remainder = query string
     const split = @min(input.len, 16);
     const key = input[0..split];
@@ -2301,7 +2308,8 @@ test "fuzz: queryStringGet — result is within input, no panic" {
     });
 }
 
-fn fuzz_requestLineParsing(_: void, input: []const u8) anyerror!void {
+fn fuzz_requestLineParsing(_: void, smith: *std.testing.Smith) anyerror!void {
+    const input = smith.in orelse return;
     if (input.len == 0) return;
 
     // The parser searches for \r\n\r\n to delimit headers from body.

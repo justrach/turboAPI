@@ -597,7 +597,8 @@ test "no match returns null" {
 
 // ── Fuzz tests ───────────────────────────────────────────────────────────────
 
-fn fuzz_findRoute(_: void, input: []const u8) anyerror!void {
+fn fuzz_findRoute(_: void, smith: *std.testing.Smith) anyerror!void {
+    const input = smith.in orelse return;
     if (input.len == 0) return;
 
     // First byte selects the HTTP method

@@ -408,7 +408,8 @@ const fuzz_schema = ModelSchema{
     },
 };
 
-fn fuzz_validateJson(_: void, input: []const u8) anyerror!void {
+fn fuzz_validateJson(_: void, smith: *std.testing.Smith) anyerror!void {
+    const input = smith.in orelse return;
     const result = validateJson(input, &fuzz_schema);
     switch (result) {
         .ok => {},

@@ -69,7 +69,7 @@ pub fn parseMultipart(alloc: std.mem.Allocator, body: []const u8, boundary: []co
 
     var pos: usize = 0;
 
-    const first_delim = std.mem.indexOf(u8, body, delim) orelse return MultipartResult{ .fields = fields.items, .files = files.items };
+    const first_delim = std.mem.indexOf(u8, body, delim) orelse return MultipartResult{ .fields = try fields.toOwnedSlice(alloc), .files = try files.toOwnedSlice(alloc) };
     pos = first_delim + delim.len;
     pos += std.mem.indexOf(u8, body[pos..], "\r\n") orelse 2;
     pos += 2;
@@ -154,8 +154,8 @@ pub fn parseMultipart(alloc: std.mem.Allocator, body: []const u8, boundary: []co
     }
 
     return MultipartResult{
-        .fields = fields.items,
-        .files = files.items,
+        .fields = try fields.toOwnedSlice(alloc),
+        .files = try files.toOwnedSlice(alloc),
     };
 }
 
@@ -172,7 +172,7 @@ pub fn parseUrlencoded(alloc: std.mem.Allocator, body: []const u8) !UrlencodedRe
     var fields: std.ArrayListUnmanaged(FormField) = .empty;
     errdefer fields.deinit(alloc);
 
-    if (body.len == 0) return UrlencodedResult{ .fields = fields.items };
+    if (body.len == 0) return UrlencodedResult{ .fields = try fields.toOwnedSlice(alloc) };
 
     var pos: usize = 0;
     while (pos < body.len) {
@@ -192,7 +192,7 @@ pub fn parseUrlencoded(alloc: std.mem.Allocator, body: []const u8) !UrlencodedRe
         try fields.append(alloc, .{ .name = decoded_key, .value = decoded_val });
     }
 
-    return UrlencodedResult{ .fields = fields.items };
+    return UrlencodedResult{ .fields = try fields.toOwnedSlice(alloc) };
 }
 
 pub fn percentDecodeAlloc(alloc: std.mem.Allocator, src: []const u8) ![]const u8 {
