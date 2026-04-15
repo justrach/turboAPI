@@ -410,8 +410,27 @@ const RouteNode = struct {
     }
 
     fn findChildIndex(self: *const RouteNode, c: u8) ?usize {
-        for (self.indices, 0..) |idx_byte, i| {
-            if (idx_byte == c) return i;
+        const n = self.indices.len;
+        if (n == 0) return null;
+
+        // SIMD fast path: scan 16 indices per iteration when the node has ≥16 children.
+        // Compiles to PCMPEQB+PMOVMSKB on x86 or CMEQ+UMAXV on AArch64.
+        const Vec16 = @Vector(16, u8);
+        const needle: Vec16 = @splat(c);
+        var i: usize = 0;
+        while (i + 16 <= n) : (i += 16) {
+            const chunk: Vec16 = self.indices[i..][0..16].*;
+            const eq: @Vector(16, bool) = chunk == needle;
+            if (@reduce(.Or, eq)) {
+                inline for (0..16) |j| {
+                    if (eq[j]) return i + j;
+                }
+            }
+        }
+
+        // Scalar tail — also the only path when n < 16 (typical case).
+        while (i < n) : (i += 1) {
+            if (self.indices[i] == c) return i;
         }
         return null;
     }
