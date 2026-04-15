@@ -445,4 +445,125 @@ Or with the `goto-bus-stop/setup-zig` action:
 - uses: goto-bus-stop/setup-zig@v2
   with:
     version: 0.16.0
+
+---
+
+## Step-by-step migration walkthrough with `zigup`
+
+This section walks through the full migration from 0.15.2 to 0.16 as a
+practical checklist — using `zigup` so you never need to touch your system
+Zig installation.
+
+### 1. Install zigup and fetch both compilers
+
+```bash
+brew install marler8997/tap/zigup
+
+# Fetch without changing your active default
+zigup fetch 0.15.2   # keep old compiler available for fallback
+zigup fetch 0.16.0   # new compiler to migrate to
+zigup list           # verify both are present
+```
+
+### 2. Create an isolation branch
+
+```bash
+git checkout -b feat/zig-0.16-migration
+```
+
+Work here until the build is green, then merge.
+
+### 3. Try the build with 0.16 — do NOT set it as default yet
+
+```bash
+zigup run 0.16.0 zig build 2>&1 | head -60
+```
+
+You will likely see a batch of errors. The common categories are:
+
+| Error pattern | What changed | Fix |
+|---|---|---|
+| `no field 'addIncludePath' in 'Compile'` | Build API moved to `root_module` | `lib.root_module.addIncludePath(...)` |
+| `'std.net' has no member 'Stream'` | Networking split to `std.Io.net` | See §Networking above |
+| `'timestamp' not found in 'std.time'` | Timestamp functions removed | Use `std.c.clock_gettime(.REALTIME, &ts)` |
+| `'lockUncancelable' not found` | Mutex API changed | `mutex.lock(io) catch ...` |
+| `'std.crypto.random' not found` | CSPRNG moved | `arc4random_buf(&buf, buf.len)` |
+| `cannot shadow module-level extern` | Scoping rule tightened | Rename local or remove `extern` |
+
+### 4. Fix errors in batches, rebuild after each category
+
+Tackle one category at a time.  After each batch:
+
+```bash
+zigup run 0.16.0 zig build        # must be clean before moving on
+zigup run 0.15.2 zig build        # old build must still work (don't break CI)
+```
+
+The dual-check keeps both branches buildable while you iterate.
+
+### 5. Run your test suite under 0.16
+
+```bash
+zigup run 0.16.0 zig build test   # Zig unit tests
+uv run --python 3.14t pytest tests/ -p no:anchorpy   # Python integration tests
+```
+
+Fix any test failures before promoting 0.16 to default.
+
+### 6. Benchmark: compare old and new builds side-by-side
+
+Keep the un-migrated branch in a git worktree so you can build both at once:
+
+```bash
+# Build old branch with 0.15.2
+git worktree add /tmp/myproject-old main
+cd /tmp/myproject-old
+zigup run 0.15.2 zig build --release-fast
+./zig-out/bin/server &   # or your Python launch command
+
+# Build new branch with 0.16
+cd -
+zigup run 0.16.0 zig build --release-fast
+./zig-out/bin/server --port 8081 &
+
+# Compare
+wrk -t4 -c100 -d15s http://localhost:8080/health
+wrk -t4 -c100 -d15s http://localhost:8081/health
+```
+
+For TurboAPI specifically, a typical comparison shows ~1–4% throughput
+improvement from the 0.16 Zig-layer optimisations (SIMD header scanning,
+`StaticStringMap` dispatch, bulk-copy string paths) on top of baseline
+~138–140 k req/s through the native HTTP backend:
+
+```
+Endpoint               Before (req/s)  After (req/s)      Δ
+---------------------------------------------------------------
+GET /                         138,015        139,536  +  1.1%
+GET /health                   139,097        139,860  +  0.5%
+GET /json                     138,623        139,997  +  1.0%
+GET /users/123                138,720        139,073  +  0.3%
+===============================================================
+Average                       138,614        139,617  +  0.7%
+```
+
+(Measured locally on Apple M-series, native Zig HTTP server, `-t4 -c100 -d8s`.)
+
+### 7. Promote 0.16 as the project default
+
+Once tests and benchmarks are green:
+
+```bash
+zigup 0.16.0          # sets system default
+zig version           # should print 0.16.0
+git add -A && git commit -m "build: migrate to Zig 0.16"
+git push origin feat/zig-0.16-migration
+```
+
+Open a PR and merge.  Keep 0.15.2 installed until CI is updated so you
+can fall back quickly.
+
+```bash
+# Later, when CI is stable on 0.16:
+zigup clean 0.15.2
 ```
