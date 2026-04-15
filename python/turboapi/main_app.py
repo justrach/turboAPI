@@ -416,7 +416,6 @@ class TurboAPI(Router):
                 message = await receive()
                 if message["type"] == "lifespan.startup":
                     if lifespan_cm is not None:
-                        import inspect
                         if inspect.isasyncgen(lifespan_cm):
                             await lifespan_cm.__anext__()
                         else:
@@ -426,7 +425,6 @@ class TurboAPI(Router):
                     await send({"type": "lifespan.startup.complete"})
                 elif message["type"] == "lifespan.shutdown":
                     if lifespan_cm is not None:
-                        import inspect
                         try:
                             if inspect.isasyncgen(lifespan_cm):
                                 await lifespan_cm.__anext__()
