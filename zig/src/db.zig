@@ -876,12 +876,15 @@ fn appendSqlLiteral(out: *std.ArrayList(u8), value: []const u8) !void {
     }
 
     try out.append(allocator, '\'');
-    for (value) |ch| {
-        if (ch == '\'') {
-            try out.appendSlice(allocator, "''");
-        } else {
-            try out.append(allocator, ch);
-        }
+    var pos: usize = 0;
+    while (pos < value.len) {
+        // Bulk-copy the clean run up to the next single-quote.
+        const next = std.mem.indexOfScalarPos(u8, value, pos, '\'') orelse value.len;
+        if (next > pos) try out.appendSlice(allocator, value[pos..next]);
+        if (next >= value.len) break;
+        // Escape the quote by doubling it.
+        try out.appendSlice(allocator, "''");
+        pos = next + 1;
     }
     try out.append(allocator, '\'');
 }
@@ -964,10 +967,10 @@ fn encodePySqlValue(item: *c.PyObject, buf: *[256]u8) usize {
         c.PyErr_Clear();
     }
     if (c.PyUnicode_Check(item) != 0) {
-        if (c.PyUnicode_AsUTF8(item)) |cs| {
-            const s = std.mem.span(cs);
-            const copy_len = @min(s.len, 255);
-            @memcpy(buf[0..copy_len], s[0..copy_len]);
+        var sz: c.Py_ssize_t = 0;
+        if (c.PyUnicode_AsUTF8AndSize(item, &sz)) |cs| {
+            const copy_len = @min(@as(usize, @intCast(sz)), 255);
+            @memcpy(buf[0..copy_len], cs[0..copy_len]);
             return copy_len;
         }
         c.PyErr_Clear();
@@ -976,15 +979,16 @@ fn encodePySqlValue(item: *c.PyObject, buf: *[256]u8) usize {
 
     const str_obj = c.PyObject_Str(item) orelse return 0;
     defer c.Py_DecRef(str_obj);
-    if (c.PyUnicode_AsUTF8(str_obj)) |cs| {
-        const s = std.mem.span(cs);
-        const copy_len = @min(s.len, 255);
-        @memcpy(buf[0..copy_len], s[0..copy_len]);
+    var sz2: c.Py_ssize_t = 0;
+    if (c.PyUnicode_AsUTF8AndSize(str_obj, &sz2)) |cs| {
+        const copy_len = @min(@as(usize, @intCast(sz2)), 255);
+        @memcpy(buf[0..copy_len], cs[0..copy_len]);
         return copy_len;
     }
     c.PyErr_Clear();
     return 0;
 }
+
 
 fn execManyMultiValues(sql: []const u8, py_rows: *c.PyObject, max_rows: usize, cols_per_row: usize) ?i64 {
     const values_storage = allocator.alloc([256]u8, max_rows * cols_per_row) catch return null;
