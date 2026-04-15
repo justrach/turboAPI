@@ -40,7 +40,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Clone dhi
         run: git clone --depth 1 https://github.com/justrach/dhi.git /tmp/dhi
