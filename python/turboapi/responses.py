@@ -75,6 +75,14 @@ class Response:
         if samesite:
             cookie += f"; SameSite={samesite}"
         self._cookies.append(cookie)
+        # Also expose in headers dict for direct access (FastAPI compat)
+        existing = self.headers.get("set-cookie")
+        if existing is None:
+            self.headers["set-cookie"] = cookie
+        elif isinstance(existing, list):
+            existing.append(cookie)
+        else:
+            self.headers["set-cookie"] = [existing, cookie]
 
     def delete_cookie(self, key: str, path: str = "/", domain: str | None = None) -> None:
         """Delete a cookie."""

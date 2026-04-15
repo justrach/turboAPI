@@ -484,8 +484,11 @@ class ResponseHandler:
                         extra_headers["set-cookie"] = [existing, cookie]
 
             # For binary content types, return raw bytes
+            # For binary content types, return raw bytes
             if content_type and _is_binary_content_type(content_type):
-                return body, result.status_code, content_type, extra_headers
+                if extra_headers:
+                    return body, result.status_code, content_type, extra_headers
+                return body, result.status_code, content_type
 
             if isinstance(body, bytes):
                 # Try to decode as JSON for JSONResponse
@@ -499,11 +502,17 @@ class ResponseHandler:
                         body = body.decode("utf-8")
                     except UnicodeDecodeError:
                         # Binary data - return with content_type
-                        return body, result.status_code, content_type, extra_headers
+                        if extra_headers:
+                            return body, result.status_code, content_type, extra_headers
+                        return body, result.status_code, content_type
                 except UnicodeDecodeError:
                     # Binary data - return with content_type
-                    return body, result.status_code, content_type, extra_headers
-            return body, result.status_code, content_type, extra_headers
+                    if extra_headers:
+                        return body, result.status_code, content_type, extra_headers
+                    return body, result.status_code, content_type
+            if extra_headers:
+                return body, result.status_code, content_type, extra_headers
+            return body, result.status_code, content_type
 
         # Handle tuple returns: (content, status_code)
         if isinstance(result, tuple):
