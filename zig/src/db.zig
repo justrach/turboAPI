@@ -11,9 +11,6 @@ const dhi = @import("dhi_validator.zig");
 const logger = @import("logger.zig");
 const runtime = @import("runtime.zig");
 
-// GIL release shim (C functions to avoid opaque PyThreadState in Zig cimport)
-extern fn py_gil_save() ?*anyopaque;
-extern fn py_gil_restore(?*anyopaque) void;
 
 const allocator = std.heap.c_allocator;
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -118,7 +115,7 @@ fn now() i64 {
 /// Thread-safe cache lookup. Returns cached body or null if miss/expired.
 fn cacheGet(key: []const u8) ?[]const u8 {
     if (!isDbCacheEnabled()) return null;
-    db_cache_mutex.lockUncancelable(runtime.io);
+    db_cache_mutex.lock(runtime.io) catch return null;
     defer db_cache_mutex.unlock(runtime.io);
 
     const cache = getDbCacheMap();
@@ -141,7 +138,7 @@ fn cacheGet(key: []const u8) ?[]const u8 {
 /// Thread-safe cache put. Evicts oldest entries if full.
 fn cachePut(key: []const u8, body: []const u8, table: []const u8) void {
     if (!isDbCacheEnabled()) return;
-    db_cache_mutex.lockUncancelable(runtime.io);
+    db_cache_mutex.lock(runtime.io) catch return;
     defer db_cache_mutex.unlock(runtime.io);
 
     // LRU eviction: if full, remove ~10% oldest entries
@@ -184,7 +181,7 @@ fn cachePut(key: []const u8, body: []const u8, table: []const u8) void {
 
 /// Per-table invalidation — only clears entries belonging to the specified table.
 fn invalidateTableCache(table: []const u8) void {
-    db_cache_mutex.lockUncancelable(runtime.io);
+    db_cache_mutex.lock(runtime.io) catch return;
     defer db_cache_mutex.unlock(runtime.io);
 
     const cache = getDbCacheMap();
@@ -1019,14 +1016,14 @@ fn execManyMultiValues(sql: []const u8, py_rows: *c.PyObject, max_rows: usize, c
     const sql_owned = buildMultiInsertSql(sql, row_views[0..max_rows]) orelse return null;
     defer allocator.free(sql_owned);
 
-    const gil_state = py_gil_save();
+    const gil_state = py.PyEval_SaveThread();
     const conn = acquireConn() orelse {
-        py_gil_restore(gil_state);
+        py.PyEval_RestoreThread(gil_state);
         return null;
     };
     defer {
         releaseConn(conn);
-        py_gil_restore(gil_state);
+        py.PyEval_RestoreThread(gil_state);
     }
 
     return conn.exec(sql_owned, .{}) catch null;
@@ -1085,10 +1082,10 @@ fn execManyDynamicProtocol(sql: []const u8, py_rows: *c.PyObject, max_rows: usiz
 
             var text_len: usize = 0;
             if (c.PyUnicode_Check(py_item) != 0) {
-                if (c.PyUnicode_AsUTF8(py_item)) |cs| {
-                    const s = std.mem.span(cs);
-                    text_len = @min(s.len, 255);
-                    @memcpy(text_storage[cell_idx][0..text_len], s[0..text_len]);
+                var sz: c.Py_ssize_t = 0;
+                if (c.PyUnicode_AsUTF8AndSize(py_item, &sz)) |cs| {
+                    text_len = @min(@as(usize, @intCast(sz)), 255);
+                    @memcpy(text_storage[cell_idx][0..text_len], cs[0..text_len]);
                 } else {
                     c.PyErr_Clear();
                 }
@@ -1098,10 +1095,10 @@ fn execManyDynamicProtocol(sql: []const u8, py_rows: *c.PyObject, max_rows: usiz
                     continue;
                 };
                 defer c.Py_DecRef(str_obj);
-                if (c.PyUnicode_AsUTF8(str_obj)) |cs| {
-                    const s = std.mem.span(cs);
-                    text_len = @min(s.len, 255);
-                    @memcpy(text_storage[cell_idx][0..text_len], s[0..text_len]);
+                var sz: c.Py_ssize_t = 0;
+                if (c.PyUnicode_AsUTF8AndSize(str_obj, &sz)) |cs| {
+                    text_len = @min(@as(usize, @intCast(sz)), 255);
+                    @memcpy(text_storage[cell_idx][0..text_len], cs[0..text_len]);
                 } else {
                     c.PyErr_Clear();
                 }
@@ -1116,14 +1113,14 @@ fn execManyDynamicProtocol(sql: []const u8, py_rows: *c.PyObject, max_rows: usiz
         row_slices[ri] = dynamic_cells[ri * cols_per_row ..][0..cols_per_row];
     }
 
-    const gil_state = py_gil_save();
+    const gil_state = py.PyEval_SaveThread();
     const conn = acquireConn() orelse {
-        py_gil_restore(gil_state);
+        py.PyEval_RestoreThread(gil_state);
         return null;
     };
     defer {
         releaseConn(conn);
-        py_gil_restore(gil_state);
+        py.PyEval_RestoreThread(gil_state);
     }
 
     return conn.execManyDynamic(sql, row_slices[0..max_rows], .{
@@ -1292,8 +1289,6 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     }
     const param_names_owned = allocator.dupe([]const u8, pnames[0..npnames]) catch return null;
     // Generate prepared statement cache name: "db_METHOD_path"
-    var cache_name_counter: usize = 0;
-    _ = @atomicRmw(usize, &cache_name_counter, .Add, 1, .seq_cst);
     const cache_name = std.fmt.allocPrint(allocator, "db_{s}_{s}", .{ method_s, path_s }) catch null;
 
     const entry = DbRouteEntry{
@@ -1335,23 +1330,23 @@ pub fn db_exec_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObjec
         return null;
     }
 
-    const gil_state = py_gil_save();
+    const gil_state = py.PyEval_SaveThread();
 
     const conn = acquireConn() orelse {
-        py_gil_restore(gil_state);
+        py.PyEval_RestoreThread(gil_state);
         py.setError("Failed to acquire database connection", .{});
         return null;
     };
 
     const rows_affected = conn.exec(sql, .{}) catch {
         releaseConn(conn);
-        py_gil_restore(gil_state);
+        py.PyEval_RestoreThread(gil_state);
         py.setError("Exec failed: {s}", .{sql});
         return null;
     };
 
     releaseConn(conn);
-    py_gil_restore(gil_state);
+    py.PyEval_RestoreThread(gil_state);
 
     if (rows_affected) |n| {
         return c.PyLong_FromLongLong(n);
@@ -1413,17 +1408,17 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     }
 
     // Phase 2: Release GIL, do Postgres I/O (true parallel threading)
-    const gil_state = py_gil_save();
+    const gil_state = py.PyEval_SaveThread();
 
     const conn = acquireConn() orelse {
-        py_gil_restore(gil_state);
+        py.PyEval_RestoreThread(gil_state);
         py.setError("Failed to acquire database connection", .{});
         return null;
     };
 
     const result = execWithParams(conn, sql, param_values[0..param_count], null) orelse {
         releaseConn(conn);
-        py_gil_restore(gil_state);
+        py.PyEval_RestoreThread(gil_state);
         py.setError("Query failed: {s}", .{sql});
         return null;
     };
@@ -1432,7 +1427,7 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     // Buffer row values while GIL is released (heap allocated for large results)
     const flat_buf = allocator.alloc(u8, 2 * 1024 * 1024) catch {
         releaseConn(conn);
-        py_gil_restore(gil_state);
+        py.PyEval_RestoreThread(gil_state);
         py.setError("Out of memory for query result buffer", .{});
         return null;
     };
@@ -1441,7 +1436,7 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
 
     const cells = allocator.alloc(RawCell, MAX_RAW_CELLS) catch {
         releaseConn(conn);
-        py_gil_restore(gil_state);
+        py.PyEval_RestoreThread(gil_state);
         py.setError("Out of memory for cell buffer", .{});
         return null;
     };
@@ -1490,7 +1485,7 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     releaseConn(conn);
 
     // Phase 3: Reacquire GIL, build Python objects
-    py_gil_restore(gil_state);
+    py.PyEval_RestoreThread(gil_state);
 
     // Pre-intern column name keys (created once, reused for all rows)
     var py_keys: [32]?*c.PyObject = [_]?*c.PyObject{null} ** 32;
@@ -1749,22 +1744,22 @@ pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         }
 
         // Release GIL, do COPY I/O
-        const gil_state = py_gil_save();
+        const gil_state = py.PyEval_SaveThread();
         const conn = acquireConn() orelse {
-            py_gil_restore(gil_state);
+            py.PyEval_RestoreThread(gil_state);
             py.setError("Failed to acquire database connection", .{});
             return null;
         };
 
         const row_count = conn.copyFrom(table, col_slices[0..cols_to_use], row_slices[0..max_rows]) catch {
             releaseConn(conn);
-            py_gil_restore(gil_state);
+            py.PyEval_RestoreThread(gil_state);
             py.setError("COPY FROM failed for table: {s}", .{table});
             return null;
         };
 
         releaseConn(conn);
-        py_gil_restore(gil_state);
+        py.PyEval_RestoreThread(gil_state);
         return c.PyLong_FromLongLong(row_count);
     }
 
@@ -1830,21 +1825,21 @@ pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         row_slices[ri] = cell_slices[ri * cols_to_use ..][0..cols_to_use];
     }
 
-    const gil_state = py_gil_save();
+    const gil_state = py.PyEval_SaveThread();
     const conn = acquireConn() orelse {
-        py_gil_restore(gil_state);
+        py.PyEval_RestoreThread(gil_state);
         py.setError("Failed to acquire database connection", .{});
         return null;
     };
 
     const row_count = conn.copyFrom(table, col_slices[0..cols_to_use], row_slices[0..max_rows]) catch {
         releaseConn(conn);
-        py_gil_restore(gil_state);
+        py.PyEval_RestoreThread(gil_state);
         py.setError("COPY FROM failed for table: {s}", .{table});
         return null;
     };
 
     releaseConn(conn);
-    py_gil_restore(gil_state);
+    py.PyEval_RestoreThread(gil_state);
     return c.PyLong_FromLongLong(row_count);
 }
