@@ -333,3 +333,116 @@ fn myConnect(...) !void {
 | `callconv(.c)` FFI exports | yes |
 | `b.addLibrary`, `b.createModule`, `b.dependency` | yes |
 | `std.heap.c_allocator` | yes |
+
+---
+
+## Managing multiple Zig versions with `zigup`
+
+When migrating a project, you often need to keep the old compiler available — for
+comparison builds, CI, or vendored dependencies that haven't been ported yet.
+[`zigup`](https://github.com/marler8997/zigup) handles this cleanly and is the
+recommended approach on macOS/Linux.
+
+### Install
+
+```bash
+brew install marler8997/tap/zigup
+```
+
+### Install specific versions side-by-side
+
+```bash
+zigup fetch 0.15.2   # download without changing the default
+zigup fetch 0.16.0   # download without changing the default
+zigup list           # show all installed versions
+```
+
+```
+0.15.2
+0.16.0  (default)
+```
+
+### Switch the default
+
+```bash
+zigup 0.16.0          # set 0.16.0 as the default `zig` on $PATH
+zigup default         # print current default
+zigup default 0.15.2  # switch back to 0.15.2
+```
+
+### Run a specific version without changing the default
+
+```bash
+zigup run 0.15.2 build        # build with 0.15.2
+zigup run 0.16.0 build test   # test with 0.16.0
+```
+
+Or reference the binary directly (useful in scripts and CI):
+
+```bash
+~/.local/share/zigup/0.15.2/files/zig build
+~/.local/share/zigup/0.16.0/files/zig build
+```
+
+### Practical workflow for a 0.15 → 0.16 migration
+
+```bash
+# 1. Keep 0.15.2 as the working default while you start
+zigup fetch 0.16.0
+
+# 2. Attempt the build with 0.16 without touching your default
+zigup run 0.16.0 build 2>&1 | head -40
+
+# 3. Fix each error, re-run until clean
+zigup run 0.16.0 build
+
+# 4. Once clean, promote 0.16 to default
+zigup 0.16.0
+
+# 5. Keep 0.15.2 around for branch comparisons; clean up later
+zigup clean 0.15.2
+```
+
+### Using both versions in the same repo (worktrees)
+
+This is useful for performance comparisons between the old and new backend.
+Create a git worktree for the un-migrated branch and build it with 0.15.2:
+
+```bash
+git worktree add /tmp/myproject-old main
+cd /tmp/myproject-old
+zigup run 0.15.2 build          # build old branch with 0.15.2
+cd -
+zig build                        # build new branch with 0.16 (the default)
+```
+
+Then run both servers and diff the wrk numbers — see the `benchmarks/` directory
+for a ready-made comparison script.
+
+### `zigup install-dir`
+
+By default zigup stores compilers in `~/.local/share/zigup/`. You can relocate this
+(e.g. to a fast SSD or shared network path):
+
+```bash
+zigup set-install-dir /Volumes/fast/zig-compilers
+zigup fetch 0.16.0   # now stored on /Volumes/fast/...
+```
+
+### CI tip: pin the version in your workflow
+
+```yaml
+# .github/workflows/ci.yml
+- name: Install Zig 0.16.0
+  run: |
+    brew install marler8997/tap/zigup
+    zigup 0.16.0
+```
+
+Or with the `goto-bus-stop/setup-zig` action:
+
+```yaml
+- uses: goto-bus-stop/setup-zig@v2
+  with:
+    version: 0.16.0
+```
