@@ -9,6 +9,7 @@ const c = py.c;
 const router_mod = @import("turboapi-core").router;
 const dhi = @import("dhi_validator.zig");
 const logger = @import("logger.zig");
+const runtime = @import("runtime.zig");
 
 // GIL release shim (C functions to avoid opaque PyThreadState in Zig cimport)
 extern fn py_gil_save() ?*anyopaque;
@@ -53,7 +54,7 @@ var db_cache_enabled: bool = true;
 var db_cache_ttl: i64 = 30; // default 30 second TTL
 var db_cache: ?std.StringHashMap(CacheEntry) = null;
 var db_cache_count: usize = 0;
-var db_cache_mutex: std.Thread.Mutex = .{};
+var db_cache_mutex: std.Io.Mutex = .init;
 var db_cache_checked_env: bool = false;
 
 const ExecManyMode = enum {
@@ -66,7 +67,7 @@ var exec_many_mode: ExecManyMode = .dynamic_protocol;
 fn isDbCacheEnabled() bool {
     if (!db_cache_checked_env) {
         db_cache_checked_env = true;
-        if (std.posix.getenv("TURBO_DISABLE_DB_CACHE")) |val| {
+        if (std.c.getenv("TURBO_DISABLE_DB_CACHE")) |_p| { const val = std.mem.span(_p);
             if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
                 db_cache_enabled = false;
                 logger.info("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE", .{});
@@ -78,7 +79,7 @@ fn isDbCacheEnabled() bool {
 
 fn configureExecManyModeFromEnv() void {
     exec_many_mode = .multi_values;
-    if (std.posix.getenv("TURBOPG_EXEC_MANY_MODE")) |val| {
+    if (std.c.getenv("TURBOPG_EXEC_MANY_MODE")) |_p| { const val = std.mem.span(_p);
         if (std.mem.eql(u8, val, "multi") or std.mem.eql(u8, val, "multi_values")) {
             exec_many_mode = .multi_values;
         } else if (std.mem.eql(u8, val, "dynamic") or std.mem.eql(u8, val, "protocol")) {
@@ -109,14 +110,16 @@ pub fn getPool() ?*pg.Pool {
 }
 
 fn now() i64 {
-    return @intCast(@divTrunc(std.time.milliTimestamp(), 1000));
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    return ts.sec;
 }
 
 /// Thread-safe cache lookup. Returns cached body or null if miss/expired.
 fn cacheGet(key: []const u8) ?[]const u8 {
     if (!isDbCacheEnabled()) return null;
-    db_cache_mutex.lock();
-    defer db_cache_mutex.unlock();
+    db_cache_mutex.lockUncancelable(runtime.io);
+    defer db_cache_mutex.unlock(runtime.io);
 
     const cache = getDbCacheMap();
     if (cache.get(key)) |entry| {
@@ -138,8 +141,8 @@ fn cacheGet(key: []const u8) ?[]const u8 {
 /// Thread-safe cache put. Evicts oldest entries if full.
 fn cachePut(key: []const u8, body: []const u8, table: []const u8) void {
     if (!isDbCacheEnabled()) return;
-    db_cache_mutex.lock();
-    defer db_cache_mutex.unlock();
+    db_cache_mutex.lockUncancelable(runtime.io);
+    defer db_cache_mutex.unlock(runtime.io);
 
     // LRU eviction: if full, remove ~10% oldest entries
     if (db_cache_count >= DB_CACHE_MAX) {
@@ -181,8 +184,8 @@ fn cachePut(key: []const u8, body: []const u8, table: []const u8) void {
 
 /// Per-table invalidation — only clears entries belonging to the specified table.
 fn invalidateTableCache(table: []const u8) void {
-    db_cache_mutex.lock();
-    defer db_cache_mutex.unlock();
+    db_cache_mutex.lockUncancelable(runtime.io);
+    defer db_cache_mutex.unlock(runtime.io);
 
     const cache = getDbCacheMap();
     // Collect keys to remove (can't remove during iteration)
@@ -403,12 +406,12 @@ fn serializeFixedSchemaRow(row: anytype, json_key_parts: []const []const u8, buf
 // ── Request dispatch (called from server.zig fast-exit path) ─────────────────
 
 pub fn handleDbRoute(
-    stream: std.net.Stream,
+    stream: std.Io.net.Stream,
     entry: *const DbRouteEntry,
     body: []const u8,
     params: *const router_mod.RouteParams,
     query_string: []const u8,
-    sendResponseFn: *const fn (std.net.Stream, u16, []const u8, []const u8) void,
+    sendResponseFn: *const fn (std.Io.net.Stream, u16, []const u8, []const u8) void,
 ) void {
     switch (entry.op) {
         .select_one => {
@@ -913,7 +916,7 @@ fn estimateMultiInsertCapacity(base_sql: []const u8, rows: []const []const []con
 fn buildMultiInsertSql(base_sql: []const u8, rows: []const []const []const u8) ?[]u8 {
     if (rows.len == 0) return null;
     const values_idx = std.mem.indexOf(u8, base_sql, "VALUES") orelse return null;
-    const prefix = std.mem.trimRight(u8, base_sql[0 .. values_idx + "VALUES".len], " \t\r\n");
+    const prefix = std.mem.trimEnd(u8, base_sql[0 .. values_idx + "VALUES".len], " \t\r\n");
 
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
@@ -1172,13 +1175,13 @@ pub fn db_configure(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     logger.info("[DB] Pool initialized: {d} connections to {s}", .{ size, uri_str });
 
     // Auto-check env vars for cache control
-    if (std.posix.getenv("TURBO_DISABLE_DB_CACHE")) |val| {
+    if (std.c.getenv("TURBO_DISABLE_DB_CACHE")) |_p| { const val = std.mem.span(_p);
         if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
             db_cache_enabled = false;
             logger.info("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE", .{});
         }
     }
-    if (std.posix.getenv("TURBO_DB_CACHE_TTL")) |val| {
+    if (std.c.getenv("TURBO_DB_CACHE_TTL")) |_p| { const val = std.mem.span(_p);
         db_cache_ttl = std.fmt.parseInt(i64, val, 10) catch 30;
         logger.info("[DB] Cache TTL set to {d}s", .{db_cache_ttl});
     }
@@ -1188,13 +1191,13 @@ pub fn db_configure(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
 
 /// Check env vars for cache control — called at startup or from Python.
 pub fn db_check_cache_env(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
-    if (std.posix.getenv("TURBO_DISABLE_DB_CACHE")) |val| {
+    if (std.c.getenv("TURBO_DISABLE_DB_CACHE")) |_p| { const val = std.mem.span(_p);
         if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
             db_cache_enabled = false;
             logger.info("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE", .{});
         }
     }
-    if (std.posix.getenv("TURBO_DB_CACHE_TTL")) |val| {
+    if (std.c.getenv("TURBO_DB_CACHE_TTL")) |_p| { const val = std.mem.span(_p);
         db_cache_ttl = std.fmt.parseInt(i64, val, 10) catch 30;
         logger.info("[DB] Cache TTL set to {d}s", .{db_cache_ttl});
     }

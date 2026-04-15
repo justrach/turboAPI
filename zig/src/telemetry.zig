@@ -5,6 +5,12 @@
 
 const std = @import("std");
 
+fn milliTimestamp() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+}
+
 pub const Level = enum(u8) {
     debug = 0,
     info = 1,
@@ -92,10 +98,10 @@ const StderrExporter = struct {
     fn exportEventsFn(ptr: *anyopaque, events: []const Event) void {
         _ = ptr;
         var buffer: [4096]u8 = undefined;
-        const writer = std.debug.lockStderrWriter(&buffer);
-        defer std.debug.unlockStderrWriter();
+        const stderr = std.debug.lockStderr(&buffer);
+        defer std.debug.unlockStderr();
         for (events) |event| {
-            writeEvent(writer, event) catch {};
+            writeEvent(&stderr.file_writer.interface, event) catch {};
         }
     }
 
@@ -133,7 +139,7 @@ fn writeLogEvent(writer: anytype, l: LogEvent) !void {
             try writer.print("{s} {s}\n", .{ level_text, l.msg });
         },
         .json => {
-            const ts = std.time.milliTimestamp();
+            const ts = milliTimestamp();
             try writer.writeAll("{\"ts\":");
             try writer.print("{d}", .{ts});
             try writer.writeAll(",\"level\":\"");
@@ -188,10 +194,10 @@ var active_exporter: Exporter = undefined;
 // ── Public API ───────────────────────────────────────────────────────────────
 
 pub fn init() void {
-    if (std.posix.getenv("TURBO_LOG_LEVEL")) |val| {
+    if (std.c.getenv("TURBO_LOG_LEVEL")) |_p| { const val = std.mem.span(_p);
         if (std.mem.eql(u8, val, "debug")) log_level = .debug else if (std.mem.eql(u8, val, "info")) log_level = .info else if (std.mem.eql(u8, val, "warn")) log_level = .warn else if (std.mem.eql(u8, val, "error")) log_level = .err;
     }
-    if (std.posix.getenv("TURBO_LOG_FORMAT")) |val| {
+    if (std.c.getenv("TURBO_LOG_FORMAT")) |_p| { const val = std.mem.span(_p);
         if (std.mem.eql(u8, val, "json")) log_format = .json;
     }
     enabled = true;

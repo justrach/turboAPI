@@ -11,9 +11,30 @@ const dhi = @import("dhi_validator.zig");
 const db = @import("db.zig");
 const multipart_mod = @import("multipart.zig");
 const logger = @import("logger.zig");
+const runtime = @import("runtime.zig");
 const telemetry = @import("telemetry.zig");
 
 const allocator = std.heap.c_allocator;
+const posix = std.posix;
+
+// Zig 0.16: std.posix.write removed, std.time.timestamp() removed.
+// Use C-level write() and clock_gettime() directly.
+extern "c" fn write(fd: c_int, buf: [*]const u8, nbytes: usize) isize;
+
+fn streamWriteAll(stream: std.Io.net.Stream, data: []const u8) !void {
+    var remaining = data;
+    while (remaining.len > 0) {
+        const n = write(stream.socket.handle, remaining.ptr, remaining.len);
+        if (n <= 0) return error.BrokenPipe;
+        remaining = remaining[@intCast(n)..];
+    }
+}
+
+fn timestampSeconds() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    return ts.sec;
+}
 
 // ── Route storage ───────────────────────────────────────────────────────────
 
@@ -209,7 +230,7 @@ var routes: ?std.StringHashMap(HandlerEntry) = null;
 var native_routes: ?std.StringHashMap(NativeHandlerEntry) = null;
 var static_routes: ?std.StringHashMap(StaticRouteEntry) = null;
 var response_cache: ?std.StringHashMap([]const u8) = null;
-var response_cache_lock: std.Thread.Mutex = .{};
+var response_cache_lock: std.Io.Mutex = .init;
 var response_cache_count: usize = 0;
 const MAX_CACHE_ENTRIES: usize = 10_000; // bounded to prevent OOM via unique paths
 var model_schemas: ?std.StringHashMap(dhi.ModelSchema) = null;
@@ -252,16 +273,16 @@ fn getResponseCache() *std.StringHashMap([]const u8) {
 }
 
 fn getCachedResponse(key: []const u8) ?[]const u8 {
-    response_cache_lock.lock();
-    defer response_cache_lock.unlock();
+    response_cache_lock.lockUncancelable(runtime.io);
+    defer response_cache_lock.unlock(runtime.io);
     if (response_cache == null) return null;
     return response_cache.?.get(key);
 }
 
 /// Cache a pre-rendered response, respecting MAX_CACHE_ENTRIES to prevent OOM.
 fn cacheResponse(key: []const u8, rendered: []const u8) void {
-    response_cache_lock.lock();
-    defer response_cache_lock.unlock();
+    response_cache_lock.lockUncancelable(runtime.io);
+    defer response_cache_lock.unlock(runtime.io);
 
     if (response_cache_count >= MAX_CACHE_ENTRIES) {
         allocator.free(rendered);
@@ -687,7 +708,7 @@ pub fn server_add_middleware(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.
 
 pub fn server_enable_response_cache(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     // Check if response cache is disabled via env var
-    if (std.posix.getenv("TURBO_DISABLE_RESPONSE_CACHE")) |val| {
+    if (std.c.getenv("TURBO_DISABLE_RESPONSE_CACHE")) |_p| { const val = std.mem.span(_p);
         if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
             cache_noargs_responses = false;
             logger.info("[CACHE] Response caching DISABLED via TURBO_DISABLE_RESPONSE_CACHE", .{});
@@ -704,7 +725,7 @@ fn renderResponse(status: u16, content_type: []const u8, body: []const u8) ?[]co
     const cors = cors_headers;
     // Note: Date is static for cached responses. TFB just needs the header present.
     var date_buf: [40]u8 = undefined;
-    const ts = std.time.timestamp();
+    const ts = timestampSeconds();
     const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(ts) };
     const ds = es.getDaySeconds();
     const ed = es.getEpochDay();
@@ -741,27 +762,27 @@ const ConnectionPool = struct {
         head: usize = 0,
         tail: usize = 0,
         count: usize = 0,
-        mutex: std.Thread.Mutex = .{},
-        not_empty: std.Thread.Condition = .{},
+        mutex: std.Io.Mutex = .init,
+        not_empty: std.Io.Condition = .init,
 
         fn push(self: *Queue, stream: std.Io.net.Stream) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(runtime.io);
+            defer self.mutex.unlock(runtime.io);
             if (self.count >= self.items.len) {
-                stream.deinit();
+                stream.close(runtime.io);
                 return;
             }
             self.items[self.tail] = stream;
             self.tail = (self.tail + 1) % self.items.len;
             self.count += 1;
-            self.not_empty.signal();
+            self.not_empty.signal(runtime.io);
         }
 
         fn pop(self: *Queue) std.Io.net.Stream {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(runtime.io);
+            defer self.mutex.unlock(runtime.io);
             while (self.count == 0) {
-                self.not_empty.wait(&self.mutex);
+                self.not_empty.waitUncancelable(runtime.io, &self.mutex);
             }
             const stream = self.items[self.head];
             self.head = (self.head + 1) % self.items.len;
@@ -769,6 +790,7 @@ const ConnectionPool = struct {
             return stream;
         }
     };
+
 
     fn init(self: *ConnectionPool, thread_count: usize) void {
         self.queue = .{};
@@ -799,34 +821,31 @@ const ConnectionPool = struct {
 var pool: ConnectionPool = undefined;
 
 pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
-    // One Io instance drives the accept loop only. Worker threads keep using
-    // raw std.Thread.spawn so per-worker PyThreadState lifecycle (PyThreadState_New /
-    // PyThreadState_DeleteCurrent) stays under our control — std.Io.Threaded's
-    // automatic pool cannot hook into it.
-    var threaded_io = std.Io.Threaded.create(.{ .thread_count = 1 }) catch {
-        py.setError("Failed to create Io runtime", .{});
-        return null;
-    };
-    defer threaded_io.deinit();
-    const io = threaded_io.io();
+    // Initialize the shared Io runtime (no extra async threads — our ConnectionPool
+    // manages workers via std.Thread.spawn to hook per-worker PyThreadState lifecycle).
+    runtime.threaded = std.Io.Threaded.init(std.heap.c_allocator, .{
+        .async_limit = .nothing,
+    });
+    defer runtime.threaded.deinit();
+    runtime.io = runtime.threaded.io();
 
     const ip_addr = std.Io.net.IpAddress.parse(server_host, server_port) catch {
         py.setError("Invalid address: {s}:{d}", .{ server_host, server_port });
         return null;
     };
 
-    var tcp_server = ip_addr.listen(io, .{ .reuse_address = true }) catch {
+    var tcp_server = ip_addr.listen(runtime.io, .{ .reuse_address = true }) catch {
         py.setError("Failed to bind to {s}:{d}", .{ server_host, server_port });
         return null;
     };
-    defer tcp_server.deinit();
+    defer tcp_server.deinit(runtime.io);
 
     // Capture interpreter state before releasing the GIL.
     // Workers need this to create their own PyThreadState.
     py_interp = py.PyInterpreterState_Get();
 
     var thread_count: usize = DEFAULT_POOL_SIZE;
-    if (std.posix.getenv("TURBO_THREAD_POOL_SIZE")) |val| {
+    if (std.c.getenv("TURBO_THREAD_POOL_SIZE")) |_p| { const val = std.mem.span(_p);
         thread_count = std.fmt.parseInt(usize, val, 10) catch DEFAULT_POOL_SIZE;
         if (thread_count == 0) thread_count = DEFAULT_POOL_SIZE;
     }
@@ -842,8 +861,7 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     const save = py.PyEval_SaveThread();
 
     while (true) {
-        // 0.16: tcp_server.accept() returns the stream directly; no .stream field
-        const stream = tcp_server.accept() catch continue;
+        const stream = tcp_server.accept(runtime.io) catch continue;
         pool.queue.push(stream);
     }
 
@@ -876,12 +894,12 @@ fn parseHeaders(request_data: []const u8, first_line_end: usize, header_end_pos:
 }
 
 fn handleConnection(stream: std.Io.net.Stream, tstate: ?*anyopaque) void {
-    defer stream.deinit();
+    defer stream.close(runtime.io);
 
     // Slowloris protection: if client sends nothing for 30s, read() times out
     // and the worker is freed. No kqueue needed — just a socket option.
     const timeout = std.posix.timeval{ .sec = 30, .usec = 0 };
-    std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
     while (true) {
         handleOneRequest(stream, tstate) catch return;
@@ -896,7 +914,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
 
     // Read until we find \r\n\r\n (end of headers) or fill the header buffer
     while (total_read < header_buf.len) {
-        const n = stream.read(header_buf[total_read..]) catch return error.ReadError;
+        const n = posix.read(stream.socket.handle, header_buf[total_read..]) catch return error.ReadError;
         if (n == 0) return error.ConnectionClosed;
         total_read += n;
 
@@ -948,7 +966,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     // Static routes — single writeAll of pre-rendered bytes
     const sr = getStaticRoutes();
     if (sr.get(match.handler_key)) |static_entry| {
-        stream.writeAll(static_entry.response_bytes) catch return;
+        streamWriteAll(stream, static_entry.response_bytes) catch return;
         return;
     }
 
@@ -1004,7 +1022,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
                 @memcpy(full[0..db_already.len], db_already);
                 var br: usize = db_already.len;
                 while (br < db_cl) {
-                    const n = stream.read(full[br..db_cl]) catch return;
+                    const n = posix.read(stream.socket.handle, full[br..db_cl]) catch return;
                     if (n == 0) break;
                     br += n;
                 }
@@ -1116,7 +1134,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
         @memcpy(full_body[0..already_read_body.len], already_read_body);
         var body_read: usize = already_read_body.len;
         while (body_read < content_length) {
-            const n = stream.read(full_body[body_read..content_length]) catch |err| {
+            const n = posix.read(stream.socket.handle, full_body[body_read..content_length]) catch |err| {
                 logger.err("[ZIG] body read error: {}", .{err});
                 return;
             };
@@ -2070,7 +2088,7 @@ fn statusText(status: u16) []const u8 {
 pub fn sendResponse(stream: std.Io.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
     // TFB requires Server + Date headers
     var date_buf: [40]u8 = undefined;
-    const timestamp = std.time.timestamp();
+    const timestamp = timestampSeconds();
     const epoch_secs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(timestamp) };
     const day_secs = epoch_secs.getDaySeconds();
     const epoch_day = epoch_secs.getEpochDay();
@@ -2111,12 +2129,12 @@ pub fn sendResponse(stream: std.Io.net.Stream, status: u16, content_type: []cons
         pos += trailer.len;
         @memcpy(resp_buf[pos .. pos + body.len], body);
         pos += body.len;
-        stream.writeAll(resp_buf[0..pos]) catch return;
+        streamWriteAll(stream, resp_buf[0..pos]) catch return;
     } else {
-        stream.writeAll(header) catch return;
-        if (cors.len > 0) stream.writeAll(cors) catch return;
-        stream.writeAll(trailer) catch return;
-        if (body.len > 0) stream.writeAll(body) catch return;
+        streamWriteAll(stream, header) catch return;
+        if (cors.len > 0) streamWriteAll(stream, cors) catch return;
+        streamWriteAll(stream, trailer) catch return;
+        if (body.len > 0) streamWriteAll(stream, body) catch return;
     }
 }
 
@@ -2145,7 +2163,7 @@ fn cacheThreadWorker(ctx: *const CacheThreadCtx) void {
 test "response cache is safe under concurrent access" {
     response_cache = null;
     response_cache_count = 0;
-    response_cache_lock = .{};
+    response_cache_lock = .init;
 
     var threads: [8]std.Thread = undefined;
     var ctxs: [8]CacheThreadCtx = undefined;
