@@ -145,7 +145,8 @@ class TestClient:
             parts = []
             for field_name, file_info in files.items():
                 if isinstance(file_info, tuple):
-                    filename, file_content = file_info
+                    filename = file_info[0]
+                    file_content = file_info[1]
                     if isinstance(file_content, str):
                         file_content = file_content.encode("utf-8")
                     file_ct = "application/octet-stream"
@@ -293,6 +294,71 @@ class TestClient:
                     if key in sig.parameters:
                         kwargs[key] = val
 
+        # Add form/file params
+        if files is not None:
+            import io as _io
+
+            from .datastructures import File as _File
+            from .datastructures import Form as _Form
+            from .datastructures import UploadFile as _UF
+            for param_name, param in sig.parameters.items():
+                if param_name in kwargs:
+                    continue
+                default = param.default
+                ann = param.annotation
+                is_file_default = isinstance(default, _File)
+                is_upload_ann = ann is _UF
+                if is_file_default or is_upload_ann:
+                    field_name = default.alias if is_file_default and default.alias else param_name
+                    if field_name in files:
+                        fi = files[field_name]
+                        if isinstance(fi, tuple):
+                            fn = fi[0]
+                            fc = fi[1] if isinstance(fi[1], bytes) else fi[1].encode("utf-8")
+                            fct = fi[2] if len(fi) > 2 else "application/octet-stream"
+                        else:
+                            fn = "upload"
+                            fc = fi if isinstance(fi, bytes) else fi.read()
+                            fct = "application/octet-stream"
+                        kwargs[param_name] = _UF(
+                            filename=fn,
+                            file=_io.BytesIO(fc),
+                            content_type=fct,
+                            size=len(fc),
+                        )
+                elif isinstance(default, _Form):
+                    field_name = default.alias if default.alias else param_name
+                    field_data = data or {}
+                    if field_name in field_data:
+                        val = str(field_data[field_name])
+                        if ann not in (inspect.Parameter.empty, str):
+                            try:
+                                val = ann(val)
+                            except Exception:
+                                pass
+                        kwargs[param_name] = val
+                    elif default.default is not ...:
+                        kwargs[param_name] = default.default
+        elif data is not None:
+            from .datastructures import Form as _Form
+            for param_name, param in sig.parameters.items():
+                if param_name in kwargs:
+                    continue
+                default = param.default
+                ann = param.annotation
+                if isinstance(default, _Form):
+                    field_name = default.alias if default.alias else param_name
+                    if field_name in data:
+                        val = str(data[field_name])
+                        if ann not in (inspect.Parameter.empty, str):
+                            try:
+                                val = ann(val)
+                            except Exception:
+                                pass
+                        kwargs[param_name] = val
+                    elif default.default is not ...:
+                        kwargs[param_name] = default.default
+
         # Add BackgroundTasks if requested
         from .background import BackgroundTasks
 
@@ -416,6 +482,14 @@ class TestClient:
                 status_code=200,
                 content=result.encode("utf-8"),
                 headers={"content-type": "text/plain"},
+            )
+
+        # Handle bytes
+        if isinstance(result, bytes):
+            return TestResponse(
+                status_code=200,
+                content=result,
+                headers={"content-type": "application/octet-stream"},
             )
 
         # Handle None

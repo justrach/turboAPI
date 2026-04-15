@@ -12,6 +12,49 @@ from .routing import Router
 from .version_check import CHECK_MARK, ROCKET
 
 
+def _parse_multipart(body: bytes, boundary: str) -> tuple[dict, list]:
+    """Parse multipart/form-data body into (form_fields, file_fields)."""
+    form_fields: dict[str, str] = {}
+    file_fields: list[dict] = []
+    delim = ("--" + boundary).encode()
+    for part in body.split(delim)[1:]:
+        if part in (b"--", b"--\r\n", b"\r\n--") or part.startswith(b"--"):
+            break
+        if part.startswith(b"\r\n"):
+            part = part[2:]
+        if part.endswith(b"\r\n"):
+            part = part[:-2]
+        if b"\r\n\r\n" not in part:
+            continue
+        hdr_bytes, content = part.split(b"\r\n\r\n", 1)
+        hdrs: dict[str, str] = {}
+        for line in hdr_bytes.split(b"\r\n"):
+            if b":" in line:
+                k, v = line.split(b":", 1)
+                hdrs[k.decode().lower().strip()] = v.decode().strip()
+        cd = hdrs.get("content-disposition", "")
+        name: str | None = None
+        filename: str | None = None
+        for seg in cd.split(";"):
+            seg = seg.strip()
+            if seg.startswith("name="):
+                name = seg[5:].strip('"')
+            elif seg.startswith("filename="):
+                filename = seg[9:].strip('"')
+        if name is None:
+            continue
+        if filename is not None:
+            file_fields.append({
+                "name": name,
+                "filename": filename,
+                "content_type": hdrs.get("content-type", "application/octet-stream"),
+                "body": content,
+            })
+        else:
+            form_fields[name] = content.decode("utf-8", errors="replace")
+    return form_fields, file_fields
+
+
 class TurboAPI(Router):
     """Main TurboAPI application class with FastAPI-compatible API."""
 
@@ -373,14 +416,22 @@ class TurboAPI(Router):
                 message = await receive()
                 if message["type"] == "lifespan.startup":
                     if lifespan_cm is not None:
-                        await lifespan_cm.__aenter__()
+                        import inspect
+                        if inspect.isasyncgen(lifespan_cm):
+                            await lifespan_cm.__anext__()
+                        else:
+                            await lifespan_cm.__aenter__()
                     if self.startup_handlers:
                         await self._run_startup_handlers()
                     await send({"type": "lifespan.startup.complete"})
                 elif message["type"] == "lifespan.shutdown":
                     if lifespan_cm is not None:
+                        import inspect
                         try:
-                            await lifespan_cm.__aexit__(None, None, None)
+                            if inspect.isasyncgen(lifespan_cm):
+                                await lifespan_cm.__anext__()
+                            else:
+                                await lifespan_cm.__aexit__(None, None, None)
                         except StopAsyncIteration:
                             pass
                     if self.shutdown_handlers:
@@ -454,17 +505,83 @@ class TurboAPI(Router):
 
         # Parse body for model params
         if body:
-            try:
-                json_body = _json.loads(body)
-                for param_name, param in sig.parameters.items():
-                    if param_name not in call_args:
+            content_type_val = headers.get("content-type", "")
+            if "multipart/form-data" in content_type_val:
+                import io as _io
+
+                from .datastructures import File as _File
+                from .datastructures import Form as _Form
+                from .datastructures import UploadFile as _UF
+                boundary = ""
+                for _part in content_type_val.split(";"):
+                    _part = _part.strip()
+                    if _part.startswith("boundary="):
+                        boundary = _part[9:].strip('"')
+                        break
+                if boundary:
+                    _form_fields, _file_fields = _parse_multipart(body, boundary)
+                    _file_map = {f["name"]: f for f in _file_fields}
+                    for param_name, param in sig.parameters.items():
+                        if param_name in call_args:
+                            continue
+                        default = param.default
                         ann = param.annotation
-                        if ann != inspect.Parameter.empty and hasattr(ann, "model_validate"):
-                            call_args[param_name] = ann.model_validate(json_body)
-                        elif param_name in (json_body if isinstance(json_body, dict) else {}):
-                            call_args[param_name] = json_body[param_name]
-            except (_json.JSONDecodeError, Exception):
-                pass
+                        is_file_default = isinstance(default, _File)
+                        is_upload_ann = (ann is _UF)
+                        if is_file_default or is_upload_ann:
+                            field_name = (default.alias if is_file_default and default.alias else param_name)
+                            if field_name in _file_map:
+                                fd = _file_map[field_name]
+                                call_args[param_name] = _UF(
+                                    filename=fd["filename"],
+                                    file=_io.BytesIO(fd["body"]),
+                                    content_type=fd["content_type"],
+                                    size=len(fd["body"]),
+                                )
+                        elif isinstance(default, _Form):
+                            field_name = default.alias if default.alias else param_name
+                            if field_name in _form_fields:
+                                val = _form_fields[field_name]
+                                if ann not in (inspect.Parameter.empty, str):
+                                    try:
+                                        val = ann(val)
+                                    except Exception:
+                                        pass
+                                call_args[param_name] = val
+                            elif default.default is not ...:
+                                call_args[param_name] = default.default
+            elif "application/x-www-form-urlencoded" in content_type_val:
+                from .datastructures import Form as _Form
+                _qs = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
+                for param_name, param in sig.parameters.items():
+                    if param_name in call_args:
+                        continue
+                    default = param.default
+                    ann = param.annotation
+                    if isinstance(default, _Form):
+                        field_name = default.alias if default.alias else param_name
+                        if field_name in _qs:
+                            val = _qs[field_name][0]
+                            if ann not in (inspect.Parameter.empty, str):
+                                try:
+                                    val = ann(val)
+                                except Exception:
+                                    pass
+                            call_args[param_name] = val
+                        elif default.default is not ...:
+                            call_args[param_name] = default.default
+            else:
+                try:
+                    json_body = _json.loads(body)
+                    for param_name, param in sig.parameters.items():
+                        if param_name not in call_args:
+                            ann = param.annotation
+                            if ann != inspect.Parameter.empty and hasattr(ann, "model_validate"):
+                                call_args[param_name] = ann.model_validate(json_body)
+                            elif param_name in (json_body if isinstance(json_body, dict) else {}):
+                                call_args[param_name] = json_body[param_name]
+                except (_json.JSONDecodeError, Exception):
+                    pass
 
         # Call handler
         try:
