@@ -1,368 +1,323 @@
-# Zig 0.16 Migration Guide
+# Zig 0.16 Migration Direction
 
 **From:** Zig 0.15.x  
 **To:** Zig 0.16.0  
-**Status:** Complete — build clean, 341 tests passing as of 2026-04-15.
+**Status:** Corrected plan for `v1.0.28`  
+**Compiler checked locally:** `zig version` -> `0.16.0`
 
-This guide documents every breaking change encountered migrating TurboAPI (a Python/Zig hybrid
-HTTP framework) from 0.15.x to 0.16.0, with the verified fixes that produced a clean build.
-Intended as a reference for future agents or developers working in this codebase.
+> The stdlib reading changed my mind. The TurboAPI-style pthread shims would actively hurt us.
 
----
+This document replaces the earlier recommendation to port removed thread primitives with
+POSIX pthread shims. After reading the local Zig 0.16 stdlib, that advice is withdrawn.
+For TurboAPI-owned code, the point of the migration is to route through `std.Io`, not to
+work around it.
 
-## Summary of Breaking Changes
+Files checked locally while rewriting this document:
 
-0.16 has three major categories of breakage, each wider than the 0.15 changelog implies:
-
-1. **`std.net` completely removed** — replaced by `std.Io.net`, which needs an `Io` instance.
-   `Io.net.Stream` has a different API: different close signature, no `.read()`/`.writeAll()`.
-2. **`std.io` (lowercase) completely removed** — `std.Io` (capital) is the new async IO module
-   but has totally different semantics. `std.fmt.bufPrint` replaces `fixedBufferStream`.
-3. **Time, threading, and POSIX API pruning** — `std.time.timestamp/milliTimestamp/nanoTimestamp`,
-   `std.Thread.Mutex/Condition/sleep`, `std.debug.lockStderrWriter`, `std.posix.write/connect/socket`,
-   and `std.crypto.random` all removed.
+- `lib/std/Io.zig`
+- `lib/std/Io/Threaded.zig`
+- `lib/std/Io/net.zig`
+- `lib/std/Io/RwLock.zig`
+- `lib/std/crypto/25519/ed25519.zig`
 
 ---
 
-## 1. Networking: `std.net` → `std.Io.net`
+## What Changed
 
-### 1a. Type rename: `std.net.Stream` → `std.Io.net.Stream`
+The previous version of this guide got two important things wrong:
 
-Pure rename everywhere a stream type is annotated:
+1. It treated `std.Io` as a compatibility obstacle instead of the new abstraction boundary.
+2. It recommended pthread-style shims for `Mutex` and `Condition`, which would lock TurboAPI
+   into the wrong API just before the runtime wants to move to evented I/O.
+
+That would create a double migration:
+
+- first from `std.Thread.*` to `Pthread*`
+- then later from `Pthread*` to `std.Io.*` when we want `io_uring` / `Dispatch` / `Kqueue`
+
+That is unnecessary churn. TurboAPI should do the `std.Io` migration once.
+
+---
+
+## Key Findings From The Local Stdlib
+
+### 1. `std.Io` is the abstraction boundary, not the obstacle
+
+The top of `lib/std/Io.zig` describes `std.Io` as the interface that abstracts both I/O
+operations and concurrency. This is the whole design:
+
+- `std.Io.Threaded` is the blocking, OS-threaded backend we want today
+- `std.Io.Evented` resolves by platform to `Uring` on Linux, `Dispatch` on Apple platforms,
+  and `Kqueue` on BSD
+- `std.Io.Threaded.global_single_threaded` exists as a prebuilt singleton for cases where a
+  library or debug path needs a statically initialized threaded `Io`
+
+The important consequence is that backend selection lives behind the `Io` vtable. If TurboAPI
+keeps its own code on native `std.Io` call sites, backend swaps happen at startup, not across
+the whole codebase.
+
+### 2. `std.Io.Mutex` is the path forward, not a stopgap
+
+`lib/std/Io.zig` implements `Mutex.lock`, `lockUncancelable`, and `unlock` in terms of a CAS
+fast path plus `io.futexWait*` / `io.futexWake`:
 
 ```zig
-// Before
-fn sendResponse(stream: std.net.Stream, ...) void { ... }
-stream: std.net.Stream,          // struct field
-
-// After
-fn sendResponse(stream: std.Io.net.Stream, ...) void { ... }
-stream: std.Io.net.Stream,       // struct field
-```
-
-### 1b. Accept loop: `std.net.Address` → `std.Io.net.IpAddress` + `io` argument
-
-The listen/accept loop must have an `Io` instance. Create a `std.Io.Threaded` runtime
-and store it in a module-global `runtime.zig` so worker threads can also access `io`.
-
-```zig
-// Before (0.15)
-const addr = std.net.Address.parseIp4(host, port) catch { ... };
-var tcp_server = addr.listen(.{ .reuse_address = true }) catch { ... };
-while (true) {
-    const conn = tcp_server.accept() catch continue;
-    pool.queue.push(conn.stream);   // had .stream field
+pub fn lock(m: *Mutex, io: Io) Cancelable!void {
+    // CAS fast path...
+    try io.futexWait(State, &m.state.raw, .contended);
 }
 
-// After (0.16)
-const ip_addr = std.Io.net.IpAddress.parse(host, port) catch { ... };
-var tcp_server = ip_addr.listen(io, .{ .reuse_address = true }) catch { ... };
-while (true) {
-    const stream = tcp_server.accept() catch continue;  // returns Stream directly, no .stream
-    pool.queue.push(stream);
+pub fn unlock(m: *Mutex, io: Io) void {
+    // ...
+    io.futexWake(State, &m.state.raw, 1);
 }
 ```
 
-New shared `runtime.zig`:
+What matters is not just the implementation detail, but where the dependency lands:
+
+- under `Threaded`, those waits route to the runtime's native blocking wait path
+- on Linux, that path is futex-backed
+- under `Evented`, the same call sites become scheduler-managed waits instead of "rewrite all
+  locks again later"
+
+The same logic applies to `std.Io.Condition` and `std.Io.RwLock`. Once TurboAPI adopts the
+native APIs, the concurrency backend is selectable without another lock-API migration.
+
+### 3. Native `std.Io.net` is already the server-facing API we want
+
+The local `lib/std/Io/net.zig` exposes the real shape of the 0.16 networking layer:
+
+- `std.Io.net.IpAddress.parse(host, port)`
+- `addr.listen(io, options)`
+- `server.accept(io)`
+- `stream.reader(io, buf)`
+- `stream.writer(io, buf)`
+
+That means the correct migration is not "wrap raw file descriptors until the compiler stops
+complaining". The correct migration is to move server code onto native `std.Io.net` and only
+drop to raw socket handles for truly low-level operations such as `setsockopt`.
+
+### 4. Compat is still useful, but only for mechanical rewrites
+
+There is still room for a small compatibility layer. It just needs to be used in the right
+places:
+
+- good: `cwd` file-system helpers that inject `runtime.io`
+- good: timestamp helpers based on `clock_gettime`
+- good: a narrow `threadSleep` helper for isolated legacy sites that do not already accept `io`
+- bad: `PthreadMutex`, `PthreadCondition`, or a fake `std.net` facade in core runtime code
+
+Compat should reduce migration noise, not hide the new runtime model.
+
+---
+
+## Corrected Project Policy
+
+### Use native `std.Io` directly for runtime-owned subsystems
+
+This includes:
+
+- networking
+- mutexes
+- conditions
+- rwlocks
+- randomness and crypto call sites that now take `std.Io`
+- any code that is part of the long-lived server runtime
+
+### Use thin shims only where the adoption cost is purely mechanical
+
+This includes:
+
+- `std.fs.cwd()` replacements that can become one-line wrappers around `std.Io.Dir.cwd()`
+- `milliTimestamp` / `nanoTimestamp`
+- a narrow `threadSleep(ns)` helper for the few sites that genuinely want blocking sleep and do
+  not already have `io` in scope
+
+### Do not introduce a pthread compatibility layer into TurboAPI core code
+
+That would:
+
+- make the eventual evented-runtime migration harder
+- split the codebase across two concurrency abstractions
+- force another call-site rewrite later
+
+---
+
+## Revised Runtime Shape
+
+### `zig/src/runtime.zig`
+
+One module should own the chosen `Io` implementation:
 
 ```zig
-// zig/src/runtime.zig (new file)
 const std = @import("std");
+
 pub var threaded: std.Io.Threaded = undefined;
 pub var io: std.Io = undefined;
+
+pub fn init(gpa: std.mem.Allocator) void {
+    threaded = std.Io.Threaded.init(gpa, .{});
+    io = threaded.io();
+}
+
+pub fn deinit() void {
+    threaded.deinit();
+}
 ```
 
-### 1c. `stream.close()` → `stream.close(io)` — takes Io argument
+Each entry-point `main()` should call `runtime.init(gpa)` once and `defer runtime.deinit()`.
+From there on, runtime-owned code should take or import `runtime.io`.
+
+### `zig/src/compat.zig`
+
+Use a small shim module for repetitive rewrites, not for backend selection:
 
 ```zig
-// Before
-stream.close();
+const std = @import("std");
+const runtime = @import("runtime.zig");
 
-// After
-stream.close(runtime.io);   // must pass the Io instance
-```
-
-### 1d. Raw fd: `stream.handle` → `stream.socket.handle`
-
-```zig
-// Before
-std.posix.setsockopt(stream.handle, ...);
-
-// After
-std.posix.setsockopt(stream.socket.handle, ...);
-```
-
-### 1e. `Io.net.Stream` has NO `.read()` or `.writeAll()` methods
-
-Use raw C wrappers for blocking I/O in worker threads:
-
-```zig
-extern "c" fn write(fd: c_int, buf: [*]const u8, nbytes: usize) isize;
-
-fn streamWriteAll(stream: std.Io.net.Stream, data: []const u8) !void {
-    var remaining = data;
-    while (remaining.len > 0) {
-        const n = write(stream.socket.handle, remaining.ptr, remaining.len);
-        if (n <= 0) return error.BrokenPipe;
-        remaining = remaining[@intCast(n)..];
+pub const fs = struct {
+    pub fn cwdDeleteTree(path: []const u8) !void {
+        return std.Io.Dir.cwd().deleteTree(runtime.io, path);
     }
-}
 
-// std.posix.read() still works (posix.read was NOT removed):
-const posix = std.posix;
-const n = posix.read(stream.socket.handle, buf) catch return error.ReadError;
-```
+    pub fn cwdCreateDirPath(path: []const u8) !void {
+        return std.Io.Dir.cwd().createDirPath(runtime.io, path);
+    }
 
-### 1f. `std.net.has_unix_sockets` → `std.Io.net.has_unix_sockets`
-
-```zig
-if (comptime std.Io.net.has_unix_sockets == false ...) { ... }
-```
-
-### 1g. `std.net.connectUnixSocket/tcpConnectToHost` removed — use raw C externs
-
-```zig
-extern "c" fn socket(domain: c_int, socket_type: c_int, protocol: c_int) c_int;
-extern "c" fn connect(sockfd: c_int, addr: *const anyopaque, addrlen: u32) c_int;
-
-// WARNING: if you name a local const socket or connect, the compiler errors:
-// "local constant shadows declaration of socket"
-// Use a different name (e.g. sock_fd) for local variables.
-
-fn connectUnixSocket(path: []const u8) !std.posix.socket_t {
-    const fd = socket(std.c.AF.UNIX, std.c.SOCK.STREAM, 0);
-    if (fd < 0) return error.SystemResources;
-    errdefer _ = std.c.close(fd);
-    // ... build SockaddrUn, call connect() ...
-    return fd;
-}
-
-fn tcpConnectToHost(host: []const u8, port: u16) !std.posix.socket_t {
-    // use std.c.getaddrinfo / freeaddrinfo
-    // iterate results, call socket() + connect()
-    return fd;
-}
-```
-
-`posix.close(fd)` → `_ = std.c.close(fd)` (`std.posix.close` was removed):
-
-```zig
-// Before
-posix.close(self.socket);
-
-// After
-_ = std.c.close(self.socket);
-```
-
----
-
-## 2. `std.io` (lowercase) completely removed
-
-### 2a. `std.io.fixedBufferStream` → `std.fmt.bufPrint`
-
-```zig
-// Before (0.15)
-var str_buf: [512]u8 = undefined;
-var stream = std.io.fixedBufferStream(&str_buf);
-try std.fmt.format(stream.writer(), "{d}", .{value});
-return useSlice(stream.getWritten(), buf);
-
-// After (0.16)
-var str_buf: [512]u8 = undefined;
-const slice = try std.fmt.bufPrint(&str_buf, "{d}", .{value});
-return useSlice(slice, buf);
-```
-
-### 2b. `*std.io.Writer` vtable parameter → `*std.Io.Writer`
-
-```zig
-// Before
-pub fn drain(io_w: *std.io.Writer, ...) error{WriteFailed}!usize { ... }
-
-// After
-pub fn drain(io_w: *std.Io.Writer, ...) error{WriteFailed}!usize { ... }
-```
-
----
-
-## 3. Time APIs removed: use `clock_gettime`
-
-`std.time.timestamp()`, `milliTimestamp()`, and `nanoTimestamp()` are all removed.
-
-```zig
-fn timestampSeconds() i64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    return ts.sec;
-}
-
-fn milliTimestamp() i64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
-}
-
-fn nanoTimestamp() i128 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    return @as(i128, ts.sec) * 1_000_000_000 + @as(i128, ts.nsec);
-}
-```
-
-`ts.nsec` is signed — use `@divTrunc` not `/` for division (0.16 enforces this):
-
-```zig
-// WRONG — compile error: "signed integer division"
-@as(i64, ts.nsec) / 1_000_000
-
-// RIGHT
-@divTrunc(@as(i64, ts.nsec), 1_000_000)
-```
-
----
-
-## 4. Thread primitives removed: use POSIX pthreads
-
-`std.Thread.Mutex`, `std.Thread.Condition`, and `std.Thread.sleep` are removed.
-The replacement (`std.Io.Mutex/Condition`) requires an `Io` instance — unavailable in
-vendored dependencies. Use POSIX pthread shims:
-
-```zig
-const PthreadMutex = struct {
-    inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
-    pub fn lock(m: *PthreadMutex) void { _ = std.c.pthread_mutex_lock(&m.inner); }
-    pub fn unlock(m: *PthreadMutex) void { _ = std.c.pthread_mutex_unlock(&m.inner); }
-    pub fn tryLock(m: *PthreadMutex) bool {
-        return @intFromEnum(std.c.pthread_mutex_trylock(&m.inner)) == 0;
+    pub fn cwdOpenDir(path: []const u8, options: std.Io.Dir.OpenOptions) !std.Io.Dir {
+        return std.Io.Dir.cwd().openDir(runtime.io, path, options);
     }
 };
-
-const PthreadCondition = struct {
-    inner: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER,
-    pub fn timedWait(cond: *PthreadCondition, mutex: *PthreadMutex, timeout_ns: u64) !void {
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.REALTIME, &ts);
-        const now_ns: u128 = @as(u128, @intCast(ts.sec)) * 1_000_000_000 +
-                              @as(u128, @intCast(ts.nsec));
-        const deadline_ns: u128 = now_ns + timeout_ns;
-        const abs_time = std.c.timespec{
-            .sec = @intCast(deadline_ns / 1_000_000_000),
-            .nsec = @intCast(deadline_ns % 1_000_000_000),
-        };
-        const rc = std.c.pthread_cond_timedwait(&cond.inner, &mutex.inner, &abs_time);
-        if (@intFromEnum(rc) == @intFromEnum(std.c.E.TIMEDOUT)) return error.Timeout;
-    }
-    pub fn signal(cond: *PthreadCondition) void { _ = std.c.pthread_cond_signal(&cond.inner); }
-    pub fn broadcast(cond: *PthreadCondition) void { _ = std.c.pthread_cond_broadcast(&cond.inner); }
-};
 ```
 
-`std.Thread.sleep(ns)` → nanosleep:
+Time helpers remain fine here as well:
 
 ```zig
-fn threadSleep(ns: u64) void {
-    const ts = std.c.timespec{
-        .sec = @intCast(ns / std.time.ns_per_s),
-        .nsec = @intCast(ns % std.time.ns_per_s),
-    };
-    _ = std.c.nanosleep(&ts, null);
+pub fn milliTimestamp() i64 { /* clock_gettime */ }
+pub fn nanoTimestamp() i128 { /* clock_gettime */ }
+pub fn threadSleep(ns: u64) void { /* nanosleep */ }
+```
+
+The key rule is that compat forwards into `std.Io`. It does not replace it.
+
+---
+
+## Thread Primitives: Native Adoption, No Shims
+
+The correct replacements are:
+
+- `std.Thread.Mutex` -> `std.Io.Mutex`
+- `std.Thread.Condition` -> `std.Io.Condition`
+- `std.Thread.RwLock` -> `std.Io.RwLock`
+
+Field shape:
+
+```zig
+mu: std.Io.Mutex = .init,
+cond: std.Io.Condition = .init,
+rw: std.Io.RwLock = .init,
+```
+
+Call-site shape:
+
+```zig
+self.mu.lockUncancelable(runtime.io);
+defer self.mu.unlock(runtime.io);
+
+self.cond.waitUncancelable(runtime.io, &self.mu);
+
+self.rw.lockSharedUncancelable(runtime.io);
+defer self.rw.unlockShared(runtime.io);
+```
+
+This is slightly more explicit because an `Io` parameter is now visible at the call site.
+That is a feature, not noise. It keeps the runtime choice alive.
+
+---
+
+## Networking: Native `std.Io.net` Adoption
+
+The server-side migration should target the real 0.16 API:
+
+```zig
+const ip = try std.Io.net.IpAddress.parse(host, port);
+var server = try ip.listen(runtime.io, .{ .reuse_address = true });
+
+while (true) {
+    const stream = try server.accept(runtime.io);
+    // hand off stream
 }
 ```
 
----
-
-## 5. `std.debug.lockStderrWriter` → `std.debug.lockStderr`
+And for I/O:
 
 ```zig
-// Before (0.15)
-const stderr = std.debug.lockStderrWriter();
-defer std.debug.unlockStderr();
-try stderr.print("...", .{});
+var read_buf: [4096]u8 = undefined;
+var write_buf: [4096]u8 = undefined;
 
-// After (0.16)
-var buffer: [4096]u8 = undefined;
-const stderr = std.debug.lockStderr(&buffer);
-defer std.debug.unlockStderr();
-// stderr.file_writer is a File.Writer; its .interface is an Io.Writer
-writeEvent(&stderr.file_writer.interface, event) catch {};
+var reader = stream.reader(runtime.io, &read_buf);
+var writer = stream.writer(runtime.io, &write_buf);
 ```
 
----
+Use `stream.socket.handle` only when the code truly needs the raw descriptor, such as:
 
-## 6. `std.crypto.random` removed
+- socket options
+- integration with a low-level dependency that still takes a raw fd
 
-```zig
-// Before
-std.crypto.random.bytes(&nonce);
-
-// After — arc4random_buf is available on macOS and Linux glibc 2.36+
-extern "c" fn arc4random_buf(buf: *anyopaque, nbytes: usize) void;
-// ...
-arc4random_buf(&nonce, nonce.len);
-```
-
-Note: `std.posix.getrandom` does NOT exist in 0.16 (despite its name). For Linux-only
-targets, use `std.os.linux.getrandom(buf.ptr, buf.len, 0)`.
+Defaulting to raw C `read`/`write` wrappers in TurboAPI-owned code would be another way of
+fighting the new API instead of adopting it.
 
 ---
 
-## 7. `ArrayListUnmanaged` empty init changed
+## Still-Valid Mechanical Fixes
 
-```zig
-// Before (0.15) — .{} worked as zero-init
-._list = .{},
+The previous doc was wrong about thread primitives, but several other 0.16 changes remain valid:
 
-// After (0.16) — explicit fields required
-._list = .{ .items = &.{}, .capacity = 0 },
-```
+- `build.zig`: many `Compile.*` helpers moved to `root_module.*`
+- `std.io.fixedBufferStream` -> `std.fmt.bufPrint`
+- `*std.io.Writer` -> `*std.Io.Writer`
+- `std.time.timestamp/milliTimestamp/nanoTimestamp` -> `clock_gettime` helpers
+- `std.debug.lockStderrWriter` -> `std.debug.lockStderr(&buf)`
+- `std.crypto.random.bytes(buf)` -> `runtime.io.random(buf)`
+- `Ed25519.KeyPair.generate()` -> `Ed25519.KeyPair.generate(runtime.io)`
+- empty `ArrayListUnmanaged` initializers now need explicit fields
+- local variables may not shadow module-level `extern fn` declarations
 
----
-
-## 8. Local constants cannot shadow module-level `extern` declarations
-
-If a function declares a local `const` with the same name as a module-level `extern fn`,
-it is a compile error in 0.16 (even if the extern is declared later in the file):
-
-```zig
-extern "c" fn socket(...) c_int;   // module level
-
-fn connect(...) !void {
-    // WRONG: "local constant shadows declaration of socket"
-    const socket = blk: { ... };
-
-    // RIGHT: rename local variable
-    const sock_fd = blk: { ... };
-}
-```
+Those are still worth fixing mechanically. They just do not justify introducing the wrong
+concurrency abstraction.
 
 ---
 
-## File-by-File Summary
+## Order Of Operations
 
-| File | Changes |
-|---|---|
-| `zig/src/server.zig` | `std.net.Stream`→`std.Io.net.Stream`; `stream.close()`→`stream.close(runtime.io)`; `stream.handle`→`stream.socket.handle`; add `streamWriteAll` + `posix.read`; `std.time.timestamp()`→`timestampSeconds()`; add `const posix = std.posix;` |
-| `zig/src/runtime.zig` | **New**: shared `std.Io.Threaded` + `std.Io` globals |
-| `zig/src/telemetry.zig` | `lockStderrWriter`→`lockStderr(&buf)` + `.file_writer.interface`; `milliTimestamp()` helper; `@divTrunc` for signed division |
-| `zig/src/db.zig` | `std.net.Stream`→`std.Io.net.Stream`; `std.time.milliTimestamp()`→clock_gettime helper |
-| `zig/zig-pkg/pg-*/src/stream.zig` | Replace `std.net.connectUnixSocket/tcpConnectToHost` with raw C externs; `posix.close`→`std.c.close`; rename local `socket`→`sock_fd`; `std.net.has_unix_sockets`→`std.Io.net.has_unix_sockets` |
-| `zig/zig-pkg/pg-*/src/conn.zig` | `std.time.timestamp()`→`posixTimestamp()` helper; `ArrayListUnmanaged` empty init fix |
-| `zig/zig-pkg/pg-*/src/pool.zig` | `Thread.Mutex/Condition`→`PthreadMutex/PthreadCondition` shims; helpers for nanoTimestamp/threadSleep |
-| `zig/zig-pkg/pg-*/src/auth.zig` | `std.crypto.random.bytes`→`arc4random_buf` |
-| `zig/zig-pkg/pg-*/src/types/numeric.zig` | `std.io.fixedBufferStream`→`std.fmt.bufPrint` |
-| `zig/zig-pkg/N-V-.../src/buffer.zig` | `*std.io.Writer`→`*std.Io.Writer` in drain vtable |
+1. Add `runtime.zig` and `compat.zig`.
+2. Update each entry point to initialize and deinitialize the shared `Io`.
+3. Do the purely mechanical rewrites first:
+   - `build.zig`
+   - `fixedBufferStream`
+   - timestamp helpers
+   - stderr locking
+   - random / crypto call sites
+   - `ArrayListUnmanaged`
+4. Replace `std.Thread.Mutex`, `Condition`, and `RwLock` with native `std.Io` primitives.
+5. Rewrite networking to `std.Io.net` and prefer `reader` / `writer` over raw fd wrappers.
+6. Keep compat helpers narrow and delete any temptation to add pthread shims.
+7. Run `zig build` until clean.
+8. Run `zig build test`.
+9. Only then treat evented I/O as a backend-selection task, not another API migration.
 
 ---
 
-## What Did NOT Change
+## Payoff
 
-- `std.posix.read` — still present (only `posix.write/connect/socket/close` removed)
-- `std.posix.setsockopt`, `std.posix.timeval`, `std.posix.SOL/SO` — unchanged
-- `std.posix.socket_t` (`= fd_t = c_int`) — unchanged
-- `std.mem.*`, `std.fmt.*`, `std.json.*` — unchanged
-- `std.c.getaddrinfo/freeaddrinfo`, `std.c.AF.*`, `std.c.SOCK.*`, `std.c.close` — all present
-- `std.time.ns_per_s` constant — still present
-- `std.Thread.spawn` — unchanged
-- `callconv(.c)` FFI exports — unchanged
-- Build system (`b.addLibrary`, `b.createModule`, etc.) — unchanged
-- `std.heap.c_allocator` — unchanged
+If TurboAPI routes its runtime, locks, and networking through `runtime.io`, the later move to an
+evented backend becomes dramatically simpler. The win is not just "builds on 0.16". The win is
+that the codebase stops baking in the threaded-only assumptions that the stdlib is explicitly
+trying to abstract away.
+
+That is the actual path to the `io_uring` / `Dispatch` / `Kqueue` upside in Zig 0.16:
+
+- choose `std.Io.Threaded` today
+- keep call sites on native `std.Io`
+- swap the backend later without rewriting every mutex and socket call again
