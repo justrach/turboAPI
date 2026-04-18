@@ -6,10 +6,13 @@ Supports query parameters, path parameters, headers, request body, and dependenc
 
 import inspect
 import json
+import typing
 import urllib.parse
 from typing import Any, get_origin
 
 from dhi import BaseModel as Model
+
+_NO_COERCION = object()
 
 
 class DependencyResolver:
@@ -137,13 +140,17 @@ class QueryParamParser:
     """Parse query parameters from query string."""
 
     @staticmethod
-    def parse_query_params(query_string: str) -> dict[str, Any]:
+    def parse_query_params(
+        query_string: str, handler_signature: inspect.Signature | None = None
+    ) -> dict[str, Any]:
         """
         Parse query string into dict of parameters.
         Supports multiple values for same key (returns list).
 
         Args:
             query_string: URL query string (e.g., "q=test&limit=10")
+            handler_signature: Optional handler signature used to coerce values
+                to the annotated type (e.g., int, float, bool, list[int]).
 
         Returns:
             Dictionary of parsed query parameters
@@ -151,7 +158,7 @@ class QueryParamParser:
         if not query_string:
             return {}
 
-        params = {}
+        params: dict[str, Any] = {}
         parsed = urllib.parse.parse_qs(query_string, keep_blank_values=True)
 
         for key, values in parsed.items():
@@ -161,7 +168,68 @@ class QueryParamParser:
             else:
                 params[key] = values
 
+        if handler_signature is not None:
+            for name, value in list(params.items()):
+                if name not in handler_signature.parameters:
+                    continue
+                annotation = handler_signature.parameters[name].annotation
+                coerced = QueryParamParser._coerce_value(value, annotation)
+                if coerced is not _NO_COERCION:
+                    params[name] = coerced
+
         return params
+
+    @staticmethod
+    def _coerce_value(value: Any, annotation: Any) -> Any:
+        """Coerce a raw query string value to the annotated Python type.
+
+        Returns the sentinel ``_NO_COERCION`` when no coercion applies so the
+        caller can leave the original string in place.
+        """
+        if annotation is inspect.Parameter.empty or annotation is str:
+            return _NO_COERCION
+
+        origin = typing.get_origin(annotation)
+        if origin in (list, tuple, set):
+            inner_args = typing.get_args(annotation) or (str,)
+            inner = inner_args[0]
+            raw_list = value if isinstance(value, list) else [value]
+            try:
+                coerced_list = [
+                    QueryParamParser._scalar_cast(v, inner) for v in raw_list
+                ]
+            except (ValueError, TypeError):
+                return _NO_COERCION
+            if origin is tuple:
+                return tuple(coerced_list)
+            if origin is set:
+                return set(coerced_list)
+            return coerced_list
+
+        if isinstance(value, list):
+            # Handler expects scalar but user sent multiple values — take last,
+            # matching FastAPI/Starlette behaviour.
+            value = value[-1]
+
+        try:
+            return QueryParamParser._scalar_cast(value, annotation)
+        except (ValueError, TypeError):
+            return _NO_COERCION
+
+    @staticmethod
+    def _scalar_cast(value: Any, annotation: Any) -> Any:
+        if annotation is int:
+            return int(value)
+        if annotation is float:
+            return float(value)
+        if annotation is bool:
+            return str(value).lower() in ("true", "1", "yes", "on")
+        if annotation is str:
+            return str(value)
+        if isinstance(annotation, type):
+            # Best-effort construction — catches enums, UUID, Path, etc.
+            return annotation(value)
+        raise TypeError(f"Unsupported query parameter annotation: {annotation!r}")
 
 
 class PathParamParser:
@@ -667,12 +735,27 @@ def create_enhanced_handler(original_handler, route_definition):
                 _path_param_types[pname] = float
             elif ann is bool:
                 _path_param_types[pname] = lambda v: v.lower() in ("true", "1", "yes")
-
     # Pre-check which features this handler needs
     _param_names = set(sig.parameters.keys())
     _has_dependencies = False
     _has_header_params = False
     _has_form_params = False
+
+    # Raw-body / Request injection: collect params annotated as bytes, bytearray,
+    # or the framework Request model so users can read the unparsed request body.
+    from .models import TurboRequest as _TurboRequest
+
+    _Request = _TurboRequest
+    _raw_body_param_names: set[str] = set()
+    _request_param_names: set[str] = set()
+    for _pname, _param in sig.parameters.items():
+        _ann = _param.annotation
+        if _ann is bytes or _ann is bytearray:
+            _raw_body_param_names.add(_pname)
+        elif isinstance(_ann, type) and issubclass(_ann, _TurboRequest):
+            _request_param_names.add(_pname)
+    _skip_json_body = bool(_raw_body_param_names or _request_param_names)
+
     from turboapi.datastructures import Header
 
     try:
@@ -721,7 +804,7 @@ def create_enhanced_handler(original_handler, route_definition):
                 if "query_string" in kwargs:
                     query_string = kwargs.get("query_string", "")
                     if query_string:
-                        query_params = QueryParamParser.parse_query_params(query_string)
+                        query_params = QueryParamParser.parse_query_params(query_string, sig)
                         parsed_params.update(query_params)
 
                 # 2. Parse path parameters (if route pattern is available)
@@ -797,8 +880,28 @@ def create_enhanced_handler(original_handler, route_definition):
                                 uf.file.seek(0)
                                 parsed_params[pname] = uf
 
+                # 3.7. Raw body / Request injection — FastAPI-compat access
+                # to the unparsed request body.
+                if _raw_body_param_names or _request_param_names:
+                    _raw_body = kwargs.get("body", b"") or b""
+                    if isinstance(_raw_body, bytearray):
+                        _raw_body = bytes(_raw_body)
+                    for _pname in _raw_body_param_names:
+                        parsed_params[_pname] = _raw_body
+                    if _request_param_names:
+                        _req_obj = _Request(
+                            method=kwargs.get("method", "GET"),
+                            path=kwargs.get("path", ""),
+                            query_string=kwargs.get("query_string", ""),
+                            headers=kwargs.get("headers", {}) or {},
+                            body=_raw_body,
+                        )
+                        for _pname in _request_param_names:
+                            parsed_params[_pname] = _req_obj
+
                 # 4. Parse request body (JSON) — skip if form data was already parsed
-                if "body" in kwargs:
+                #    or if the handler has opted into raw access via bytes / Request.
+                if "body" in kwargs and not _skip_json_body:
                     body_data = kwargs["body"]
                     if body_data and not (_form_fields or _file_fields):
                         parsed_body = RequestBodyParser.parse_json_body(body_data, sig)
@@ -875,7 +978,7 @@ def create_enhanced_handler(original_handler, route_definition):
                 # 1. Parse query parameters
                 query_string = kwargs.get("query_string", "")
                 if query_string:
-                    query_params = QueryParamParser.parse_query_params(query_string)
+                    query_params = QueryParamParser.parse_query_params(query_string, sig)
                     parsed_params.update(query_params)
 
                 # 2. Parse path parameters using pre-compiled regex
@@ -957,9 +1060,29 @@ def create_enhanced_handler(original_handler, route_definition):
                                 uf.file.seek(0)
                                 parsed_params[pname] = uf
 
-                # 4. Parse request body (JSON) — skip if form data was already parsed
+                # 3.7. Raw body / Request injection — FastAPI-compat access
+                # to the unparsed request body.
                 body_data = kwargs.get("body", b"")
-                if body_data and not (_form_fields or _file_fields):
+                if _raw_body_param_names or _request_param_names:
+                    _raw_body = body_data or b""
+                    if isinstance(_raw_body, bytearray):
+                        _raw_body = bytes(_raw_body)
+                    for _pname in _raw_body_param_names:
+                        parsed_params[_pname] = _raw_body
+                    if _request_param_names:
+                        _req_obj = _Request(
+                            method=kwargs.get("method", "GET"),
+                            path=kwargs.get("path", ""),
+                            query_string=query_string,
+                            headers=kwargs.get("headers", {}) or {},
+                            body=_raw_body,
+                        )
+                        for _pname in _request_param_names:
+                            parsed_params[_pname] = _req_obj
+
+                # 4. Parse request body (JSON) — skip if form data was already parsed
+                #    or if the handler has opted into raw access via bytes / Request.
+                if body_data and not (_form_fields or _file_fields) and not _skip_json_body:
                     parsed_body = RequestBodyParser.parse_json_body(body_data, sig)
                     parsed_params.update(parsed_body)
 

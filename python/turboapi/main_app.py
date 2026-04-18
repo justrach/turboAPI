@@ -127,9 +127,67 @@ class TurboAPI(Router):
 
         Usage:
             app.mount("/static", StaticFiles(directory="static"), name="static")
+
+        For ``StaticFiles`` mounts we register real HTTP routes so the Zig
+        server serves the files directly (middleware, compression, etc. all
+        work the way they do for any other route). Multi-segment paths are
+        covered by registering a handful of ``{p1}/{p2}/...`` patterns.
         """
+        path = path.rstrip("/")
         self._mounts[path] = {"app": app, "name": name}
+
+        if hasattr(app, "get_file"):
+            self._register_static_mount(path, app)
+
         print(f"[MOUNT] Mounted {name or 'app'} at {path}")
+
+    _MAX_STATIC_DEPTH = 8
+
+    def _register_static_mount(self, mount_path: str, static_app: Any) -> None:
+        """Register catch-all routes that delegate to a StaticFiles instance.
+
+        We register ``mount_path/{p1}``, ``mount_path/{p1}/{p2}``, … up to
+        ``_MAX_STATIC_DEPTH`` segments. Each handler rebuilds the sub-path
+        and calls ``static_app.get_file(sub)``.
+        """
+        from .responses import Response as _Response
+
+        for depth in range(1, self._MAX_STATIC_DEPTH + 1):
+            segments = "/".join(f"{{p{i}}}" for i in range(1, depth + 1))
+            route_path = f"{mount_path}/{segments}"
+            param_names = tuple(f"p{i}" for i in range(1, depth + 1))
+
+            def _make_handler(app_ref=static_app, names=param_names):
+                def _static_handler(**kwargs):
+                    sub_path = "/".join(kwargs[n] for n in names if kwargs.get(n))
+                    result = app_ref.get_file(sub_path)
+                    if result is None:
+                        return _Response(
+                            content=b"Not Found",
+                            status_code=404,
+                            media_type="text/plain",
+                        )
+                    content, content_type, size = result
+                    return _Response(
+                        content=content,
+                        status_code=200,
+                        media_type=content_type,
+                        headers={"Content-Length": str(size)},
+                    )
+
+                # Build an explicit signature so the router recognises each
+                # path parameter as a string-typed placeholder.
+                params = [
+                    inspect.Parameter(n, inspect.Parameter.KEYWORD_ONLY, annotation=str)
+                    for n in names
+                ]
+                _static_handler.__signature__ = inspect.Signature(parameters=params)
+                _static_handler.__name__ = (
+                    f"_static_mount_{mount_path.strip('/').replace('/', '_')}_{len(names)}"
+                )
+                return _static_handler
+
+            self.get(route_path)(_make_handler())
 
     def websocket(self, path: str):
         """Register a WebSocket endpoint.

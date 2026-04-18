@@ -20,9 +20,7 @@ import threading
 import time
 from collections.abc import Callable
 
-from .models import Request, Response
-
-
+from ..models import Request, Response
 class Middleware:
     """Base middleware class."""
 

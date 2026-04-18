@@ -31,6 +31,10 @@ class Response:
             self.media_type = media_type
         self._content = content  # Store original content for model_dump
         self.body = self._render(content)
+        # Expose ``.content`` for middleware hooks that read/replace the body
+        # (e.g. GZipMiddleware does ``response.content = compressed``).
+        self.content = self.body
+
     def _render(self, content: Any) -> bytes:
         if content is None:
             return b""
