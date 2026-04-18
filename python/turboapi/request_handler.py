@@ -6,10 +6,13 @@ Supports query parameters, path parameters, headers, request body, and dependenc
 
 import inspect
 import json
+import typing
 import urllib.parse
 from typing import Any, get_origin
 
 from dhi import BaseModel as Model
+
+_NO_COERCION = object()
 
 
 class DependencyResolver:
@@ -137,13 +140,17 @@ class QueryParamParser:
     """Parse query parameters from query string."""
 
     @staticmethod
-    def parse_query_params(query_string: str) -> dict[str, Any]:
+    def parse_query_params(
+        query_string: str, handler_signature: inspect.Signature | None = None
+    ) -> dict[str, Any]:
         """
         Parse query string into dict of parameters.
         Supports multiple values for same key (returns list).
 
         Args:
             query_string: URL query string (e.g., "q=test&limit=10")
+            handler_signature: Optional handler signature used to coerce values
+                to the annotated type (e.g., int, float, bool, list[int]).
 
         Returns:
             Dictionary of parsed query parameters
@@ -151,7 +158,7 @@ class QueryParamParser:
         if not query_string:
             return {}
 
-        params = {}
+        params: dict[str, Any] = {}
         parsed = urllib.parse.parse_qs(query_string, keep_blank_values=True)
 
         for key, values in parsed.items():
@@ -161,7 +168,68 @@ class QueryParamParser:
             else:
                 params[key] = values
 
+        if handler_signature is not None:
+            for name, value in list(params.items()):
+                if name not in handler_signature.parameters:
+                    continue
+                annotation = handler_signature.parameters[name].annotation
+                coerced = QueryParamParser._coerce_value(value, annotation)
+                if coerced is not _NO_COERCION:
+                    params[name] = coerced
+
         return params
+
+    @staticmethod
+    def _coerce_value(value: Any, annotation: Any) -> Any:
+        """Coerce a raw query string value to the annotated Python type.
+
+        Returns the sentinel ``_NO_COERCION`` when no coercion applies so the
+        caller can leave the original string in place.
+        """
+        if annotation is inspect.Parameter.empty or annotation is str:
+            return _NO_COERCION
+
+        origin = typing.get_origin(annotation)
+        if origin in (list, tuple, set):
+            inner_args = typing.get_args(annotation) or (str,)
+            inner = inner_args[0]
+            raw_list = value if isinstance(value, list) else [value]
+            try:
+                coerced_list = [
+                    QueryParamParser._scalar_cast(v, inner) for v in raw_list
+                ]
+            except (ValueError, TypeError):
+                return _NO_COERCION
+            if origin is tuple:
+                return tuple(coerced_list)
+            if origin is set:
+                return set(coerced_list)
+            return coerced_list
+
+        if isinstance(value, list):
+            # Handler expects scalar but user sent multiple values — take last,
+            # matching FastAPI/Starlette behaviour.
+            value = value[-1]
+
+        try:
+            return QueryParamParser._scalar_cast(value, annotation)
+        except (ValueError, TypeError):
+            return _NO_COERCION
+
+    @staticmethod
+    def _scalar_cast(value: Any, annotation: Any) -> Any:
+        if annotation is int:
+            return int(value)
+        if annotation is float:
+            return float(value)
+        if annotation is bool:
+            return str(value).lower() in ("true", "1", "yes", "on")
+        if annotation is str:
+            return str(value)
+        if isinstance(annotation, type):
+            # Best-effort construction — catches enums, UUID, Path, etc.
+            return annotation(value)
+        raise TypeError(f"Unsupported query parameter annotation: {annotation!r}")
 
 
 class PathParamParser:
@@ -467,9 +535,27 @@ class ResponseHandler:
             body = result.body
             content_type = result.media_type
 
+            # Collect extra headers (non-empty headers dict + cookies)
+            extra_headers: dict = {}
+            for k, v in result.headers.items():
+                if k.lower() not in {"content-type", "content-length"}:
+                    extra_headers[k] = v
+            for cookie in getattr(result, "_cookies", []):
+                existing = extra_headers.get("set-cookie")
+                if existing is None:
+                    extra_headers["set-cookie"] = cookie
+                else:
+                    # Accumulate as list; caller handles multi-value emission
+                    if isinstance(existing, list):
+                        existing.append(cookie)
+                    else:
+                        extra_headers["set-cookie"] = [existing, cookie]
+
+            # For binary content types, return raw bytes
             # For binary content types, return raw bytes
             if content_type and _is_binary_content_type(content_type):
-                # Return raw bytes with content_type for binary responses
+                if extra_headers:
+                    return body, result.status_code, content_type, extra_headers
                 return body, result.status_code, content_type
 
             if isinstance(body, bytes):
@@ -484,10 +570,16 @@ class ResponseHandler:
                         body = body.decode("utf-8")
                     except UnicodeDecodeError:
                         # Binary data - return with content_type
+                        if extra_headers:
+                            return body, result.status_code, content_type, extra_headers
                         return body, result.status_code, content_type
                 except UnicodeDecodeError:
                     # Binary data - return with content_type
+                    if extra_headers:
+                        return body, result.status_code, content_type, extra_headers
                     return body, result.status_code, content_type
+            if extra_headers:
+                return body, result.status_code, content_type, extra_headers
             return body, result.status_code, content_type
 
         # Handle tuple returns: (content, status_code)
@@ -505,15 +597,19 @@ class ResponseHandler:
 
         # Handle dict with status_code key (internal format)
         if isinstance(result, dict) and "status_code" in result:
-            status = result.pop("status_code")
-            return result, status
+            status = result["status_code"]
+            content = {k: v for k, v in result.items() if k != "status_code"}
+            return content, status
 
         # Default: treat as 200 OK response
         return result, 200
 
     @staticmethod
     def format_response(
-        content: Any, status_code: int, content_type: str | None = None
+        content: Any,
+        status_code: int,
+        content_type: str | None = None,
+        extra_headers: dict | None = None,
     ) -> dict[str, Any]:
         """
         Format content as response. Handles both JSON and binary responses.
@@ -522,18 +618,21 @@ class ResponseHandler:
             content: Response content (can be dict, str, bytes, etc.)
             status_code: HTTP status code
             content_type: Optional content type (for binary responses)
+            extra_headers: Optional dict of extra response headers (e.g. Set-Cookie)
 
         Returns:
             Dictionary with properly formatted response
         """
         # For binary content (bytes with binary content_type), return directly
         if isinstance(content, bytes) and content_type and _is_binary_content_type(content_type):
-            # Return bytes directly - Zig will handle as raw binary
-            return {
+            result: dict[str, Any] = {
                 "content": content,  # Keep as bytes for Zig to extract
                 "status_code": status_code,
                 "content_type": content_type,
             }
+            if extra_headers:
+                result["extra_headers"] = extra_headers
+            return result
 
         # Handle Satya models
         if isinstance(content, Model):
@@ -563,18 +662,24 @@ class ResponseHandler:
 
         content = make_serializable(content)
 
-        return {
+        result = {
             "content": content,
             "status_code": status_code,
             "content_type": content_type or "application/json",
         }
+        if extra_headers:
+            result["extra_headers"] = extra_headers
+        return result
 
     @staticmethod
     def format_json_response(
-        content: Any, status_code: int, content_type: str | None = None
+        content: Any,
+        status_code: int,
+        content_type: str | None = None,
+        extra_headers: dict | None = None,
     ) -> dict[str, Any]:
         """Alias for format_response for backwards compatibility."""
-        return ResponseHandler.format_response(content, status_code, content_type)
+        return ResponseHandler.format_response(content, status_code, content_type, extra_headers)
 
 
 _json_dumps = __import__("json").dumps
@@ -630,12 +735,27 @@ def create_enhanced_handler(original_handler, route_definition):
                 _path_param_types[pname] = float
             elif ann is bool:
                 _path_param_types[pname] = lambda v: v.lower() in ("true", "1", "yes")
-
     # Pre-check which features this handler needs
     _param_names = set(sig.parameters.keys())
     _has_dependencies = False
     _has_header_params = False
     _has_form_params = False
+
+    # Raw-body / Request injection: collect params annotated as bytes, bytearray,
+    # or the framework Request model so users can read the unparsed request body.
+    from .models import TurboRequest as _TurboRequest
+
+    _Request = _TurboRequest
+    _raw_body_param_names: set[str] = set()
+    _request_param_names: set[str] = set()
+    for _pname, _param in sig.parameters.items():
+        _ann = _param.annotation
+        if _ann is bytes or _ann is bytearray:
+            _raw_body_param_names.add(_pname)
+        elif isinstance(_ann, type) and issubclass(_ann, _TurboRequest):
+            _request_param_names.add(_pname)
+    _skip_json_body = bool(_raw_body_param_names or _request_param_names)
+
     from turboapi.datastructures import Header
 
     try:
@@ -657,9 +777,8 @@ def create_enhanced_handler(original_handler, route_definition):
             _has_header_params = True
         elif _has_form_types and isinstance(param.default, (Form, File)):
             _has_form_params = True
-        elif (
-            _has_form_types
-            and param.annotation is _UploadFile
+        elif _has_form_types and (
+            param.annotation is _UploadFile
             or (isinstance(param.annotation, type) and issubclass(param.annotation, _UploadFile))
         ):
             _has_form_params = True
@@ -685,7 +804,7 @@ def create_enhanced_handler(original_handler, route_definition):
                 if "query_string" in kwargs:
                     query_string = kwargs.get("query_string", "")
                     if query_string:
-                        query_params = QueryParamParser.parse_query_params(query_string)
+                        query_params = QueryParamParser.parse_query_params(query_string, sig)
                         parsed_params.update(query_params)
 
                 # 2. Parse path parameters (if route pattern is available)
@@ -761,8 +880,28 @@ def create_enhanced_handler(original_handler, route_definition):
                                 uf.file.seek(0)
                                 parsed_params[pname] = uf
 
+                # 3.7. Raw body / Request injection — FastAPI-compat access
+                # to the unparsed request body.
+                if _raw_body_param_names or _request_param_names:
+                    _raw_body = kwargs.get("body", b"") or b""
+                    if isinstance(_raw_body, bytearray):
+                        _raw_body = bytes(_raw_body)
+                    for _pname in _raw_body_param_names:
+                        parsed_params[_pname] = _raw_body
+                    if _request_param_names:
+                        _req_obj = _Request(
+                            method=kwargs.get("method", "GET"),
+                            path=kwargs.get("path", ""),
+                            query_string=kwargs.get("query_string", ""),
+                            headers=kwargs.get("headers", {}) or {},
+                            body=_raw_body,
+                        )
+                        for _pname in _request_param_names:
+                            parsed_params[_pname] = _req_obj
+
                 # 4. Parse request body (JSON) — skip if form data was already parsed
-                if "body" in kwargs:
+                #    or if the handler has opted into raw access via bytes / Request.
+                if "body" in kwargs and not _skip_json_body:
                     body_data = kwargs["body"]
                     if body_data and not (_form_fields or _file_fields):
                         parsed_body = RequestBodyParser.parse_json_body(body_data, sig)
@@ -794,15 +933,18 @@ def create_enhanced_handler(original_handler, route_definition):
                     except Exception:
                         pass
 
-                # Normalize response - may return (content, status) or (content, status, content_type)
+                # Normalize response - may return 2, 3, or 4-element tuple
                 normalized = ResponseHandler.normalize_response(result)
-                if len(normalized) == 3:
+                extra_headers = None
+                if len(normalized) == 4:
+                    content, status_code, content_type, extra_headers = normalized
+                elif len(normalized) == 3:
                     content, status_code, content_type = normalized
                 else:
                     content, status_code = normalized
                     content_type = None
 
-                return ResponseHandler.format_json_response(content, status_code, content_type)
+                return ResponseHandler.format_json_response(content, status_code, content_type, extra_headers)
 
             except ValueError as e:
                 return ResponseHandler.format_json_response(
@@ -836,7 +978,7 @@ def create_enhanced_handler(original_handler, route_definition):
                 # 1. Parse query parameters
                 query_string = kwargs.get("query_string", "")
                 if query_string:
-                    query_params = QueryParamParser.parse_query_params(query_string)
+                    query_params = QueryParamParser.parse_query_params(query_string, sig)
                     parsed_params.update(query_params)
 
                 # 2. Parse path parameters using pre-compiled regex
@@ -918,9 +1060,29 @@ def create_enhanced_handler(original_handler, route_definition):
                                 uf.file.seek(0)
                                 parsed_params[pname] = uf
 
-                # 4. Parse request body (JSON) — skip if form data was already parsed
+                # 3.7. Raw body / Request injection — FastAPI-compat access
+                # to the unparsed request body.
                 body_data = kwargs.get("body", b"")
-                if body_data and not (_form_fields or _file_fields):
+                if _raw_body_param_names or _request_param_names:
+                    _raw_body = body_data or b""
+                    if isinstance(_raw_body, bytearray):
+                        _raw_body = bytes(_raw_body)
+                    for _pname in _raw_body_param_names:
+                        parsed_params[_pname] = _raw_body
+                    if _request_param_names:
+                        _req_obj = _Request(
+                            method=kwargs.get("method", "GET"),
+                            path=kwargs.get("path", ""),
+                            query_string=query_string,
+                            headers=kwargs.get("headers", {}) or {},
+                            body=_raw_body,
+                        )
+                        for _pname in _request_param_names:
+                            parsed_params[_pname] = _req_obj
+
+                # 4. Parse request body (JSON) — skip if form data was already parsed
+                #    or if the handler has opted into raw access via bytes / Request.
+                if body_data and not (_form_fields or _file_fields) and not _skip_json_body:
                     parsed_body = RequestBodyParser.parse_json_body(body_data, sig)
                     parsed_params.update(parsed_body)
 
@@ -951,15 +1113,18 @@ def create_enhanced_handler(original_handler, route_definition):
                         except Exception:
                             pass
 
-                # Normalize response - may return (content, status) or (content, status, content_type)
+                # Normalize response - may return 2, 3, or 4-element tuple
                 normalized = ResponseHandler.normalize_response(result)
-                if len(normalized) == 3:
+                extra_headers = None
+                if len(normalized) == 4:
+                    content, status_code, content_type, extra_headers = normalized
+                elif len(normalized) == 3:
                     content, status_code, content_type = normalized
                 else:
                     content, status_code = normalized
                     content_type = None
 
-                return ResponseHandler.format_json_response(content, status_code, content_type)
+                return ResponseHandler.format_json_response(content, status_code, content_type, extra_headers)
 
             except ValueError as e:
                 return ResponseHandler.format_json_response(

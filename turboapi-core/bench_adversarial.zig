@@ -13,6 +13,25 @@ const Router = root.Router;
 
 const print = std.debug.print;
 
+/// Monotonic timer — replaces std.time.Timer removed in Zig 0.16.
+const Timer = struct {
+    start_ns: u64,
+
+    fn start() Timer {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        const ns: u64 = @intCast(@as(i128, ts.sec) * 1_000_000_000 + @as(i128, ts.nsec));
+        return .{ .start_ns = ns };
+    }
+
+    fn read(self: Timer) u64 {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        const now: u64 = @intCast(@as(i128, ts.sec) * 1_000_000_000 + @as(i128, ts.nsec));
+        return now - self.start_ns;
+    }
+};
+
 // Use volatile sink to prevent dead code elimination
 var volatile_sink: usize = 0;
 fn doNotOptimize(val: anytype) void {
@@ -122,7 +141,7 @@ pub fn main() !void {
         match_count = 0;
         miss_count = 0;
         var total: u64 = 0;
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = Timer.start();
 
         for (0..iters) |_| {
             for (lookups) |l| {
@@ -162,7 +181,7 @@ pub fn main() !void {
         // Generate paths at runtime so the compiler can't intern them
         var path_buf: [256]u8 = undefined;
 
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = Timer.start();
 
         for (0..iters) |i| {
             // /api/v1/users/{varying_id}
@@ -236,7 +255,7 @@ pub fn main() !void {
         var total: u64 = 0;
         var path_buf2: [256]u8 = undefined;
 
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = Timer.start();
 
         for (0..iters) |i| {
             const ns = i % 20;

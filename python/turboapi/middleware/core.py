@@ -20,9 +20,7 @@ import threading
 import time
 from collections.abc import Callable
 
-from .models import Request, Response
-
-
+from ..models import Request, Response
 class Middleware:
     """Base middleware class."""
 
@@ -100,7 +98,7 @@ class CORSMiddleware(Middleware):
         origin = request.headers.get("origin", "")
 
         # Check if origin is allowed
-        if self.allow_origin_regex and self.allow_origin_regex.match(origin):
+        if self.allow_origin_regex and self.allow_origin_regex.fullmatch(origin):
             response.set_header("Access-Control-Allow-Origin", origin)
         elif "*" in self.allow_origins:
             response.set_header("Access-Control-Allow-Origin", "*")
@@ -459,7 +457,5 @@ class CSRFMiddleware(Middleware):
             existing = self._get_cookie(request, self.cookie_name)
             if not existing or not self._validate_token(existing):
                 token = self._generate_token()
-                response.headers[
-                    "Set-Cookie"
-                ] = f"{self.cookie_name}={token}; Path=/; SameSite=Lax"
+                response.set_cookie(self.cookie_name, token, path="/", samesite="lax")
         return response

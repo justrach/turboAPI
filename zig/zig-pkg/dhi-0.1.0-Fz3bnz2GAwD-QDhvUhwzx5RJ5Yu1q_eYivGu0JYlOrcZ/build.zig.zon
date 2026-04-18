@@ -1,0 +1,16 @@
+.{
+    .name = .dhi,
+    .fingerprint = 0x29d582bd9fdb3d17,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.0",
+
+    .dependencies = .{},
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+    },
+}

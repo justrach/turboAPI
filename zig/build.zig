@@ -68,25 +68,25 @@ pub fn build(b: *std.Build) void {
     lib.root_module.addImport("pg", pg_mod);
     lib.root_module.addImport("turboapi-core", core_mod);
 
-    lib.addIncludePath(.{ .cwd_relative = include_path });
+    lib.root_module.addIncludePath(.{ .cwd_relative = include_path });
     lib.root_module.addRPathSpecial("@loader_path");
 
     if (is_free_threaded) {
         // Free-threaded: link libpython + atomic shim
-        lib.addLibraryPath(.{ .cwd_relative = lib_path });
-        lib.linkSystemLibrary(py_lib_name);
-        lib.addCSourceFile(.{
+        lib.root_module.addLibraryPath(.{ .cwd_relative = lib_path });
+        lib.root_module.linkSystemLibrary(py_lib_name, .{});
+        lib.root_module.addCSourceFile(.{
             .file = b.path("src/py_atomic_shim.c"),
             .flags = &.{ "-I", include_path },
         });
-        lib.addCSourceFile(.{
+        lib.root_module.addCSourceFile(.{
             .file = b.path("src/py_gil_shim.c"),
             .flags = &.{ "-I", include_path },
         });
     } else {
         // Standard: allow undefined (symbols resolve at import time)
         lib.linker_allow_shlib_undefined = true;
-        lib.addCSourceFile(.{
+        lib.root_module.addCSourceFile(.{
             .file = b.path("src/py_gil_shim.c"),
             .flags = &.{ "-I", include_path },
         });
@@ -109,16 +109,16 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("model", model_mod);
     tests.root_module.addImport("pg", pg_mod);
     tests.root_module.addImport("turboapi-core", core_mod);
-    tests.addIncludePath(.{ .cwd_relative = include_path });
-    tests.addLibraryPath(.{ .cwd_relative = lib_path });
-    tests.linkSystemLibrary(py_lib_name);
-    tests.addCSourceFile(.{
+    tests.root_module.addIncludePath(.{ .cwd_relative = include_path });
+    tests.root_module.addLibraryPath(.{ .cwd_relative = lib_path });
+    tests.root_module.linkSystemLibrary(py_lib_name, .{});
+    tests.root_module.addCSourceFile(.{
         .file = b.path("src/py_gil_shim.c"),
         .flags = &.{ "-I", include_path },
     });
 
     if (is_free_threaded) {
-        tests.addCSourceFile(.{
+        tests.root_module.addCSourceFile(.{
             .file = b.path("src/py_atomic_shim.c"),
             .flags = &.{ "-I", include_path },
         });

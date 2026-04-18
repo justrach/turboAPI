@@ -12,11 +12,13 @@ pub fn build(b: *std.Build) void {
     });
 
     // ── Tests ──
+    // ── Tests ──
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     const run_tests = b.addRunArtifact(tests);

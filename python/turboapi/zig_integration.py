@@ -677,9 +677,11 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 try:
                     mw.before_request(request)
                 except Exception as e:
+                    # Use status_code from HTTPException if available, else 500
+                    status = getattr(e, "status_code", 500)
                     return {
                         "content": {"error": str(e)},
-                        "status_code": 429,
+                        "status_code": status,
                         "content_type": "application/json",
                     }
 
@@ -687,14 +689,19 @@ class ZigIntegratedTurboAPI(TurboAPI):
             try:
                 result = enhanced_handler(**kwargs)
             except Exception as e:
+                final_resp = None
                 for mw in reversed(middleware_instances):
                     err_resp = mw.on_error(request, e)
                     if err_resp:
-                        return {
-                            "content": {"error": str(e)},
-                            "status_code": 500,
-                            "content_type": "application/json",
-                        }
+                        final_resp = err_resp
+                        break
+                if final_resp is not None:
+                    # Return the middleware-provided error response
+                    return {
+                        "content": final_resp.content,
+                        "status_code": final_resp.status_code,
+                        "content_type": "application/json",
+                    }
                 return {
                     "content": {"error": str(e)},
                     "status_code": 500,
@@ -722,27 +729,47 @@ class ZigIntegratedTurboAPI(TurboAPI):
             # Propagate any body mutation (e.g. GZipMiddleware replaces content
             # with compressed bytes).
             result["content"] = response.content
-            if response.headers:
-                # Filter out headers that Zig already emits from its fixed set
-                _ZIG_OWNED = frozenset({"content-length", "server", "date", "connection"})
-                extra = {k: v for k, v in response.headers.items() if k.lower() not in _ZIG_OWNED}
-                if extra:
-                    # Inject extra headers via content_type — Zig emits
-                    # "Content-Type: <ct>" so we append "\r\nKey: Value" pairs.
-                    # This avoids needing a Zig-side sendResponseExt function.
-                    ct = result.get("content_type", "application/json")
-                    extra_lines = []
-                    for key, value in extra.items():
-                        safe_key = _sanitize_header_component(str(key))
-                        safe_value = _sanitize_header_component(str(value))
-                        if safe_key.lower() == "content-type":
-                            ct = safe_value
-                            continue
-                        extra_lines.append(f"{safe_key}: {safe_value}")
-                    if extra_lines:
-                        result["content_type"] = ct + "\r\n" + "\r\n".join(extra_lines)
+
+            # Collect all extra headers: from the handler's Response object
+            # (passed through as "extra_headers") plus any set by middleware hooks.
+            _ZIG_OWNED = frozenset({"content-length", "server", "date", "connection"})
+            all_extra: dict = {}
+
+            # 1. Handler-level extra headers (e.g. Set-Cookie from responses.py.Response)
+            for k, v in (result.pop("extra_headers", None) or {}).items():
+                if k.lower() not in _ZIG_OWNED:
+                    all_extra[k] = v
+
+            # 2. Middleware after_request headers
+            for k, v in response.headers.items():
+                if k.lower() not in _ZIG_OWNED:
+                    existing = all_extra.get(k)
+                    if existing is None:
+                        all_extra[k] = v
+                    elif isinstance(existing, list):
+                        existing.append(v)
                     else:
-                        result["content_type"] = ct
+                        all_extra[k] = [existing, v]
+
+            if all_extra:
+                # Inject extra headers via content_type — Zig emits
+                # "Content-Type: <ct>" so we append "\r\nKey: Value" pairs.
+                ct = result.get("content_type", "application/json")
+                extra_lines = []
+                for key, value in all_extra.items():
+                    safe_key = _sanitize_header_component(str(key))
+                    if safe_key.lower() == "content-type":
+                        ct = _sanitize_header_component(str(value))
+                        continue
+                    # Handle multi-value headers (e.g. multiple Set-Cookie)
+                    values = value if isinstance(value, list) else [value]
+                    for v in values:
+                        safe_value = _sanitize_header_component(str(v))
+                        extra_lines.append(f"{safe_key}: {safe_value}")
+                if extra_lines:
+                    result["content_type"] = ct + "\r\n" + "\r\n".join(extra_lines)
+                else:
+                    result["content_type"] = ct
 
             return result
 

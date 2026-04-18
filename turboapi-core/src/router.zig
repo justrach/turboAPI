@@ -410,8 +410,27 @@ const RouteNode = struct {
     }
 
     fn findChildIndex(self: *const RouteNode, c: u8) ?usize {
-        for (self.indices, 0..) |idx_byte, i| {
-            if (idx_byte == c) return i;
+        const n = self.indices.len;
+        if (n == 0) return null;
+
+        // SIMD fast path: scan 16 indices per iteration when the node has ≥16 children.
+        // Compiles to PCMPEQB+PMOVMSKB on x86 or CMEQ+UMAXV on AArch64.
+        const Vec16 = @Vector(16, u8);
+        const needle: Vec16 = @splat(c);
+        var i: usize = 0;
+        while (i + 16 <= n) : (i += 16) {
+            const chunk: Vec16 = self.indices[i..][0..16].*;
+            const eq: @Vector(16, bool) = chunk == needle;
+            if (@reduce(.Or, eq)) {
+                inline for (0..16) |j| {
+                    if (eq[j]) return i + j;
+                }
+            }
+        }
+
+        // Scalar tail — also the only path when n < 16 (typical case).
+        while (i < n) : (i += 1) {
+            if (self.indices[i] == c) return i;
         }
         return null;
     }
@@ -421,22 +440,24 @@ const RouteNode = struct {
         const new_len = old_len + 1;
         const first_byte = if (child.path.len > 0) child.path[0] else 0;
 
+        // Allocate both arrays before mutating self — prevents inconsistent
+        // node state (indices.len != children_list.len) on OOM.
         const new_indices = try alloc.alloc(u8, new_len);
+        errdefer alloc.free(new_indices);
+        const new_children = try alloc.alloc(*RouteNode, new_len);
+
         if (old_len > 0) {
             @memcpy(new_indices[0..old_len], self.indices);
-            alloc.free(self.indices);
-        }
-        new_indices[old_len] = first_byte;
-        self.indices = new_indices;
-
-        const new_children = try alloc.alloc(*RouteNode, new_len);
-        if (old_len > 0) {
             @memcpy(new_children[0..old_len], self.children_list);
+            alloc.free(self.indices);
             alloc.free(self.children_list);
         }
+        new_indices[old_len] = first_byte;
         new_children[old_len] = child;
+        self.indices = new_indices;
         self.children_list = new_children;
     }
+
 
     fn deinitRecursive(self: *RouteNode, alloc: Allocator) void {
         for (self.children_list) |child| {
@@ -576,7 +597,8 @@ test "no match returns null" {
 
 // ── Fuzz tests ───────────────────────────────────────────────────────────────
 
-fn fuzz_findRoute(_: void, input: []const u8) anyerror!void {
+fn fuzz_findRoute(_: void, smith: *std.testing.Smith) anyerror!void {
+    const input = smith.in orelse return;
     if (input.len == 0) return;
 
     // First byte selects the HTTP method

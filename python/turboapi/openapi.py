@@ -5,7 +5,7 @@ interactive API documentation at /docs (Swagger UI) and /redoc (ReDoc).
 """
 
 import inspect
-from typing import Any, get_args, get_origin
+from typing import Any, Union, get_args, get_origin
 
 
 def generate_openapi_schema(app) -> dict:
@@ -175,8 +175,17 @@ def _type_to_schema(annotation) -> dict:
     if origin is dict:
         return {"type": "object"}
 
-    # Handle Optional
-    if origin is type(None):
+    # Handle Optional[X] / Union[X, None] — get_origin returns Union, not type(None)
+    if origin is Union:
+        args = get_args(annotation)
+        non_none = [a for a in args if a is not type(None)]
+        if len(non_none) == 1:
+            inner = _type_to_schema(non_none[0])
+            inner["nullable"] = True
+            return inner
+        return {"nullable": True}
+    # Handle bare NoneType annotation
+    if annotation is type(None):
         return {"nullable": True}
 
     # Try to get schema from Satya/Pydantic models

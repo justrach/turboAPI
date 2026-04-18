@@ -10,7 +10,7 @@ pub fn BoundedCache(comptime V: type) type {
         const Self = @This();
 
         map: std.StringHashMap(V),
-        lock: std.Thread.Mutex = .{},
+        lock: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
         count: usize = 0,
         max_entries: usize,
         allocator: std.mem.Allocator,
@@ -31,21 +31,22 @@ pub fn BoundedCache(comptime V: type) type {
             while (it.next()) |key_ptr| {
                 self.allocator.free(key_ptr.*);
             }
+            _ = std.c.pthread_mutex_destroy(&self.lock);
             self.map.deinit();
         }
 
         /// Look up a cached value. Returns null if not present.
         pub fn get(self: *Self, key: []const u8) ?V {
-            self.lock.lock();
-            defer self.lock.unlock();
+            _ = std.c.pthread_mutex_lock(&self.lock);
+            defer _ = std.c.pthread_mutex_unlock(&self.lock);
             return self.map.get(key);
         }
 
         /// Insert a key-value pair. Silently drops if at capacity or key already exists.
         /// The key is duped internally; the caller owns the value.
         pub fn put(self: *Self, key: []const u8, value: V) void {
-            self.lock.lock();
-            defer self.lock.unlock();
+            _ = std.c.pthread_mutex_lock(&self.lock);
+            defer _ = std.c.pthread_mutex_unlock(&self.lock);
 
             if (self.count >= self.max_entries) return;
 

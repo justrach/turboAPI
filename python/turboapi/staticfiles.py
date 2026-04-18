@@ -44,8 +44,9 @@ class StaticFiles:
         # Security: prevent path traversal
         try:
             file_path = (self.directory / path.lstrip("/")).resolve()
-            if not str(file_path).startswith(str(self.directory.resolve())):
+            if not file_path.is_relative_to(self.directory.resolve()):
                 return None
+
         except (ValueError, OSError):
             return None
 

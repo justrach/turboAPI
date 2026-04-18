@@ -1,10 +1,10 @@
 .{
     .name = .zig,
-    .version = "0.15.2",
+    .version = "0.16.0",
     .dependencies = .{
         .dhi = .{
-            .url = "https://github.com/justrach/dhi/archive/refs/heads/main.tar.gz",
-            .hash = "dhi-0.1.0-Fz3bnz2GAwD-QDhvUhwzx5RJ5Yu1q_eYivGu0JYlOrcZ",
+            .url = "https://github.com/justrach/dhi/archive/4f607331c51b2ec974310e8cb5d40cf61a8ab6b1.tar.gz",
+            .hash = "dhi-0.1.0-Fz3bn1CFAwDexo2jviNTcIrQeJZ5TM6fCcHcdPIO2wK1",
         },
         .pg = .{
             .url = "git+https://github.com/justrach/pg.zig?ref=master#7605502f24e348c50341cbdf84ac135613d512af",

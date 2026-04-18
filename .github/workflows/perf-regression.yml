@@ -30,7 +30,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Build turbonet extension
         run: python zig/build_turbonet.py --install --release
@@ -118,7 +118,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Build turbonet extension
         run: python zig/build_turbonet.py --install --release

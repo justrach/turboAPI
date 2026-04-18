@@ -6,7 +6,7 @@
   <a href="https://pypi.org/project/turboapi/"><img src="https://img.shields.io/pypi/v/turboapi.svg?style=flat-square&label=version" alt="PyPI version" /></a>
   <a href="https://github.com/justrach/turboAPI/blob/main/LICENSE"><img src="https://img.shields.io/github/license/justrach/turboAPI?style=flat-square" alt="License" /></a>
   <img src="https://img.shields.io/badge/python-3.14+-blue?style=flat-square" alt="Python 3.14+" />
-  <img src="https://img.shields.io/badge/zig-0.15-f7a41d?style=flat-square" alt="Zig 0.15" />
+  <img src="https://img.shields.io/badge/zig-0.16.0-f7a41d?style=flat-square" alt="Zig 0.16.0" />
   <img src="https://img.shields.io/badge/status-alpha-orange?style=flat-square" alt="Alpha" />
   <a href="https://deepwiki.com/justrach/turboAPI"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" /></a>
 </p>
@@ -67,7 +67,11 @@
 
 ## ⚡ Quick Start
 
-**Requirements:** Python 3.14+ free-threaded (`3.14t`), Zig 0.15+
+**Requirements:** Python 3.14+ free-threaded (`3.14t`), Zig 0.16.0
+
+TurboAPI now targets Zig `0.16.0`. For the corrected migration direction, see
+[`docs/ZIG_0_16_MIGRATION.md`](docs/ZIG_0_16_MIGRATION.md) and
+[`docs/migration-0.15.2-to-0.16.md`](docs/migration-0.15.2-to-0.16.md).
 
 ### Option 1: Docker (easiest)
 
@@ -477,7 +481,7 @@ turboAPI/
 │   └── build_turbonet.py       # auto-detect Python, invoke zig build
 ├── tests/                      # 275+ tests
 ├── benchmarks/
-├── Dockerfile                  # Python 3.14t + Zig 0.15 + turbonet
+├── Dockerfile                  # Python 3.14t + Zig toolchain + turbonet
 ├── docker-compose.yml
 └── Makefile                    # make build, make test, make release
 ```
@@ -487,7 +491,10 @@ turboAPI/
 
 ## Building from Source
 
-**Requirements:** [Python 3.14t](https://docs.python.org/3.14/whatsnew/3.14.html) (free-threaded) and [Zig 0.15+](https://ziglang.org/download/)
+**Requirements:** [Python 3.14t](https://docs.python.org/3.14/whatsnew/3.14.html) (free-threaded) and [Zig 0.16.0](https://ziglang.org/download/)
+
+The repo and CI are pinned to Zig `0.16.0`. The intended migration path is native
+`std.Io` adoption, not a pthread compatibility layer.
 
 ```bash
 # 1. Clone
@@ -659,7 +666,7 @@ make test                                      # verify everything works
 ## Credits
 
 - **[dhi](https://github.com/justrach/dhi)** — Pydantic-compatible validation, Zig + Python
-- **[Zig 0.15](https://ziglang.org)** — HTTP server, JSON validation, zero-copy I/O
+- **[Zig 0.16](https://ziglang.org)** — HTTP server, JSON validation, zero-copy I/O
 - **Python 3.14t** — free-threaded runtime, true parallelism
 
 ## License
