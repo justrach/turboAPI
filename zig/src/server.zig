@@ -839,11 +839,10 @@ var pool: ConnectionPool = undefined;
 pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     // Initialize the shared Io runtime (no extra async threads — our ConnectionPool
     // manages workers via std.Thread.spawn to hook per-worker PyThreadState lifecycle).
-    runtime.threaded = std.Io.Threaded.init(std.heap.c_allocator, .{
+    runtime.initWithOptions(std.heap.c_allocator, .{
         .async_limit = .nothing,
     });
-    defer runtime.threaded.deinit();
-    runtime.io = runtime.threaded.io();
+    defer runtime.deinit();
 
     const ip_addr = std.Io.net.IpAddress.parse(server_host, server_port) catch {
         py.setError("Invalid address: {s}:{d}", .{ server_host, server_port });
@@ -2212,9 +2211,8 @@ fn cacheThreadWorker(ctx: *const CacheThreadCtx) void {
 
 test "response cache is safe under concurrent access" {
     // std.Io.Mutex requires an initialized runtime.io — set up a minimal threaded runtime.
-    runtime.threaded = std.Io.Threaded.init(std.heap.c_allocator, .{ .async_limit = .nothing });
-    defer runtime.threaded.deinit();
-    runtime.io = runtime.threaded.io();
+    runtime.initWithOptions(std.heap.c_allocator, .{ .async_limit = .nothing });
+    defer runtime.deinit();
 
     response_cache = null;
     response_cache_count = 0;
