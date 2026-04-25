@@ -38,8 +38,9 @@
 > **Alpha software — read before using in production**
 >
 > TurboAPI works and has 380+ passing tests, but:
-> - **No native TLS / HTTP/2 / HTTP/3 / QUIC** — put Caddy, nginx, Cloudflare,
->   or another edge proxy in front for HTTPS and modern protocols
+> - **No native TLS / HTTP/2 / HTTP/3 / QUIC** — put Caddy with Let's Encrypt,
+>   nginx, `cloudflared`, Cloudflare, or another edge proxy in front for HTTPS
+>   and modern protocols
 > - **Basic slow-loris protection** exists via a 30s read timeout, but production
 >   deployments should still use a reverse proxy with stricter limits
 > - **No configurable max body size** — hardcoded 16MB cap

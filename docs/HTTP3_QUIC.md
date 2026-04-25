@@ -20,11 +20,18 @@ HTTP/3 a new transport runtime, not a flag on the current TCP listener.
 
 ## Supported Deployment Today
 
-Use an edge proxy that supports HTTP/3/QUIC for public traffic:
+Use an edge proxy that supports HTTP/3/QUIC for public traffic. Good options
+include:
+
+- Caddy with automatic HTTPS/ACME certificates, including Let's Encrypt
+- Cloudflare Tunnel via `cloudflared`
+- nginx built with HTTP/3/QUIC support and certificates from Let's Encrypt or
+  another public CA
+- a managed load balancer or CDN that terminates HTTP/3
 
 ```text
 Client
-  -> HTTPS / HTTP/3 / QUIC at Caddy, Cloudflare, nginx, or a load balancer
+  -> HTTPS / HTTP/3 / QUIC at Caddy, Cloudflare, nginx, or another edge proxy
   -> HTTP/1.1 to TurboAPI on 127.0.0.1:8000
 ```
 
@@ -34,11 +41,19 @@ TurboAPI should still bind to a private interface:
 python app.py  # listens on 127.0.0.1:8000
 ```
 
-## Caddy Example
+## Caddy + Let's Encrypt Example
 
-Caddy enables HTTP/3 by default for HTTPS sites when UDP 443 is reachable.
+Caddy enables HTTPS automatically for public hostnames and supports HTTP/3 when
+UDP 443 is reachable. By default it can obtain and renew ACME certificates from
+public CAs such as Let's Encrypt or ZeroSSL. If you want to pin Let's Encrypt as
+the ACME CA, set `acme_ca` explicitly:
 
 ```caddyfile
+{
+    email ops@example.com
+    acme_ca https://acme-v02.api.letsencrypt.org/directory
+}
+
 api.example.com {
     reverse_proxy 127.0.0.1:8000
 }
@@ -64,21 +79,66 @@ volumes:
   caddy_config:
 ```
 
-The upstream from Caddy to TurboAPI remains HTTP/1.1. Do not configure Caddy to
-proxy HTTP/3 to TurboAPI because TurboAPI is not an HTTP/3 upstream server.
+The upstream from Caddy to TurboAPI remains HTTP/1.1. Do not configure Caddy or
+any other edge proxy to proxy HTTP/3 to TurboAPI because TurboAPI is not an
+HTTP/3 upstream server.
 
-## Cloudflare Example
+## Cloudflare Tunnel (`cloudflared`) Example
 
-Cloudflare can terminate HTTP/3/QUIC at its edge and forward to the origin
-without requiring TurboAPI to speak QUIC. Keep TurboAPI behind HTTPS or a
-private tunnel/load balancer according to your deployment model.
+Cloudflare can terminate HTTP/3/QUIC at its edge and forward to a local TurboAPI
+service through `cloudflared`. This avoids opening inbound ports on the origin
+host.
+
+Example tunnel ingress rule:
+
+```yaml
+tunnel: <tunnel-id>
+credentials-file: /etc/cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: api.example.com
+    service: http://127.0.0.1:8000
+  - service: http_status:404
+```
+
+TurboAPI still listens locally on HTTP/1.1. Cloudflare handles public HTTPS,
+HTTP/2, HTTP/3, and QUIC at the edge.
 
 ## nginx Example
 
 nginx can be used when it is built with HTTP/3/QUIC support. The exact build and
 TLS library requirements vary by distribution, so prefer your platform's
-official nginx packaging notes. As with Caddy, nginx should terminate QUIC and
-proxy HTTP/1.1 to TurboAPI.
+official nginx packaging notes. Pair it with Certbot/Let's Encrypt or another
+certificate automation path, terminate QUIC at nginx, and proxy HTTP/1.1 to
+TurboAPI.
+
+Sketch:
+
+```nginx
+server {
+    listen 443 ssl;
+    listen 443 quic reuseport;
+    http2 on;
+    http3 on;
+
+    server_name api.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/api.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.example.com/privkey.pem;
+
+    add_header Alt-Svc 'h3=":443"; ma=86400' always;
+
+    location / {
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://127.0.0.1:8000;
+    }
+}
+```
+
+Treat this as a shape, not a universal nginx config: HTTP/3 directives depend on
+your nginx version, build flags, and TLS library.
 
 ## Verification
 
@@ -109,4 +169,6 @@ to the Zig server over UDP.
 - [Caddy global HTTP protocol options](https://caddyserver.com/docs/caddyfile/options)
 - [Caddy Docker port guidance](https://caddyserver.com/docs/running)
 - [Cloudflare HTTP/3 with QUIC](https://developers.cloudflare.com/speed/optimization/protocol/http3/)
+- [Cloudflare Tunnel routing](https://developers.cloudflare.com/tunnel/routing/)
 - [nginx QUIC and HTTP/3 documentation](https://nginx.org/en/docs/quic.html)
+- [Certbot documentation](https://eff-certbot.readthedocs.io/en/stable/intro.html)
