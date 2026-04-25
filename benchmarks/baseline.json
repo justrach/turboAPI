@@ -1,8 +1,8 @@
 {
-  "GET /health": 100072.48,
-  "GET /": 97486.01,
-  "GET /json": 90557.21,
-  "GET /users/123": 87570.02,
-  "POST /items": 56255.2,
-  "GET /status201": 94423.47
+  "GET /health": 82967.35,
+  "GET /": 82730.03,
+  "GET /json": 80293.95,
+  "GET /users/123": 84883.96,
+  "POST /items": 44739.93,
+  "GET /status201": 74513.52
 }
