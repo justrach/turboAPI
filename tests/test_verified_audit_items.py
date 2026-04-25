@@ -1,6 +1,7 @@
 """
 Verified audit items — regression tests for issues resolved in the audit.
 """
+
 import os
 import random
 import sys
@@ -39,6 +40,7 @@ def test_verified_implicit_header_extraction():
     """
     if requests is None:
         import pytest
+
         pytest.skip("requests not installed")
 
     from turboapi import TurboAPI
@@ -78,6 +80,7 @@ def test_verified_gzip_passthrough_round_trip():
     """
     if requests is None:
         import pytest
+
         pytest.skip("requests not installed")
 
     from turboapi import TurboAPI

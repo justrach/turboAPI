@@ -49,9 +49,9 @@ const ParamMeta = struct {
 };
 
 const param_type_map = std.StaticStringMap(ParamType).initComptime(.{
-    .{ "int",   .int },
+    .{ "int", .int },
     .{ "float", .float },
-    .{ "bool",  .bool_val },
+    .{ "bool", .bool_val },
 });
 
 fn parseParamType(s: []const u8) ParamType {
@@ -150,6 +150,8 @@ const HandlerType = enum(u8) {
     simple_sync,
     model_sync,
     body_sync,
+    simple_async,
+    body_async,
     form_sync,
     file_sync,
     enhanced,
@@ -157,11 +159,13 @@ const HandlerType = enum(u8) {
 
 const handler_type_map = std.StaticStringMap(HandlerType).initComptime(.{
     .{ "simple_sync_noargs", .simple_sync_noargs },
-    .{ "simple_sync",        .simple_sync },
-    .{ "model_sync",         .model_sync },
-    .{ "body_sync",          .body_sync },
-    .{ "form_sync",          .form_sync },
-    .{ "file_sync",          .file_sync },
+    .{ "simple_sync", .simple_sync },
+    .{ "model_sync", .model_sync },
+    .{ "body_sync", .body_sync },
+    .{ "simple_async", .simple_async },
+    .{ "body_async", .body_async },
+    .{ "form_sync", .form_sync },
+    .{ "file_sync", .file_sync },
 });
 
 fn parseHandlerType(s: []const u8) HandlerType {
@@ -259,6 +263,58 @@ var cache_noargs_responses: bool = false;
 // Workers use this to create their own PyThreadState rather than calling
 // PyGILState_Ensure (which pays a per-call thread-state lookup cost).
 var py_interp: ?*anyopaque = null;
+var asyncio_run_fn: ?*c.PyObject = null;
+var turbo_run_coroutine_fn: ?*c.PyObject = null;
+var turbo_run_coroutine_response_fn: ?*c.PyObject = null;
+
+fn getAsyncioRunFn() ?*c.PyObject {
+    if (asyncio_run_fn) |run_fn| return run_fn;
+
+    const asyncio = c.PyImport_ImportModule("asyncio") orelse return null;
+    defer c.Py_DecRef(asyncio);
+
+    asyncio_run_fn = c.PyObject_GetAttrString(asyncio, "run") orelse return null;
+    return asyncio_run_fn;
+}
+
+fn getTurboRunCoroutineFn() ?*c.PyObject {
+    if (turbo_run_coroutine_fn) |run_fn| return run_fn;
+
+    const async_pool = c.PyImport_ImportModule("turboapi.async_pool") orelse return null;
+    defer c.Py_DecRef(async_pool);
+
+    turbo_run_coroutine_fn = c.PyObject_GetAttrString(async_pool, "run_coroutine") orelse return null;
+    return turbo_run_coroutine_fn;
+}
+
+fn getTurboRunCoroutineResponseFn() ?*c.PyObject {
+    if (turbo_run_coroutine_response_fn) |run_fn| return run_fn;
+
+    const async_pool = c.PyImport_ImportModule("turboapi.async_pool") orelse return null;
+    defer c.Py_DecRef(async_pool);
+
+    turbo_run_coroutine_response_fn = c.PyObject_GetAttrString(async_pool, "run_coroutine_response") orelse return null;
+    return turbo_run_coroutine_response_fn;
+}
+
+fn awaitPythonCoroutine(coro: *c.PyObject) ?*c.PyObject {
+    if (getTurboRunCoroutineFn()) |run_fn| {
+        return py.PyObject_CallOneArg(run_fn, coro);
+    }
+
+    c.PyErr_Clear();
+    const run_fn = getAsyncioRunFn() orelse return null;
+    return py.PyObject_CallOneArg(run_fn, coro);
+}
+
+fn awaitPythonCoroutineResponse(coro: *c.PyObject) ?*c.PyObject {
+    if (getTurboRunCoroutineResponseFn()) |run_fn| {
+        return py.PyObject_CallOneArg(run_fn, coro);
+    }
+
+    c.PyErr_Clear();
+    return null;
+}
 
 fn getRoutes() *std.StringHashMap(HandlerEntry) {
     if (routes == null) {
@@ -462,7 +518,7 @@ pub fn server_add_route_fast(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?
         .model_class = null,
     };
 
-    if (std.mem.eql(u8, ht_s, "simple_sync")) {
+    if (std.mem.eql(u8, ht_s, "simple_sync") or std.mem.eql(u8, ht_s, "simple_async")) {
         entry.param_count = parseParamMeta(ptj_s, &entry.param_meta);
     }
 
@@ -724,7 +780,8 @@ pub fn server_add_middleware(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.
 
 pub fn server_enable_response_cache(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     // Check if response cache is disabled via env var
-    if (std.c.getenv("TURBO_DISABLE_RESPONSE_CACHE")) |_p| { const val = std.mem.span(_p);
+    if (std.c.getenv("TURBO_DISABLE_RESPONSE_CACHE")) |_p| {
+        const val = std.mem.span(_p);
         if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
             cache_noargs_responses = false;
             logger.info("[CACHE] Response caching DISABLED via TURBO_DISABLE_RESPONSE_CACHE", .{});
@@ -807,7 +864,6 @@ const ConnectionPool = struct {
         }
     };
 
-
     fn init(self: *ConnectionPool, thread_count: usize) void {
         self.queue = .{};
         self.thread_count = @min(thread_count, MAX_POOL_SIZE);
@@ -858,9 +914,12 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     // Capture interpreter state before releasing the GIL.
     // Workers need this to create their own PyThreadState.
     py_interp = py.PyInterpreterState_Get();
+    if (getTurboRunCoroutineFn() == null and getAsyncioRunFn() == null) c.PyErr_Print();
+    if (getTurboRunCoroutineResponseFn() == null) c.PyErr_Print();
 
     var thread_count: usize = DEFAULT_POOL_SIZE;
-    if (std.c.getenv("TURBO_THREAD_POOL_SIZE")) |_p| { const val = std.mem.span(_p);
+    if (std.c.getenv("TURBO_THREAD_POOL_SIZE")) |_p| {
+        const val = std.mem.span(_p);
         thread_count = std.fmt.parseInt(usize, val, 10) catch DEFAULT_POOL_SIZE;
         if (thread_count == 0) thread_count = DEFAULT_POOL_SIZE;
     }
@@ -1127,6 +1186,14 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
             }
             return;
         },
+        .simple_async => {
+            if (entry.param_count == 0) {
+                callPythonAsyncNoArgs(tstate, entry, stream);
+            } else {
+                callPythonAsyncVectorcall(tstate, entry, query_string, &match.params, stream);
+            }
+            return;
+        },
         else => {},
     }
 
@@ -1218,7 +1285,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
 
     // Dispatch remaining handler types
     switch (entry.handler_tag) {
-        .simple_sync_noargs, .simple_sync => unreachable, // handled above
+        .simple_sync_noargs, .simple_sync, .simple_async => unreachable, // handled above
         .model_sync => {
             if (body.len > 0) {
                 if (cached_parse) |cp| {
@@ -1228,10 +1295,13 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
                 }
                 return;
             }
-            callPythonHandlerDirect(tstate, entry, query_string, body, &match.params, stream);
+            callPythonHandlerDirect(tstate, entry, query_string, body, headers.items, &match.params, stream);
         },
         .body_sync => {
-            callPythonHandlerDirect(tstate, entry, query_string, body, &match.params, stream);
+            callPythonHandlerDirect(tstate, entry, query_string, body, headers.items, &match.params, stream);
+        },
+        .body_async => {
+            callPythonAsyncHandlerDirect(tstate, entry, query_string, body, headers.items, &match.params, stream);
         },
         .form_sync, .file_sync => {
             const resp = callPythonHandler(tstate, entry, method, path, query_string, body, headers.items, &match.params);
@@ -1512,6 +1582,103 @@ fn callPythonVectorcall(
     sendTupleResponse(stream, result);
 }
 
+fn callPythonAsyncNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.Io.net.Stream) void {
+    py.PyEval_AcquireThread(tstate);
+    defer py.PyEval_ReleaseThread(tstate);
+
+    const result = py.PyObject_CallNoArgs(entry.handler) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(result);
+
+    const response_tuple = awaitPythonCoroutineResponse(result) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(response_tuple);
+    sendTupleResponse(stream, response_tuple);
+}
+
+fn callPythonAsyncVectorcall(
+    tstate: ?*anyopaque,
+    entry: HandlerEntry,
+    query_string: []const u8,
+    params: *const router_mod.RouteParams,
+    stream: std.Io.net.Stream,
+) void {
+    py.PyEval_AcquireThread(tstate);
+    defer py.PyEval_ReleaseThread(tstate);
+
+    const argc = entry.param_count;
+    var argv: [MAX_PARAMS]?*c.PyObject = undefined;
+    var created: [MAX_PARAMS]?*c.PyObject = [_]?*c.PyObject{null} ** MAX_PARAMS;
+    defer for (created[0..argc]) |obj| {
+        if (obj) |o| c.Py_DecRef(o);
+    };
+
+    var decode_buf: [2048]u8 = undefined;
+    var last_filled: usize = 0;
+
+    for (entry.param_meta[0..argc], 0..) |pm, i| {
+        const val_str: ?[]const u8 = params.get(pm.name) orelse queryStringGet(query_string, pm.name);
+
+        if (val_str) |vs| {
+            const py_obj: ?*c.PyObject = switch (pm.type_tag) {
+                .int => blk: {
+                    const n = std.fmt.parseInt(i64, vs, 10) catch 0;
+                    break :blk c.PyLong_FromLongLong(n);
+                },
+                .float => blk: {
+                    const f = std.fmt.parseFloat(f64, vs) catch 0.0;
+                    break :blk c.PyFloat_FromDouble(f);
+                },
+                .bool_val => blk: {
+                    const b: c_long = if (std.mem.eql(u8, vs, "true") or std.mem.eql(u8, vs, "1")) 1 else 0;
+                    break :blk c.PyBool_FromLong(b);
+                },
+                .str => blk: {
+                    const decoded = percentDecode(vs, &decode_buf);
+                    break :blk c.PyUnicode_FromStringAndSize(decoded.ptr, @intCast(decoded.len));
+                },
+            };
+            if (py_obj) |obj| {
+                argv[i] = obj;
+                created[i] = obj;
+                last_filled = i + 1;
+            } else {
+                argv[i] = @ptrCast(&c._Py_NoneStruct);
+                if (!pm.has_default) last_filled = i + 1;
+            }
+        } else {
+            argv[i] = @ptrCast(&c._Py_NoneStruct);
+            if (!pm.has_default) last_filled = i + 1;
+        }
+    }
+
+    const result = py.PyObject_Vectorcall(
+        entry.handler,
+        @as([*]const ?*c.PyObject, @ptrCast(&argv)),
+        last_filled,
+        null,
+    ) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(result);
+
+    const response_tuple = awaitPythonCoroutineResponse(result) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(response_tuple);
+    sendTupleResponse(stream, response_tuple);
+}
+
 /// Like callPythonVectorcall but caches the pre-rendered response keyed by full path.
 fn callPythonVectorcallCaching(
     tstate: ?*anyopaque,
@@ -1606,7 +1773,7 @@ fn callPythonVectorcallCaching(
 // ── Fast Python handler dispatch (simple_sync/body_sync) ─────────────────────
 // Calls Python with kwargs dict, unpacks 3-tuple response — zero extra allocs.
 
-fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_string: []const u8, body: []const u8, params: *const router_mod.RouteParams, stream: std.Io.net.Stream) void {
+fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_string: []const u8, body: []const u8, headers: []const HeaderPair, params: *const router_mod.RouteParams, stream: std.Io.net.Stream) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
 
@@ -1651,6 +1818,23 @@ fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_strin
         c.Py_DecRef(py_body);
     }
 
+    const py_headers = c.PyDict_New() orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+        return;
+    };
+    defer c.Py_DecRef(py_headers);
+    for (headers) |h| {
+        const hk = py.newString(h.name) orelse continue;
+        const hv = py.newString(h.value) orelse {
+            c.Py_DecRef(hk);
+            continue;
+        };
+        _ = c.PyDict_SetItem(py_headers, hk, hv);
+        c.Py_DecRef(hk);
+        c.Py_DecRef(hv);
+    }
+    _ = c.PyDict_SetItemString(kwargs, "headers", py_headers);
+
     const empty_tuple = c.PyTuple_New(0) orelse {
         sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
         return;
@@ -1666,6 +1850,90 @@ fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_strin
 
     // Unpack (status_code, content_type, body_str) 3-tuple
     sendTupleResponse(stream, result);
+}
+
+fn callPythonAsyncHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_string: []const u8, body: []const u8, headers: []const HeaderPair, params: *const router_mod.RouteParams, stream: std.Io.net.Stream) void {
+    py.PyEval_AcquireThread(tstate);
+    defer py.PyEval_ReleaseThread(tstate);
+
+    const kwargs = c.PyDict_New() orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+        return;
+    };
+    defer c.Py_DecRef(kwargs);
+
+    const py_path_params = c.PyDict_New() orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+        return;
+    };
+    defer c.Py_DecRef(py_path_params);
+    {
+        for (params.entries()) |pe| {
+            const pk = py.newString(pe.key) orelse continue;
+            const pv = py.newString(pe.value) orelse {
+                c.Py_DecRef(pk);
+                continue;
+            };
+            _ = c.PyDict_SetItem(py_path_params, pk, pv);
+            c.Py_DecRef(pk);
+            c.Py_DecRef(pv);
+        }
+    }
+    _ = c.PyDict_SetItemString(kwargs, "path_params", py_path_params);
+
+    if (query_string.len > 0) {
+        if (py.newString(query_string)) |v| {
+            _ = c.PyDict_SetItemString(kwargs, "query_string", v);
+            c.Py_DecRef(v);
+        }
+    }
+
+    if (body.len > 0) {
+        const py_body = c.PyBytes_FromStringAndSize(@ptrCast(body.ptr), @intCast(body.len)) orelse {
+            sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+            return;
+        };
+        _ = c.PyDict_SetItemString(kwargs, "body", py_body);
+        c.Py_DecRef(py_body);
+    }
+
+    const py_headers = c.PyDict_New() orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+        return;
+    };
+    defer c.Py_DecRef(py_headers);
+    for (headers) |h| {
+        const hk = py.newString(h.name) orelse continue;
+        const hv = py.newString(h.value) orelse {
+            c.Py_DecRef(hk);
+            continue;
+        };
+        _ = c.PyDict_SetItem(py_headers, hk, hv);
+        c.Py_DecRef(hk);
+        c.Py_DecRef(hv);
+    }
+    _ = c.PyDict_SetItemString(kwargs, "headers", py_headers);
+
+    const empty_tuple = c.PyTuple_New(0) orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
+        return;
+    };
+    defer c.Py_DecRef(empty_tuple);
+
+    const result = c.PyObject_Call(entry.handler, empty_tuple, kwargs) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(result);
+
+    const awaited = awaitPythonCoroutine(result) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(awaited);
+    sendTupleResponse(stream, awaited);
 }
 
 // ── JSON-to-Python conversion (eliminates Python json.loads round-trip) ──────
@@ -1993,21 +2261,9 @@ fn callPythonHandler(tstate: ?*anyopaque, entry: HandlerEntry, method: []const u
     };
     defer c.Py_DecRef(result);
 
-    // ── Async handler support: await coroutine via asyncio.run() ──
+    // ── Async handler support: await coroutine on the worker's reusable event loop ──
     if (c.PyCoro_CheckExact(result) != 0) {
-        const asyncio = c.PyImport_ImportModule("asyncio") orelse {
-            c.PyErr_Print();
-            return errorResponse(err_ct, err_body);
-        };
-        defer c.Py_DecRef(asyncio);
-        const run_fn = c.PyObject_GetAttrString(asyncio, "run") orelse {
-            c.PyErr_Print();
-            return errorResponse(err_ct, err_body);
-        };
-        defer c.Py_DecRef(run_fn);
-        const run_args = c.PyTuple_Pack(1, result) orelse return errorResponse(err_ct, err_body);
-        defer c.Py_DecRef(run_args);
-        const awaited = c.PyObject_CallObject(run_fn, run_args) orelse {
+        const awaited = awaitPythonCoroutine(result) orelse {
             c.PyErr_Print();
             return errorResponse(err_ct, err_body);
         };

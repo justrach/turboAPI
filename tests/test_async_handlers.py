@@ -11,15 +11,8 @@ import asyncio
 import threading
 import time
 
-import pytest
 import requests
 from turboapi import TurboAPI
-
-# Only async error handling is still a known gap on current main.
-ASYNC_ERROR_HANDLING = pytest.mark.xfail(
-    strict=True,
-    reason="Async handler exceptions do not yet map cleanly to HTTP 500 responses"
-)
 
 
 def extract_content(response_json):
@@ -337,7 +330,6 @@ def test_mixed_sync_async():
     return True
 
 
-@ASYNC_ERROR_HANDLING
 def test_async_error_handling():
     """Test that async handlers properly handle errors"""
     print("\n" + "=" * 70)

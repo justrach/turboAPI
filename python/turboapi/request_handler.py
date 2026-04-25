@@ -15,6 +15,10 @@ from dhi import BaseModel as Model
 _NO_COERCION = object()
 
 
+class RequestParsingError(ValueError):
+    """Raised when request data cannot be parsed into handler parameters."""
+
+
 class DependencyResolver:
     """Resolve Depends() dependencies recursively with caching and cleanup."""
 
@@ -195,9 +199,7 @@ class QueryParamParser:
             inner = inner_args[0]
             raw_list = value if isinstance(value, list) else [value]
             try:
-                coerced_list = [
-                    QueryParamParser._scalar_cast(v, inner) for v in raw_list
-                ]
+                coerced_list = [QueryParamParser._scalar_cast(v, inner) for v in raw_list]
             except (ValueError, TypeError):
                 return _NO_COERCION
             if origin is tuple:
@@ -366,7 +368,7 @@ class RequestBodyParser:
             body_copy = bytes(bytearray(body))
             json_data = json.loads(body_copy.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            raise ValueError(f"Invalid JSON body: {e}")
+            raise RequestParsingError(f"Invalid JSON body: {e}")
 
         parsed_params = {}
         params_list = list(handler_signature.parameters.items())
@@ -400,7 +402,7 @@ class RequestBodyParser:
                     parsed_params[param_name] = validated_model
                     return parsed_params
                 except Exception as e:
-                    raise ValueError(f"Validation error for {param_name}: {e}")
+                    raise RequestParsingError(f"Validation error for {param_name}: {e}")
 
             # If annotated as dict or list, pass entire body
             elif param.annotation in (dict, list) or param.annotation == inspect.Parameter.empty:
@@ -421,7 +423,7 @@ class RequestBodyParser:
                     parsed_params[param_name] = validated_model
                     return parsed_params
                 except Exception as e:
-                    raise ValueError(f"Validation error for {param_name}: {e}")
+                    raise RequestParsingError(f"Validation error for {param_name}: {e}")
 
             # Unknown class annotation with single param — try direct construction
             if inspect.isclass(param.annotation):
@@ -454,14 +456,14 @@ class RequestBodyParser:
                     validated_model = param.annotation.model_validate(json_data)
                     parsed_params[param_name] = validated_model
                 except Exception as e:
-                    raise ValueError(f"Validation error for {param_name}: {e}")
+                    raise RequestParsingError(f"Validation error for {param_name}: {e}")
 
             # Check for Pydantic-like model (model_validate but not Satya)
             elif inspect.isclass(param.annotation) and hasattr(param.annotation, "model_validate"):
                 try:
                     parsed_params[param_name] = param.annotation.model_validate(json_data)
                 except Exception as e:
-                    raise ValueError(f"Validation error for {param_name}: {e}")
+                    raise RequestParsingError(f"Validation error for {param_name}: {e}")
             # Check if parameter name exists in JSON data
             elif param_name in json_data:
                 value = json_data[param_name]
@@ -474,7 +476,7 @@ class RequestBodyParser:
                         else:
                             parsed_params[param_name] = param.annotation(value)
                     except (ValueError, TypeError) as e:
-                        raise ValueError(f"Invalid type for {param_name}: {e}")
+                        raise RequestParsingError(f"Invalid type for {param_name}: {e}")
                 else:
                     # Use value as-is for other types (lists, dicts, etc.)
                     parsed_params[param_name] = value
@@ -905,8 +907,9 @@ def create_enhanced_handler(original_handler, route_definition):
                     body_data = kwargs["body"]
                     if body_data and not (_form_fields or _file_fields):
                         parsed_body = RequestBodyParser.parse_json_body(body_data, sig)
-                        # Merge parsed body params (body params take precedence)
-                        parsed_params.update(parsed_body)
+                        # Body fields should not overwrite path/query/header params.
+                        for k, v in parsed_body.items():
+                            parsed_params.setdefault(k, v)
 
                 # 5. Resolve dependencies
                 context = {
@@ -944,9 +947,11 @@ def create_enhanced_handler(original_handler, route_definition):
                     content, status_code = normalized
                     content_type = None
 
-                return ResponseHandler.format_json_response(content, status_code, content_type, extra_headers)
+                return ResponseHandler.format_json_response(
+                    content, status_code, content_type, extra_headers
+                )
 
-            except ValueError as e:
+            except RequestParsingError as e:
                 return ResponseHandler.format_json_response(
                     {"error": "Bad Request", "detail": str(e)}, 400
                 )
@@ -1084,7 +1089,8 @@ def create_enhanced_handler(original_handler, route_definition):
                 #    or if the handler has opted into raw access via bytes / Request.
                 if body_data and not (_form_fields or _file_fields) and not _skip_json_body:
                     parsed_body = RequestBodyParser.parse_json_body(body_data, sig)
-                    parsed_params.update(parsed_body)
+                    for k, v in parsed_body.items():
+                        parsed_params.setdefault(k, v)
 
                 # 5. Resolve dependencies (only if handler uses Depends/Security)
                 if _has_dependencies:
@@ -1124,9 +1130,11 @@ def create_enhanced_handler(original_handler, route_definition):
                     content, status_code = normalized
                     content_type = None
 
-                return ResponseHandler.format_json_response(content, status_code, content_type, extra_headers)
+                return ResponseHandler.format_json_response(
+                    content, status_code, content_type, extra_headers
+                )
 
-            except ValueError as e:
+            except RequestParsingError as e:
                 return ResponseHandler.format_json_response(
                     {"error": "Bad Request", "detail": str(e)}, 400
                 )
@@ -1164,6 +1172,39 @@ def create_pos_handler(original_handler):
     def pos_handler(*args):
         try:
             result = original_handler(*args)
+            if isinstance(result, _Response):
+                body = (
+                    result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
+                )
+                return (result.status_code, result.media_type or "application/json", body)
+            if hasattr(result, "model_dump"):
+                result = result.model_dump()
+            if isinstance(result, tuple) and len(result) == 2:
+                return (result[1], "application/json", _dumps(result[0]))
+            return (200, "application/json", _dumps(result))
+        except Exception as e:
+            try:
+                from turboapi.exceptions import HTTPException as _HTTPException
+
+                if isinstance(e, _HTTPException):
+                    return (e.status_code, "application/json", _dumps({"detail": e.detail}))
+            except ImportError:
+                pass
+            return (500, "application/json", _dumps({"error": str(e)}))
+
+    return pos_handler
+
+
+def create_async_pos_handler(original_handler):
+    """Minimal positional wrapper for async PyObject_Vectorcall dispatch."""
+    import json as _json
+
+    _dumps = _json.dumps
+    from turboapi.responses import Response as _Response
+
+    async def pos_handler(*args):
+        try:
+            result = await original_handler(*args)
             if isinstance(result, _Response):
                 body = (
                     result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
@@ -1266,11 +1307,19 @@ def create_fast_handler(original_handler, route_definition):
                         if k in param_names and k not in call_kwargs:
                             call_kwargs[k] = v[0]
 
+            if len(call_kwargs) < len(param_names):
+                headers = kwargs.get("headers", {})
+                if headers:
+                    for k, v in HeaderParser.parse_headers(headers, sig).items():
+                        if k in param_names and k not in call_kwargs:
+                            call_kwargs[k] = v
+
             if _needs_body:
                 body = kwargs.get("body", b"")
                 if body:
                     parsed_body = RequestBodyParser.parse_json_body(body, sig)
-                    call_kwargs.update(parsed_body)
+                    for k, v in parsed_body.items():
+                        call_kwargs.setdefault(k, v)
 
             result = original_handler(**call_kwargs)
 
@@ -1286,6 +1335,95 @@ def create_fast_handler(original_handler, route_definition):
             if isinstance(result, tuple) and len(result) == 2:
                 return (result[1], "application/json", _dumps(result[0]))
             return (200, "application/json", _dumps(result))
+        except RequestParsingError as e:
+            return (400, "application/json", _dumps({"error": "Bad Request", "detail": str(e)}))
+        except Exception as e:
+            try:
+                from turboapi.exceptions import HTTPException
+
+                if isinstance(e, HTTPException):
+                    return (e.status_code, "application/json", _dumps({"detail": e.detail}))
+            except ImportError:
+                pass
+            return (500, "application/json", _dumps({"error": str(e)}))
+
+    return fast_handler
+
+
+def create_fast_async_handler(original_handler, route_definition):
+    """Create a minimal-overhead tuple handler for async routes that need kwargs."""
+    import json as _json
+
+    sig = inspect.signature(original_handler)
+    param_names = set(sig.parameters.keys())
+
+    _converters: dict[str, type] = {}
+    for pname, param in sig.parameters.items():
+        ann = param.annotation
+        if ann is int:
+            _converters[pname] = int
+        elif ann is float:
+            _converters[pname] = float
+
+    method_str = (
+        route_definition.method.value.upper() if hasattr(route_definition, "method") else "GET"
+    )
+    _needs_body = method_str in ("POST", "PUT", "PATCH", "DELETE")
+
+    _dumps = _json.dumps
+
+    from turboapi.responses import Response as _Response
+
+    async def fast_handler(**kwargs):
+        try:
+            call_kwargs = {}
+
+            path_params = kwargs.get("path_params")
+            if path_params:
+                for k, v in path_params.items():
+                    if k in param_names:
+                        converter = _converters.get(k)
+                        call_kwargs[k] = converter(v) if converter else v
+
+            if len(call_kwargs) < len(param_names):
+                qs = kwargs.get("query_string", "")
+                if qs:
+                    from urllib.parse import parse_qs
+
+                    for k, v in parse_qs(qs, keep_blank_values=True).items():
+                        if k in param_names and k not in call_kwargs:
+                            call_kwargs[k] = v[0]
+
+            if len(call_kwargs) < len(param_names):
+                headers = kwargs.get("headers", {})
+                if headers:
+                    for k, v in HeaderParser.parse_headers(headers, sig).items():
+                        if k in param_names and k not in call_kwargs:
+                            call_kwargs[k] = v
+
+            if _needs_body:
+                body = kwargs.get("body", b"")
+                if body:
+                    parsed_body = RequestBodyParser.parse_json_body(body, sig)
+                    for k, v in parsed_body.items():
+                        call_kwargs.setdefault(k, v)
+
+            result = await original_handler(**call_kwargs)
+
+            if isinstance(result, _Response):
+                ct = result.media_type or "application/json"
+                body = (
+                    result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
+                )
+                return (result.status_code, ct, body)
+
+            if hasattr(result, "model_dump"):
+                result = result.model_dump()
+            if isinstance(result, tuple) and len(result) == 2:
+                return (result[1], "application/json", _dumps(result[0]))
+            return (200, "application/json", _dumps(result))
+        except RequestParsingError as e:
+            return (400, "application/json", _dumps({"error": "Bad Request", "detail": str(e)}))
         except Exception as e:
             try:
                 from turboapi.exceptions import HTTPException

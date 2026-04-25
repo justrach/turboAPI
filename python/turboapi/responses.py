@@ -169,7 +169,6 @@ class StreamingResponse(Response):
         self.body = b""  # Will be streamed
         self._cookies: list[str] = []
 
-
     async def body_iterator(self) -> AsyncIterator[bytes]:
         """Iterate over the response body chunks."""
         if hasattr(self._content_iterator, "__aiter__"):
@@ -223,4 +222,3 @@ class FileResponse(Response):
         with open(path, "rb") as f:
             self.body = f.read()
         self._cookies: list[str] = []
-

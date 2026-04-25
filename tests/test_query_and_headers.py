@@ -5,12 +5,11 @@ These features are WORKING and TESTED!
 
 Path parameters use Zig radix-trie router.
 """
-import os
+
 import socket
 import threading
 import time
 
-import pytest
 import requests
 from turboapi import TurboAPI
 
@@ -20,20 +19,15 @@ def _free_port():
         s.bind(("", 0))
         return s.getsockname()[1]
 
-# Mark tests that require header extraction feature (not yet implemented)
-HEADER_EXTRACTION = pytest.mark.xfail(
-    reason="Header extraction from parameter names not yet implemented - requires Header() annotation"
-)
 
-
-def test_query_parameters_comprehensive():
+def test_query_parameters_comprehensive(monkeypatch):
     """Comprehensive test of query parameter parsing"""
     print("\n" + "=" * 70)
     print("TEST 1: Query Parameters (COMPREHENSIVE)")
     print("=" * 70)
 
     port = _free_port()
-    os.environ["TURBO_DISABLE_CACHE"] = "1"
+    monkeypatch.setenv("TURBO_DISABLE_CACHE", "1")
     app = TurboAPI(title="Query Test")
 
     @app.get("/search")
@@ -76,9 +70,7 @@ def test_query_parameters_comprehensive():
     print("✅ PASSED: Default values")
 
     # Test 3: Multiple params
-    r = requests.get(
-        f"{base}/filter?category=electronics&min_price=100&max_price=500"
-    )
+    r = requests.get(f"{base}/filter?category=electronics&min_price=100&max_price=500")
     print(f"\nTest 1c - Multiple: {r.status_code}")
     print(f"Response: {r.json()}")
     assert r.status_code == 200
@@ -98,8 +90,8 @@ def test_query_parameters_comprehensive():
     print("✅ PASSED: Special characters")
 
     print("\n✅ ALL QUERY PARAMETER TESTS PASSED!")
-@HEADER_EXTRACTION
-@HEADER_EXTRACTION
+
+
 def test_headers_comprehensive():
     """Comprehensive test of header parsing"""
     print("\n" + "=" * 70)
@@ -196,8 +188,8 @@ def test_headers_comprehensive():
     print("✅ PASSED: Missing headers (defaults)")
 
     print("\n✅ ALL HEADER TESTS PASSED!")
-@HEADER_EXTRACTION
-@HEADER_EXTRACTION
+
+
 def test_combined_query_and_headers():
     """Test combining query params and headers"""
     print("\n" + "=" * 70)
@@ -246,6 +238,8 @@ def test_combined_query_and_headers():
     print("✅ PASSED: Combined query + headers!")
 
     print("\n✅ COMBINED TEST PASSED!")
+
+
 def main():
     """Run all tests"""
     print("\n" + "=" * 70)

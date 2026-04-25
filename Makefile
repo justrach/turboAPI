@@ -1,6 +1,8 @@
 .PHONY: help test build install release clean benchmark zig-test lint fmt hooks check \
        bump-patch bump-minor bump-major bump-beta version pre-release
 
+RUFF ?= $(shell if command -v ruff >/dev/null 2>&1; then printf 'ruff'; elif [ -x .venv314t/bin/ruff ]; then printf '.venv314t/bin/ruff'; elif [ -x .venv/bin/ruff ]; then printf '.venv/bin/ruff'; elif command -v uv >/dev/null 2>&1; then printf 'uv run --extra dev ruff'; else printf 'ruff'; fi)
+
 help:
 	@echo "TurboAPI Development Commands"
 	@echo "=============================="
@@ -57,16 +59,16 @@ zig-test:
 # ── Code quality ──────────────────────────────────────────────────────────────
 
 lint:
-	@ruff check python/ tests/ --no-fix
+	@$(RUFF) check python/ tests/ --no-fix
 
 fmt:
-	@ruff format python/ tests/
-	@ruff check python/ tests/ --fix
+	@$(RUFF) format python/ tests/
+	@$(RUFF) check python/ tests/ --fix
 
 check:
 	@echo "🔍 Running pre-commit checks..."
-	@ruff check python/ tests/ --no-fix
-	@ruff format python/ tests/ --check
+	@$(RUFF) check python/ tests/ --no-fix
+	@$(RUFF) format python/ tests/ --check
 	@./scripts/build.sh --check
 	@echo "✅ All checks passed"
 

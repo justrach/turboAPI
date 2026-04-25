@@ -22,6 +22,7 @@ from turboapi.testclient import TestClient
 # Issue #100 — custom exception handlers ignored by TestClient
 # ------------------------------------------------------------------
 
+
 class _Kaboom(Exception):
     pass
 
@@ -47,6 +48,7 @@ def test_custom_exception_handler_runs_in_testclient():
 # ------------------------------------------------------------------
 # Issue #101 — lifespan callable stored but not executed
 # ------------------------------------------------------------------
+
 
 def test_lifespan_callable_runs_for_startup_and_shutdown():
     """The lifespan async-generator must execute startup/shutdown phases."""
@@ -88,6 +90,7 @@ def test_lifespan_callable_runs_for_startup_and_shutdown():
 # Issue #102 — /docs and /openapi.json not served over HTTP
 # ------------------------------------------------------------------
 
+
 def test_docs_and_openapi_urls_are_served():
     """GET /docs and GET /openapi.json should return 200."""
     app = TurboAPI(title="DocsRepro", version="1.0.0")
@@ -99,9 +102,7 @@ def test_docs_and_openapi_urls_are_served():
     client = TestClient(app)
 
     openapi_resp = client.get("/openapi.json")
-    assert openapi_resp.status_code == 200, (
-        f"/openapi.json returned {openapi_resp.status_code}"
-    )
+    assert openapi_resp.status_code == 200, f"/openapi.json returned {openapi_resp.status_code}"
     schema = openapi_resp.json()
     assert schema["info"]["title"] == "DocsRepro"
 
@@ -113,6 +114,7 @@ def test_docs_and_openapi_urls_are_served():
 # ------------------------------------------------------------------
 # Issue #103 — router-level dependencies accepted but not enforced
 # ------------------------------------------------------------------
+
 
 def _require_auth():
     raise HTTPException(status_code=401, detail="Not authenticated")
@@ -138,6 +140,7 @@ def test_router_level_dependencies_are_enforced():
 # ------------------------------------------------------------------
 # Issue #104 — mounted StaticFiles stored but not served
 # ------------------------------------------------------------------
+
 
 def test_mounted_static_files_are_served():
     """GET /static/hello.txt should return file contents."""

@@ -23,6 +23,7 @@ def _free_port() -> int:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
+
 def _start(app, port):
     t = threading.Thread(target=lambda: app.run(host="127.0.0.1", port=port), daemon=True)
     t.start()
@@ -134,14 +135,13 @@ def gzip_app():
     return f"http://127.0.0.1:{port}"
 
 
-@pytest.mark.xfail(reason="Requires middleware header/body passthrough (PR #55)")
 def test_gzip_middleware_compat(gzip_app):
     """GZip middleware must correctly compress and return 200."""
     r = requests.get(f"{gzip_app}/large", headers={"Accept-Encoding": "gzip"})
     assert r.status_code == 200, r.text
     assert r.headers.get("Content-Encoding") == "gzip"
 
-@pytest.mark.xfail(reason="Requires middleware header/body passthrough (PR #55)")
+
 def test_gzip_body_is_actually_compressed(gzip_app):
     """The body must actually be gzip-compressed bytes, not original JSON.
     Decompress and verify the data survived the round trip."""
@@ -176,7 +176,9 @@ def test_no_middleware_body_unchanged():
     _start(app, port)
     r = requests.get(f"http://127.0.0.1:{port}/raw")
     assert r.status_code == 200
-    assert r.json() == {"exact": "value", "number": 42}, f"Body mutated without middleware: {r.json()}"
+    assert r.json() == {"exact": "value", "number": 42}, (
+        f"Body mutated without middleware: {r.json()}"
+    )
 
 
 def test_async_handler_under_middleware():
@@ -234,5 +236,7 @@ def test_stacked_middleware_all_headers_present():
     _start(app, port)
     r = requests.get(f"http://127.0.0.1:{port}/multi")
     assert r.status_code == 200
-    assert r.headers.get("Access-Control-Allow-Origin") is not None, "CORS header missing after stacking"
+    assert r.headers.get("Access-Control-Allow-Origin") is not None, (
+        "CORS header missing after stacking"
+    )
     assert r.json()["stacked"] is True

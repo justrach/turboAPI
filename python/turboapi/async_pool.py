@@ -6,8 +6,21 @@ parallel execution of async handlers across multiple threads.
 """
 
 import asyncio
+import json
 import sys
 import threading
+
+from .exceptions import HTTPException
+from .responses import Response
+
+_dumps = json.dumps
+_thread_local = threading.local()
+
+
+def _set_thread_loop(loop: asyncio.AbstractEventLoop) -> asyncio.AbstractEventLoop:
+    _thread_local.loop = loop
+    _thread_local.run_until_complete = loop.run_until_complete
+    return loop
 
 
 class EventLoopPool:
@@ -43,7 +56,6 @@ class EventLoopPool:
 
                 num_threads = os.cpu_count() or 4
 
-            print(f"🔄 Initializing EventLoopPool with {num_threads} threads")
             cls._initialized = True
 
     @classmethod
@@ -58,21 +70,21 @@ class EventLoopPool:
 
         # Fast path: loop already exists
         if thread_id in cls._loops:
-            return cls._loops[thread_id]
+            loop = cls._loops[thread_id]
+            return _set_thread_loop(loop)
 
         # Slow path: create new loop
         with cls._lock:
             # Double-check after acquiring lock
             if thread_id in cls._loops:
-                return cls._loops[thread_id]
+                loop = cls._loops[thread_id]
+                return _set_thread_loop(loop)
 
             # Create new event loop for this thread
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             cls._loops[thread_id] = loop
-
-            print(f"✅ Created event loop for thread {thread_id}")
-            return loop
+            return _set_thread_loop(loop)
 
     @classmethod
     def get_running_loop(cls) -> asyncio.AbstractEventLoop | None:
@@ -117,14 +129,52 @@ def ensure_event_loop() -> asyncio.AbstractEventLoop:
     Returns:
         The event loop for the current thread.
     """
-    # Try to get running loop first (fast path)
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        pass
+    loop = getattr(_thread_local, "loop", None)
+    if loop is not None and not loop.is_closed():
+        return loop
 
     # Get or create thread-local loop
     return EventLoopPool.get_loop_for_thread()
+
+
+def run_coroutine(coro):
+    """Run a coroutine on the current worker thread's reusable event loop."""
+    loop = ensure_event_loop()
+    runner = getattr(_thread_local, "run_until_complete", None)
+    if runner is None:
+        runner = loop.run_until_complete
+        _thread_local.run_until_complete = runner
+    return runner(coro)
+
+
+def _normalize_response_tuple(result):
+    if isinstance(result, Response):
+        body = result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
+        return (result.status_code, result.media_type or "application/json", body)
+    if hasattr(result, "model_dump"):
+        result = result.model_dump()
+    if isinstance(result, tuple) and len(result) == 2:
+        return (result[1], "application/json", _dumps(result[0]))
+    return (200, "application/json", _dumps(result))
+
+
+def _exception_response_tuple(exc):
+    if isinstance(exc, HTTPException):
+        return (exc.status_code, "application/json", _dumps({"detail": exc.detail}))
+    return (500, "application/json", _dumps({"error": str(exc)}))
+
+
+def run_coroutine_response(coro):
+    """Run a coroutine and normalize its result to TurboAPI's tuple response ABI."""
+    loop = ensure_event_loop()
+    runner = getattr(_thread_local, "run_until_complete", None)
+    if runner is None:
+        runner = loop.run_until_complete
+        _thread_local.run_until_complete = runner
+    try:
+        return _normalize_response_tuple(runner(coro))
+    except Exception as exc:
+        return _exception_response_tuple(exc)
 
 
 # Python 3.13+ free-threading detection
@@ -135,7 +185,4 @@ def is_free_threading_enabled() -> bool:
 
 # Initialize on import
 if is_free_threading_enabled():
-    print("🚀 Python 3.13+ free-threading detected - enabling parallel event loops!")
     EventLoopPool.initialize()
-else:
-    print("⚠️  Free-threading not enabled - async performance may be limited")
