@@ -201,6 +201,41 @@ class TestAsyncHandlerClassification:
 
         assert handler_type == "simple_async"
 
+    def test_async_helper_loop_api_handler_classified_as_simple_async(self):
+        """Test helper loop API usage keeps no-await handlers off eager path."""
+
+        def helper():
+            asyncio.get_running_loop()
+
+        async def async_get_handler():
+            helper()
+            return {"message": "hello"}
+
+        class MockRoute:
+            method = type("Method", (), {"value": "GET"})()
+            path = "/test"
+
+        handler_type, param_types, model_info = classify_handler(async_get_handler, MockRoute())
+
+        assert handler_type == "simple_async"
+
+    def test_async_loop_api_alias_classified_as_simple_async(self):
+        """Test aliased asyncio loop APIs stay off eager path."""
+
+        get_loop = asyncio.get_running_loop
+
+        async def async_get_handler():
+            get_loop()
+            return {"message": "hello"}
+
+        class MockRoute:
+            method = type("Method", (), {"value": "GET"})()
+            path = "/test"
+
+        handler_type, param_types, model_info = classify_handler(async_get_handler, MockRoute())
+
+        assert handler_type == "simple_async"
+
     def test_async_post_no_await_handler_classified_as_body_eager(self):
         """Test no-await async POST handlers use eager body async path."""
 

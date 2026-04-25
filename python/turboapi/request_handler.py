@@ -363,10 +363,12 @@ class RequestBodyParser:
             return {}
 
         try:
-            # CRITICAL: Make a defensive copy immediately using bytearray to force real copy
-            # Free-threaded Python with Metal/MLX can have concurrent memory access issues
-            body_copy = bytes(bytearray(body))
-            json_data = json.loads(body_copy.decode("utf-8"))
+            if type(body) is bytes:
+                json_data = json.loads(body)
+            else:
+                # Force a real copy for mutable or foreign buffer-like inputs.
+                body_copy = bytes(bytearray(body))
+                json_data = json.loads(body_copy)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise RequestParsingError(f"Invalid JSON body: {e}")
 
@@ -486,6 +488,69 @@ class RequestBodyParser:
                 parsed_params[param_name] = param.default
 
         return parsed_params
+
+
+def _create_simple_json_body_parser(handler_signature: inspect.Signature):
+    """Precompute the common scalar JSON body parser used by fast routes."""
+    try:
+        from turboapi.security import Depends, SecurityBase, get_depends
+
+        dependency_marker_types = (Depends, SecurityBase)
+    except ImportError:
+        dependency_marker_types = ()
+
+        def get_depends(_param):  # type: ignore[no-redef]
+            return None
+
+    plan = []
+    for param_name, param in handler_signature.parameters.items():
+        if isinstance(param.default, dependency_marker_types) or get_depends(param) is not None:
+            return None
+
+        annotation = param.annotation
+        if annotation == inspect.Parameter.empty:
+            converter = None
+        elif annotation in (int, float, str, bool):
+            converter = annotation
+        else:
+            return None
+
+        plan.append(
+            (param_name, converter, param.default != inspect.Parameter.empty, param.default)
+        )
+
+    if not plan:
+        return None
+
+    def parse_body(body: bytes) -> dict[str, Any]:
+        try:
+            if type(body) is bytes:
+                json_data = json.loads(body)
+            else:
+                json_data = json.loads(bytes(bytearray(body)))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise RequestParsingError(f"Invalid JSON body: {e}") from e
+
+        parsed_params = {}
+        for param_name, converter, has_default, default in plan:
+            if isinstance(json_data, dict) and param_name in json_data:
+                value = json_data[param_name]
+                if converter is None:
+                    parsed_params[param_name] = value
+                    continue
+                try:
+                    if converter is bool and isinstance(value, str):
+                        parsed_params[param_name] = value.lower() in ("true", "1", "yes", "on")
+                    else:
+                        parsed_params[param_name] = converter(value)
+                except (ValueError, TypeError) as e:
+                    raise RequestParsingError(f"Invalid type for {param_name}: {e}") from e
+            elif has_default:
+                parsed_params[param_name] = default
+
+        return parsed_params
+
+    return parse_body
 
 
 def _is_binary_content_type(content_type: str) -> bool:
@@ -1252,6 +1317,7 @@ def create_fast_handler(original_handler, route_definition):
         route_definition.method.value.upper() if hasattr(route_definition, "method") else "GET"
     )
     _needs_body = method_str in ("POST", "PUT", "PATCH", "DELETE")
+    _parse_simple_body = _create_simple_json_body_parser(sig) if _needs_body else None
 
     _dumps = _json.dumps
 
@@ -1317,7 +1383,11 @@ def create_fast_handler(original_handler, route_definition):
             if _needs_body:
                 body = kwargs.get("body", b"")
                 if body:
-                    parsed_body = RequestBodyParser.parse_json_body(body, sig)
+                    parsed_body = (
+                        _parse_simple_body(body)
+                        if _parse_simple_body is not None
+                        else RequestBodyParser.parse_json_body(body, sig)
+                    )
                     for k, v in parsed_body.items():
                         call_kwargs.setdefault(k, v)
 
@@ -1369,6 +1439,7 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
         route_definition.method.value.upper() if hasattr(route_definition, "method") else "GET"
     )
     _needs_body = method_str in ("POST", "PUT", "PATCH", "DELETE")
+    _parse_simple_body = _create_simple_json_body_parser(sig) if _needs_body else None
 
     _dumps = _json.dumps
 
@@ -1403,7 +1474,11 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
         if _needs_body:
             body = kwargs.get("body", b"")
             if body:
-                parsed_body = RequestBodyParser.parse_json_body(body, sig)
+                parsed_body = (
+                    _parse_simple_body(body)
+                    if _parse_simple_body is not None
+                    else RequestBodyParser.parse_json_body(body, sig)
+                )
                 for k, v in parsed_body.items():
                     call_kwargs.setdefault(k, v)
 

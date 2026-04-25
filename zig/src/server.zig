@@ -1960,6 +1960,26 @@ fn callPythonVectorcallCaching(
 // ── Fast Python handler dispatch (simple_sync/body_sync) ─────────────────────
 // Calls Python with kwargs dict, unpacks 3-tuple response — zero extra allocs.
 
+fn setPathParamsKwarg(kwargs: *c.PyObject, params: *const router_mod.RouteParams) bool {
+    if (params.len == 0) return true;
+
+    const py_path_params = c.PyDict_New() orelse return false;
+    defer c.Py_DecRef(py_path_params);
+
+    for (params.entries()) |pe| {
+        const pk = py.newString(pe.key) orelse continue;
+        const pv = py.newString(pe.value) orelse {
+            c.Py_DecRef(pk);
+            continue;
+        };
+        _ = c.PyDict_SetItem(py_path_params, pk, pv);
+        c.Py_DecRef(pk);
+        c.Py_DecRef(pv);
+    }
+
+    return c.PyDict_SetItemString(kwargs, "path_params", py_path_params) == 0;
+}
+
 fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_string: []const u8, body: []const u8, headers: []const HeaderPair, params: *const router_mod.RouteParams, stream: std.Io.net.Stream) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
@@ -1970,24 +1990,10 @@ fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_strin
     };
     defer c.Py_DecRef(kwargs);
 
-    const py_path_params = c.PyDict_New() orelse {
+    if (!setPathParamsKwarg(kwargs, params)) {
         sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
         return;
-    };
-    defer c.Py_DecRef(py_path_params);
-    {
-        for (params.entries()) |pe| {
-            const pk = py.newString(pe.key) orelse continue;
-            const pv = py.newString(pe.value) orelse {
-                c.Py_DecRef(pk);
-                continue;
-            };
-            _ = c.PyDict_SetItem(py_path_params, pk, pv);
-            c.Py_DecRef(pk);
-            c.Py_DecRef(pv);
-        }
     }
-    _ = c.PyDict_SetItemString(kwargs, "path_params", py_path_params);
 
     if (query_string.len > 0) {
         if (py.newString(query_string)) |v| {
@@ -2049,24 +2055,10 @@ fn callPythonAsyncHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_
     };
     defer c.Py_DecRef(kwargs);
 
-    const py_path_params = c.PyDict_New() orelse {
+    if (!setPathParamsKwarg(kwargs, params)) {
         sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
         return;
-    };
-    defer c.Py_DecRef(py_path_params);
-    {
-        for (params.entries()) |pe| {
-            const pk = py.newString(pe.key) orelse continue;
-            const pv = py.newString(pe.value) orelse {
-                c.Py_DecRef(pk);
-                continue;
-            };
-            _ = c.PyDict_SetItem(py_path_params, pk, pv);
-            c.Py_DecRef(pk);
-            c.Py_DecRef(pv);
-        }
     }
-    _ = c.PyDict_SetItemString(kwargs, "path_params", py_path_params);
 
     if (query_string.len > 0) {
         if (py.newString(query_string)) |v| {
@@ -2201,24 +2193,10 @@ fn callPythonModelHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, body: 
 
     _ = c.PyDict_SetItemString(kwargs, "body_dict", py_body_dict);
 
-    const py_path_params = c.PyDict_New() orelse {
+    if (!setPathParamsKwarg(kwargs, params)) {
         sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
         return;
-    };
-    defer c.Py_DecRef(py_path_params);
-    {
-        for (params.entries()) |pe| {
-            const pk = py.newString(pe.key) orelse continue;
-            const pv = py.newString(pe.value) orelse {
-                c.Py_DecRef(pk);
-                continue;
-            };
-            _ = c.PyDict_SetItem(py_path_params, pk, pv);
-            c.Py_DecRef(pk);
-            c.Py_DecRef(pv);
-        }
     }
-    _ = c.PyDict_SetItemString(kwargs, "path_params", py_path_params);
 
     const empty_tuple = c.PyTuple_New(0) orelse {
         sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
@@ -2256,24 +2234,10 @@ fn callPythonModelHandlerParsed(tstate: ?*anyopaque, entry: HandlerEntry, json_v
 
     _ = c.PyDict_SetItemString(kwargs, "body_dict", py_body_dict);
 
-    const py_path_params = c.PyDict_New() orelse {
+    if (!setPathParamsKwarg(kwargs, params)) {
         sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");
         return;
-    };
-    defer c.Py_DecRef(py_path_params);
-    {
-        for (params.entries()) |pe| {
-            const pk = py.newString(pe.key) orelse continue;
-            const pv = py.newString(pe.value) orelse {
-                c.Py_DecRef(pk);
-                continue;
-            };
-            _ = c.PyDict_SetItem(py_path_params, pk, pv);
-            c.Py_DecRef(pk);
-            c.Py_DecRef(pv);
-        }
     }
-    _ = c.PyDict_SetItemString(kwargs, "path_params", py_path_params);
 
     const empty_tuple = c.PyTuple_New(0) orelse {
         sendResponse(stream, 500, "application/json", "{\"error\":\"Internal Server Error\"}");

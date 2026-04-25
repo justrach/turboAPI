@@ -49,13 +49,76 @@ _ASYNC_LOOP_NAMES = {
     "run_coroutine_threadsafe",
     "to_thread",
 }
+_ASYNCIO_SENSITIVE_CALLABLES = _ASYNC_LOOP_NAMES | {
+    "as_completed",
+    "gather",
+    "shield",
+    "sleep",
+    "wait",
+    "wait_for",
+}
+
+
+def _is_asyncio_sensitive_object(obj) -> bool:
+    obj_name = getattr(obj, "__name__", "")
+    if obj_name == "asyncio":
+        return True
+    obj_module = getattr(obj, "__module__", "")
+    return obj_name in _ASYNCIO_SENSITIVE_CALLABLES and obj_module.startswith(
+        ("asyncio", "_asyncio")
+    )
+
+
+def _function_uses_async_features(fn, seen: set[int] | None = None, depth: int = 0) -> bool:
+    if seen is None:
+        seen = set()
+    fn_id = id(fn)
+    if fn_id in seen:
+        return False
+    seen.add(fn_id)
+
+    try:
+        code = fn.__code__
+    except AttributeError:
+        return False
+
+    if set(code.co_names) & _ASYNC_LOOP_NAMES:
+        return True
+    if any(instr.opname in _ASYNC_YIELD_OPS for instr in dis.get_instructions(fn)):
+        return True
+
+    # Keep the eager path away from simple helper calls that touch the running
+    # loop, even when the top-level handler itself has no asyncio names.
+    if depth >= 2:
+        return False
+
+    globals_ns = getattr(fn, "__globals__", {})
+    closure_ns = {}
+    closure = getattr(fn, "__closure__", None)
+    if closure:
+        for name, cell in zip(code.co_freevars, closure, strict=False):
+            try:
+                closure_ns[name] = cell.cell_contents
+            except ValueError:
+                pass
+
+    for instr in dis.get_instructions(fn):
+        obj = None
+        if instr.opname in ("LOAD_GLOBAL", "LOAD_NAME"):
+            obj = globals_ns.get(instr.argval)
+        elif instr.opname in ("LOAD_DEREF", "LOAD_CLOSURE"):
+            obj = closure_ns.get(instr.argval)
+        if _is_asyncio_sensitive_object(obj):
+            return True
+        if inspect.isfunction(obj) and _function_uses_async_features(obj, seen, depth + 1):
+            return True
+
+    return False
 
 
 def _is_no_await_async_handler(handler) -> bool:
     try:
-        if set(handler.__code__.co_names) & _ASYNC_LOOP_NAMES:
-            return False
-        return not any(instr.opname in _ASYNC_YIELD_OPS for instr in dis.get_instructions(handler))
+        return not _function_uses_async_features(handler)
     except (AttributeError, TypeError):
         return False
 
