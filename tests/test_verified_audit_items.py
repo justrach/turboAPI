@@ -32,9 +32,9 @@ def _free_port():
 
 def test_verified_implicit_header_extraction():
     """
-    Issue #97: Implicit header-name mapping must populate plain handler params on Zig runtime.
+    Issue #132: TurboAPI extension for implicit header-name mapping on Zig runtime.
 
-    FastAPI maps snake_case param names to hyphenated HTTP headers:
+    This is intentionally beyond FastAPI's plain-string parameter behavior:
       authorization  -> Authorization
       x_request_id   -> X-Request-ID
     """

@@ -1350,7 +1350,7 @@ def create_fast_handler(original_handler, route_definition):
     return fast_handler
 
 
-def create_fast_async_handler(original_handler, route_definition):
+def create_fast_async_handler(original_handler, route_definition, eager: bool = False):
     """Create a minimal-overhead tuple handler for async routes that need kwargs."""
     import json as _json
 
@@ -1374,40 +1374,68 @@ def create_fast_async_handler(original_handler, route_definition):
 
     from turboapi.responses import Response as _Response
 
+    def build_call_kwargs(kwargs):
+        call_kwargs = {}
+
+        path_params = kwargs.get("path_params")
+        if path_params:
+            for k, v in path_params.items():
+                if k in param_names:
+                    converter = _converters.get(k)
+                    call_kwargs[k] = converter(v) if converter else v
+
+        if len(call_kwargs) < len(param_names):
+            qs = kwargs.get("query_string", "")
+            if qs:
+                from urllib.parse import parse_qs
+
+                for k, v in parse_qs(qs, keep_blank_values=True).items():
+                    if k in param_names and k not in call_kwargs:
+                        call_kwargs[k] = v[0]
+
+        if len(call_kwargs) < len(param_names):
+            headers = kwargs.get("headers", {})
+            if headers:
+                for k, v in HeaderParser.parse_headers(headers, sig).items():
+                    if k in param_names and k not in call_kwargs:
+                        call_kwargs[k] = v
+
+        if _needs_body:
+            body = kwargs.get("body", b"")
+            if body:
+                parsed_body = RequestBodyParser.parse_json_body(body, sig)
+                for k, v in parsed_body.items():
+                    call_kwargs.setdefault(k, v)
+
+        return call_kwargs
+
+    if eager:
+        from turboapi.async_pool import run_coroutine_response_eager as _run_eager
+
+        def fast_handler_eager(**kwargs):
+            try:
+                return _run_eager(original_handler(**build_call_kwargs(kwargs)))
+            except RequestParsingError as e:
+                return (
+                    400,
+                    "application/json",
+                    _dumps({"error": "Bad Request", "detail": str(e)}),
+                )
+            except Exception as e:
+                try:
+                    from turboapi.exceptions import HTTPException
+
+                    if isinstance(e, HTTPException):
+                        return (e.status_code, "application/json", _dumps({"detail": e.detail}))
+                except ImportError:
+                    pass
+                return (500, "application/json", _dumps({"error": str(e)}))
+
+        return fast_handler_eager
+
     async def fast_handler(**kwargs):
         try:
-            call_kwargs = {}
-
-            path_params = kwargs.get("path_params")
-            if path_params:
-                for k, v in path_params.items():
-                    if k in param_names:
-                        converter = _converters.get(k)
-                        call_kwargs[k] = converter(v) if converter else v
-
-            if len(call_kwargs) < len(param_names):
-                qs = kwargs.get("query_string", "")
-                if qs:
-                    from urllib.parse import parse_qs
-
-                    for k, v in parse_qs(qs, keep_blank_values=True).items():
-                        if k in param_names and k not in call_kwargs:
-                            call_kwargs[k] = v[0]
-
-            if len(call_kwargs) < len(param_names):
-                headers = kwargs.get("headers", {})
-                if headers:
-                    for k, v in HeaderParser.parse_headers(headers, sig).items():
-                        if k in param_names and k not in call_kwargs:
-                            call_kwargs[k] = v
-
-            if _needs_body:
-                body = kwargs.get("body", b"")
-                if body:
-                    parsed_body = RequestBodyParser.parse_json_body(body, sig)
-                    for k, v in parsed_body.items():
-                        call_kwargs.setdefault(k, v)
-
+            call_kwargs = build_call_kwargs(kwargs)
             result = await original_handler(**call_kwargs)
 
             if isinstance(result, _Response):

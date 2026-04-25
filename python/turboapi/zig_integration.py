@@ -65,7 +65,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
 
     Returns:
         (handler_type, param_types, model_info) where:
-        - handler_type: "simple_sync" | "body_sync" | "model_sync" | "form_sync" | "file_sync" | "simple_async" | "simple_async_eager" | "body_async" | "enhanced"
+        - handler_type: "simple_sync" | "body_sync" | "model_sync" | "form_sync" | "file_sync" | "simple_async" | "simple_async_eager" | "body_async" | "body_async_eager" | "enhanced"
         - param_types: dict mapping param_name -> type hint string
         - model_info: dict with "param_name" and "model_class" for model handlers
     """
@@ -178,6 +178,8 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
             if needs_body:
                 # Complex body types still need enhanced path
                 return "enhanced", param_types, {}
+            if _is_no_await_async_handler(handler):
+                return "body_async_eager", param_types, {}
             return "body_async", param_types, {}
         if _is_no_await_async_handler(handler):
             return "simple_async_eager", param_types, {}
@@ -917,7 +919,12 @@ class ZigIntegratedTurboAPI(TurboAPI):
                         route.handler,
                     )
                     print(f"{CHECK_MARK} [{registered_type}] {route.method.value} {route.path}")
-                elif handler_type in ("simple_async", "simple_async_eager", "body_async"):
+                elif handler_type in (
+                    "simple_async",
+                    "simple_async_eager",
+                    "body_async",
+                    "body_async_eager",
+                ):
                     # ASYNC FAST PATH: Register with async runtime
                     if self._middleware_instances:
                         enhanced_handler = create_enhanced_handler(route.handler, route)
@@ -937,7 +944,11 @@ class ZigIntegratedTurboAPI(TurboAPI):
                             meta_parts.append(f"{n}:{t}{'?' if is_opt else ''}")
                         param_meta_str = "|".join(meta_parts)
                     else:
-                        enhanced_handler = create_fast_async_handler(route.handler, route)
+                        enhanced_handler = create_fast_async_handler(
+                            route.handler,
+                            route,
+                            eager=handler_type == "body_async_eager",
+                        )
                         registered_type = handler_type
                         param_meta_str = json.dumps(param_types)
 

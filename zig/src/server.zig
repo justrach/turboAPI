@@ -188,6 +188,7 @@ const HandlerType = enum(u8) {
     simple_async,
     simple_async_eager,
     body_async,
+    body_async_eager,
     form_sync,
     file_sync,
     enhanced,
@@ -201,6 +202,7 @@ const handler_type_map = std.StaticStringMap(HandlerType).initComptime(.{
     .{ "simple_async", .simple_async },
     .{ "simple_async_eager", .simple_async_eager },
     .{ "body_async", .body_async },
+    .{ "body_async_eager", .body_async_eager },
     .{ "form_sync", .form_sync },
     .{ "file_sync", .file_sync },
 });
@@ -1449,7 +1451,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
         .body_sync => {
             callPythonHandlerDirect(tstate, entry, query_string, body, headers.items, &match.params, stream);
         },
-        .body_async => {
+        .body_async, .body_async_eager => {
             callPythonAsyncHandlerDirect(tstate, entry, query_string, body, headers.items, &match.params, stream);
         },
         .form_sync, .file_sync => {
@@ -2111,6 +2113,11 @@ fn callPythonAsyncHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_
         return;
     };
     defer c.Py_DecRef(result);
+
+    if (c.PyCoro_CheckExact(result) == 0) {
+        sendTupleResponse(stream, result);
+        return;
+    }
 
     const awaited = awaitPythonCoroutine(result) orelse {
         c.PyErr_Print();

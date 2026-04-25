@@ -201,6 +201,35 @@ class TestAsyncHandlerClassification:
 
         assert handler_type == "simple_async"
 
+    def test_async_post_no_await_handler_classified_as_body_eager(self):
+        """Test no-await async POST handlers use eager body async path."""
+
+        async def async_post_handler(name: str, n: int):
+            return {"name": name, "n": n}
+
+        class MockRoute:
+            method = type("Method", (), {"value": "POST"})()
+            path = "/test"
+
+        handler_type, param_types, model_info = classify_handler(async_post_handler, MockRoute())
+
+        assert handler_type == "body_async_eager"
+
+    def test_async_post_awaiting_handler_classified_as_body_async(self):
+        """Test awaiting async POST handlers stay on event-loop body async path."""
+
+        async def async_post_handler(name: str, n: int):
+            await asyncio.sleep(0)
+            return {"name": name, "n": n}
+
+        class MockRoute:
+            method = type("Method", (), {"value": "POST"})()
+            path = "/test"
+
+        handler_type, param_types, model_info = classify_handler(async_post_handler, MockRoute())
+
+        assert handler_type == "body_async"
+
     def test_async_with_dict_param_classified_as_enhanced(self):
         """Test async handler with dict param needs enhanced path."""
 

@@ -447,6 +447,23 @@ python3.14t app.py
 | WebSocket support | 🔧 In progress |
 | HTTP/2 + TLS | 🔧 In progress |
 
+### TurboAPI Extensions
+
+TurboAPI intentionally includes a few convenience behaviors beyond FastAPI when running on
+the Zig HTTP core. One example is implicit header binding for plain string parameters with
+defaults:
+
+```python
+@app.get("/headers")
+def read_headers(authorization: str = "missing", x_request_id: str = "missing"):
+    return {"authorization": authorization, "request_id": x_request_id}
+```
+
+With TurboAPI, `Authorization` and `X-Request-ID` headers can populate those parameters
+without `Header()`. FastAPI does not do this implicit binding for plain `str` parameters;
+use `Header()`/`Annotated` if you need strict FastAPI semantics or want the intent to be
+explicit in shared code.
+
 ---
 
 ## 📁 Project Structure
