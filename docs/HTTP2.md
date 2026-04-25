@@ -1,151 +1,69 @@
-# HTTP/2 Support in TurboAPI
+# HTTP/2 Status in TurboAPI
 
-TurboAPI includes HTTP/2 support for improved performance with modern clients.
+TurboAPI's Zig HTTP runtime currently speaks HTTP/1.1 only. Native HTTP/2
+connection handling, ALPN negotiation, HPACK, multiplexed streams, and server
+push are not implemented in the live runtime.
 
-## Overview
+## Recommended Deployment
 
-HTTP/2 provides several advantages over HTTP/1.1:
+Terminate TLS and HTTP/2 at a reverse proxy, then proxy HTTP/1.1 to TurboAPI:
 
-- **Multiplexing**: Multiple requests over a single connection
-- **Header Compression**: Reduced overhead with HPACK
-- **Server Push**: Proactively send resources to clients
-- **Stream Prioritization**: Important requests first
-
-## Enabling HTTP/2
-
-HTTP/2 is automatically enabled when using TLS (HTTPS). Clients negotiate the protocol via ALPN.
-
-```python
-from turboapi import TurboAPI
-
-app = TurboAPI()
-
-@app.get("/")
-def hello():
-    return {"message": "Hello via HTTP/2!"}
-
-# HTTP/2 is used automatically with TLS
-app.run(
-    host="0.0.0.0",
-    port=443,
-    ssl_certfile="cert.pem",
-    ssl_keyfile="key.pem"
-)
+```text
+Client
+  -> HTTPS / HTTP/2 at Caddy, nginx, Cloudflare, or another edge proxy
+  -> HTTP/1.1 to TurboAPI on 127.0.0.1:8000
 ```
 
-## Server Push (Experimental)
-
-Server push allows sending resources before the client requests them:
-
-```python
-# API for server push (in development)
-@app.get("/page")
-async def page_with_push(push: ServerPush):
-    # Push CSS and JS before sending HTML
-    await push.send("/static/style.css", "text/css")
-    await push.send("/static/app.js", "application/javascript")
-
-    return HTMLResponse("<html>...</html>")
-```
-
-## Performance Benefits
-
-| Scenario | HTTP/1.1 | HTTP/2 | Improvement |
-|----------|----------|--------|-------------|
-| 10 parallel requests | 10 connections | 1 connection | 90% fewer |
-| Header overhead | ~800 bytes | ~20 bytes | 40x smaller |
-| First contentful paint | Blocking | Multiplexed | 2-3x faster |
-
-## When to Use HTTP/2
-
-### Recommended
-
-- **Multiple API calls**: Dashboard loading multiple endpoints
-- **Asset-heavy pages**: Many CSS/JS files
-- **Mobile applications**: Limited connection capacity
-- **High-latency networks**: Connection reuse matters
-
-### Consider HTTP/1.1
-
-- **Single large download**: No multiplexing benefit
-- **Legacy client support**: Older browsers
-- **Debugging simplicity**: HTTP/1.1 is easier to inspect
-
-## Client Support
-
-Most modern clients support HTTP/2:
-
-| Client | HTTP/2 Support |
-|--------|----------------|
-| Chrome | Yes (2015+) |
-| Firefox | Yes (2015+) |
-| Safari | Yes (2014+) |
-| Edge | Yes (2015+) |
-| curl | Yes (7.43.0+) |
-| Python requests | Via httpx |
-| aiohttp | Yes |
-
-## Testing HTTP/2
-
-### Using curl
+TurboAPI should run on a private interface or behind a trusted proxy:
 
 ```bash
-# Check HTTP/2 support
-curl -I --http2 https://localhost/
-
-# Verbose output showing protocol
-curl -v --http2 https://localhost/
+python app.py  # listens on 127.0.0.1:8000
 ```
 
-### Using Python
+Example Caddy shape:
 
-```python
-import httpx
-
-async with httpx.AsyncClient(http2=True) as client:
-    response = await client.get("https://localhost/")
-    print(f"Protocol: {response.http_version}")  # HTTP/2
+```caddyfile
+api.example.com {
+    reverse_proxy 127.0.0.1:8000
+}
 ```
 
-## Architecture
+Caddy handles certificate management, TLS termination, and HTTP/2 negotiation.
+TurboAPI receives normal HTTP/1.1 requests from the proxy.
 
+## Runtime Stance
+
+- Native TLS termination is intentionally kept out-of-process for the current
+  runtime. Use Caddy, nginx, Cloudflare, or a load balancer for HTTPS.
+- Native HTTP/2 should be revisited with the broader runtime/event-loop work.
+  The current blocking connection model is not the right long-term base for
+  multiplexed HTTP/2 streams.
+- `ssl_certfile`, `ssl_keyfile`, `configure_http2()`, and server push APIs are
+  not available in the current Zig server path.
+
+## How To Verify Your Deployment
+
+Check HTTP/2 at the proxy:
+
+```bash
+curl -I --http2 https://api.example.com/
 ```
-Client Request (HTTP/2)
-        ↓
-   TLS Handshake + ALPN
-        ↓
-   h2 Frame Parser (planned)
-        ↓
-   Stream Manager
-        ↓
-   Request Router
-        ↓
-   Handler Execution
-        ↓
-   Response Serialization
-        ↓
-   h2 Frame Encoder
-        ↓
-Client Response (HTTP/2)
+
+Check the private TurboAPI hop:
+
+```bash
+curl -I http://127.0.0.1:8000/
 ```
 
-## Limitations
+The first command should negotiate HTTP/2 with the proxy. The second command is
+expected to be HTTP/1.1 because it talks directly to TurboAPI.
 
-1. **TLS Required**: HTTP/2 in browsers requires HTTPS
-2. **Server Push**: Not all clients handle pushes efficiently
-3. **Head-of-line blocking**: TCP layer still has HOL blocking
+## Tracking
 
-## Configuration Options
-
-```python
-# Coming soon
-app.configure_http2(
-    max_concurrent_streams=100,
-    initial_window_size=65535,
-    max_frame_size=16384,
-    enable_push=True
-)
-```
+This document records the current issue `#115` resolution for this runtime:
+terminate TLS and HTTP/2 out-of-process. Future native HTTP/2/TLS work should
+start from a fresh runtime design issue with tests for the then-current server
+architecture.
 
 ## See Also
 

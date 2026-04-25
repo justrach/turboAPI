@@ -715,6 +715,15 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 try:
                     mw.before_request(request)
                 except Exception as e:
+                    redirect_url = getattr(e, "url", None)
+                    if redirect_url:
+                        safe_location = _sanitize_header_component(str(redirect_url))
+                        return {
+                            "content": "",
+                            "status_code": 307,
+                            "content_type": f"text/plain\r\nLocation: {safe_location}",
+                        }
+
                     # Use status_code from HTTPException if available, else 500
                     status = getattr(e, "status_code", 500)
                     return {

@@ -14,7 +14,13 @@ import time
 import pytest
 import requests
 from turboapi import TurboAPI
-from turboapi.middleware import CORSMiddleware, GZipMiddleware, LoggingMiddleware
+from turboapi.middleware import (
+    CORSMiddleware,
+    GZipMiddleware,
+    HTTPSRedirectMiddleware,
+    LoggingMiddleware,
+    Middleware,
+)
 
 
 def _free_port() -> int:
@@ -240,3 +246,58 @@ def test_stacked_middleware_all_headers_present():
         "CORS header missing after stacking"
     )
     assert r.json()["stacked"] is True
+
+
+def test_https_redirect_middleware_runtime_redirect():
+    """HTTPSRedirectMiddleware should return a redirect, not a 500 error."""
+    app = TurboAPI()
+    app.add_middleware(HTTPSRedirectMiddleware)
+
+    @app.get("/secure")
+    def secure():
+        return {"secure": True}
+
+    port = _free_port()
+    _start(app, port)
+    r = requests.get(
+        f"http://127.0.0.1:{port}/secure?x=1",
+        headers={"Host": "example.test"},
+        allow_redirects=False,
+    )
+
+    assert r.status_code == 307
+    assert r.headers.get("Location") == "https://example.test/secure?x=1"
+
+
+def test_custom_logging_style_middleware_runtime_hooks():
+    """A custom logging-style middleware should run before and after the handler."""
+
+    class CaptureLoggingMiddleware(Middleware):
+        calls: list[tuple[str, str, int]] = []
+
+        def before_request(self, request):
+            request._seen_by_custom_logging = True
+
+        def after_request(self, request, response):
+            assert getattr(request, "_seen_by_custom_logging", False) is True
+            self.calls.append((request.method, request.path, response.status_code))
+            response.set_header("X-Custom-Logged", "yes")
+            return response
+
+    CaptureLoggingMiddleware.calls.clear()
+
+    app = TurboAPI()
+    app.add_middleware(CaptureLoggingMiddleware)
+
+    @app.get("/logged")
+    def logged():
+        return {"logged": True}
+
+    port = _free_port()
+    _start(app, port)
+    r = requests.get(f"http://127.0.0.1:{port}/logged")
+
+    assert r.status_code == 200
+    assert r.headers.get("X-Custom-Logged") == "yes"
+    assert r.json() == {"logged": True}
+    assert CaptureLoggingMiddleware.calls == [("GET", "/logged", 200)]
