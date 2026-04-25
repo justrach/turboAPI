@@ -9,11 +9,13 @@ import asyncio
 import json
 import sys
 import threading
+from asyncio import events as _asyncio_events
 
 from .exceptions import HTTPException
 from .responses import Response
 
 _dumps = json.dumps
+_set_running_loop = getattr(_asyncio_events, "_set_running_loop", None)
 _thread_local = threading.local()
 
 
@@ -175,6 +177,26 @@ def run_coroutine_response(coro):
         return _normalize_response_tuple(runner(coro))
     except Exception as exc:
         return _exception_response_tuple(exc)
+
+
+def run_coroutine_response_eager(coro):
+    """Run a no-await coroutine without paying the event-loop scheduler cost."""
+    loop = ensure_event_loop()
+    try:
+        if _set_running_loop is not None:
+            _set_running_loop(loop)
+        try:
+            coro.send(None)
+        except StopIteration as done:
+            return _normalize_response_tuple(done.value)
+
+        coro.close()
+        return _exception_response_tuple(RuntimeError("eager async handler yielded unexpectedly"))
+    except Exception as exc:
+        return _exception_response_tuple(exc)
+    finally:
+        if _set_running_loop is not None:
+            _set_running_loop(None)
 
 
 # Python 3.13+ free-threading detection

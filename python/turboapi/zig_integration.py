@@ -4,6 +4,7 @@ Connects FastAPI-compatible routing directly to Zig HTTP core with zero overhead
 Phase 3: Handler classification for fast dispatch (bypass Python enhanced wrapper).
 """
 
+import dis
 import inspect
 import json
 import os
@@ -26,13 +27,45 @@ from .request_handler import (
 )
 from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
 
+_ASYNC_YIELD_OPS = {
+    "ASYNC_GEN_WRAP",
+    "BEFORE_ASYNC_WITH",
+    "END_ASYNC_FOR",
+    "GET_AITER",
+    "GET_ANEXT",
+    "GET_AWAITABLE",
+    "SEND",
+    "YIELD_FROM",
+    "YIELD_VALUE",
+}
+_ASYNC_LOOP_NAMES = {
+    "TaskGroup",
+    "all_tasks",
+    "asyncio",
+    "create_task",
+    "current_task",
+    "get_event_loop",
+    "get_running_loop",
+    "run_coroutine_threadsafe",
+    "to_thread",
+}
+
+
+def _is_no_await_async_handler(handler) -> bool:
+    try:
+        if set(handler.__code__.co_names) & _ASYNC_LOOP_NAMES:
+            return False
+        return not any(instr.opname in _ASYNC_YIELD_OPS for instr in dis.get_instructions(handler))
+    except (AttributeError, TypeError):
+        return False
+
 
 def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
     """Classify a handler for fast dispatch (Phase 3 + Phase 4 async).
 
     Returns:
         (handler_type, param_types, model_info) where:
-        - handler_type: "simple_sync" | "body_sync" | "model_sync" | "form_sync" | "file_sync" | "simple_async" | "body_async" | "enhanced"
+        - handler_type: "simple_sync" | "body_sync" | "model_sync" | "form_sync" | "file_sync" | "simple_async" | "simple_async_eager" | "body_async" | "enhanced"
         - param_types: dict mapping param_name -> type hint string
         - model_info: dict with "param_name" and "model_class" for model handlers
     """
@@ -146,6 +179,8 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
                 # Complex body types still need enhanced path
                 return "enhanced", param_types, {}
             return "body_async", param_types, {}
+        if _is_no_await_async_handler(handler):
+            return "simple_async_eager", param_types, {}
         return "simple_async", param_types, {}
 
     # Sync handlers - Phase 3 sync fast paths
@@ -882,14 +917,14 @@ class ZigIntegratedTurboAPI(TurboAPI):
                         route.handler,
                     )
                     print(f"{CHECK_MARK} [{registered_type}] {route.method.value} {route.path}")
-                elif handler_type in ("simple_async", "body_async"):
+                elif handler_type in ("simple_async", "simple_async_eager", "body_async"):
                     # ASYNC FAST PATH: Register with async runtime
                     if self._middleware_instances:
                         enhanced_handler = create_enhanced_handler(route.handler, route)
                         enhanced_handler = self._wrap_with_middleware(enhanced_handler)
                         registered_type = "enhanced"
                         param_meta_str = "{}"
-                    elif handler_type == "simple_async":
+                    elif handler_type in ("simple_async", "simple_async_eager"):
                         enhanced_handler = route.handler
                         registered_type = handler_type
                         sig = inspect.signature(route.handler)

@@ -186,6 +186,7 @@ const HandlerType = enum(u8) {
     model_sync,
     body_sync,
     simple_async,
+    simple_async_eager,
     body_async,
     form_sync,
     file_sync,
@@ -198,6 +199,7 @@ const handler_type_map = std.StaticStringMap(HandlerType).initComptime(.{
     .{ "model_sync", .model_sync },
     .{ "body_sync", .body_sync },
     .{ "simple_async", .simple_async },
+    .{ "simple_async_eager", .simple_async_eager },
     .{ "body_async", .body_async },
     .{ "form_sync", .form_sync },
     .{ "file_sync", .file_sync },
@@ -218,6 +220,8 @@ const HandlerEntry = struct {
     // Vectorcall dispatch: ordered param metadata parsed at registration time
     param_meta: [MAX_PARAMS]ParamMeta = undefined,
     param_count: usize = 0,
+    cached_body_ptr: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    cached_body_len: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 };
 
 const HeaderPair = struct {
@@ -301,6 +305,7 @@ var py_interp: ?*anyopaque = null;
 var asyncio_run_fn: ?*c.PyObject = null;
 var turbo_run_coroutine_fn: ?*c.PyObject = null;
 var turbo_run_coroutine_response_fn: ?*c.PyObject = null;
+var turbo_run_coroutine_response_eager_fn: ?*c.PyObject = null;
 
 fn getAsyncioRunFn() ?*c.PyObject {
     if (asyncio_run_fn) |run_fn| return run_fn;
@@ -332,6 +337,16 @@ fn getTurboRunCoroutineResponseFn() ?*c.PyObject {
     return turbo_run_coroutine_response_fn;
 }
 
+fn getTurboRunCoroutineResponseEagerFn() ?*c.PyObject {
+    if (turbo_run_coroutine_response_eager_fn) |run_fn| return run_fn;
+
+    const async_pool = c.PyImport_ImportModule("turboapi.async_pool") orelse return null;
+    defer c.Py_DecRef(async_pool);
+
+    turbo_run_coroutine_response_eager_fn = c.PyObject_GetAttrString(async_pool, "run_coroutine_response_eager") orelse return null;
+    return turbo_run_coroutine_response_eager_fn;
+}
+
 fn awaitPythonCoroutine(coro: *c.PyObject) ?*c.PyObject {
     if (getTurboRunCoroutineFn()) |run_fn| {
         return py.PyObject_CallOneArg(run_fn, coro);
@@ -349,6 +364,15 @@ fn awaitPythonCoroutineResponse(coro: *c.PyObject) ?*c.PyObject {
 
     c.PyErr_Clear();
     return null;
+}
+
+fn awaitPythonCoroutineResponseEager(coro: *c.PyObject) ?*c.PyObject {
+    if (getTurboRunCoroutineResponseEagerFn()) |run_fn| {
+        return py.PyObject_CallOneArg(run_fn, coro);
+    }
+
+    c.PyErr_Clear();
+    return awaitPythonCoroutineResponse(coro);
 }
 
 fn getRoutes() *std.StringHashMap(HandlerEntry) {
@@ -412,6 +436,75 @@ fn cacheResponse(key: []const u8, rendered: []const u8) void {
 
     gop.value_ptr.* = rendered;
     response_cache_count += 1;
+}
+
+fn getCachedEntryBody(entry: *const HandlerEntry) ?[]const u8 {
+    const ptr_val = entry.cached_body_ptr.load(.acquire);
+    if (ptr_val == 0) return null;
+
+    const len = entry.cached_body_len.load(.acquire);
+    const ptr: [*]const u8 = @ptrFromInt(ptr_val);
+    return ptr[0..len];
+}
+
+fn cacheEntryBody(entry: *HandlerEntry, rendered: []const u8) void {
+    response_cache_lock.lockUncancelable(runtime.io);
+    defer response_cache_lock.unlock(runtime.io);
+
+    if (entry.cached_body_ptr.load(.monotonic) != 0) {
+        allocator.free(rendered);
+        return;
+    }
+
+    if (response_cache_count >= MAX_CACHE_ENTRIES) {
+        allocator.free(rendered);
+        return;
+    }
+
+    entry.cached_body_len.store(rendered.len, .release);
+    entry.cached_body_ptr.store(@intFromPtr(rendered.ptr), .release);
+    response_cache_count += 1;
+}
+
+fn sendCachedJsonBody(stream: std.Io.net.Stream, body: []const u8) void {
+    if (cors_headers.len > 0) {
+        sendResponse(stream, 200, "application/json", body);
+        return;
+    }
+
+    const date_str = currentHttpDate();
+    var len_buf: [20]u8 = undefined;
+    const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body.len}) catch return;
+
+    const h1 = "HTTP/1.1 200 OK\r\nServer: TurboAPI\r\nDate: ";
+    const h2 = "\r\nContent-Type: application/json\r\nContent-Length: ";
+    const h3 = "\r\nConnection: keep-alive\r\n\r\n";
+    const total = h1.len + date_str.len + h2.len + len_str.len + h3.len + body.len;
+
+    if (total <= 4096) {
+        var resp_buf: [4096]u8 = undefined;
+        var pos: usize = 0;
+        @memcpy(resp_buf[pos .. pos + h1.len], h1);
+        pos += h1.len;
+        @memcpy(resp_buf[pos .. pos + date_str.len], date_str);
+        pos += date_str.len;
+        @memcpy(resp_buf[pos .. pos + h2.len], h2);
+        pos += h2.len;
+        @memcpy(resp_buf[pos .. pos + len_str.len], len_str);
+        pos += len_str.len;
+        @memcpy(resp_buf[pos .. pos + h3.len], h3);
+        pos += h3.len;
+        @memcpy(resp_buf[pos .. pos + body.len], body);
+        pos += body.len;
+        streamWriteAll(stream, resp_buf[0..pos]) catch return;
+    } else {
+        streamWriteAll(stream, h1) catch return;
+        streamWriteAll(stream, date_str) catch return;
+        streamWriteAll(stream, h2) catch return;
+        streamWriteAll(stream, len_str) catch return;
+        streamWriteAll(stream, h3) catch return;
+        if (body.len > 0) streamWriteAll(stream, body) catch return;
+    }
 }
 
 fn getModelSchemas() *std.StringHashMap(dhi.ModelSchema) {
@@ -553,7 +646,7 @@ pub fn server_add_route_fast(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?
         .model_class = null,
     };
 
-    if (std.mem.eql(u8, ht_s, "simple_sync") or std.mem.eql(u8, ht_s, "simple_async")) {
+    if (std.mem.eql(u8, ht_s, "simple_sync") or std.mem.eql(u8, ht_s, "simple_async") or std.mem.eql(u8, ht_s, "simple_async_eager")) {
         entry.param_count = parseParamMeta(ptj_s, &entry.param_meta);
     }
 
@@ -951,6 +1044,7 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     py_interp = py.PyInterpreterState_Get();
     if (getTurboRunCoroutineFn() == null and getAsyncioRunFn() == null) c.PyErr_Print();
     if (getTurboRunCoroutineResponseFn() == null) c.PyErr_Print();
+    if (getTurboRunCoroutineResponseEagerFn() == null) c.PyErr_Print();
 
     var thread_count: usize = DEFAULT_POOL_SIZE;
     if (std.c.getenv("TURBO_THREAD_POOL_SIZE")) |_p| {
@@ -1181,22 +1275,22 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
 
     // Python handler lookup
     const r = getRoutes();
-    const entry = r.get(match.handler_key) orelse {
+    const entry_ptr = r.getPtr(match.handler_key) orelse {
         logger.warn("[ZIG] handler entry missing for key: {s}", .{match.handler_key});
         sendResponse(stream, 500, "application/json", "{\"error\": \"Internal Server Error\"}");
         return;
     };
+    const entry = entry_ptr.*;
 
     // ── Ultra-fast path: simple handlers that don't need headers or body ──
     switch (entry.handler_tag) {
         .simple_sync_noargs => {
             if (cache_noargs_responses) {
-                if (getCachedResponse(match.handler_key)) |cached| {
-                    // Cache hit: body-only cache, sendResponse adds fresh Date header
-                    sendResponse(stream, 200, "application/json", cached);
+                if (getCachedEntryBody(entry_ptr)) |cached| {
+                    sendCachedJsonBody(stream, cached);
                     return;
                 }
-                callPythonNoArgsCaching(tstate, entry, stream, match.handler_key);
+                callPythonNoArgsEntryCaching(tstate, entry_ptr, stream);
             } else {
                 callPythonNoArgs(tstate, entry, stream);
             }
@@ -1212,7 +1306,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
                 else
                     std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch path;
                 if (getCachedResponse(cache_key)) |cached| {
-                    sendResponse(stream, 200, "application/json", cached);
+                    sendCachedJsonBody(stream, cached);
                     return;
                 }
                 callPythonVectorcallCaching(tstate, entry, query_string, &match.params, stream, cache_key);
@@ -1221,14 +1315,15 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
             }
             return;
         },
-        .simple_async => {
+        .simple_async, .simple_async_eager => {
+            const eager = entry.handler_tag == .simple_async_eager;
             if (cache_noargs_responses) {
                 if (entry.param_count == 0) {
-                    if (getCachedResponse(match.handler_key)) |cached| {
-                        sendResponse(stream, 200, "application/json", cached);
+                    if (getCachedEntryBody(entry_ptr)) |cached| {
+                        sendCachedJsonBody(stream, cached);
                         return;
                     }
-                    callPythonAsyncNoArgs(tstate, entry, stream, match.handler_key);
+                    callPythonAsyncNoArgs(tstate, entry, stream, entry_ptr, eager);
                 } else {
                     var cache_key_buf: [512]u8 = undefined;
                     const cache_key = if (query_string.len > 0)
@@ -1236,15 +1331,15 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
                     else
                         std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch path;
                     if (getCachedResponse(cache_key)) |cached| {
-                        sendResponse(stream, 200, "application/json", cached);
+                        sendCachedJsonBody(stream, cached);
                         return;
                     }
-                    callPythonAsyncVectorcall(tstate, entry, query_string, &match.params, stream, cache_key);
+                    callPythonAsyncVectorcall(tstate, entry, query_string, &match.params, stream, cache_key, eager);
                 }
             } else if (entry.param_count == 0) {
-                callPythonAsyncNoArgs(tstate, entry, stream, null);
+                callPythonAsyncNoArgs(tstate, entry, stream, null, eager);
             } else {
-                callPythonAsyncVectorcall(tstate, entry, query_string, &match.params, stream, null);
+                callPythonAsyncVectorcall(tstate, entry, query_string, &match.params, stream, null, eager);
             }
             return;
         },
@@ -1339,7 +1434,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
 
     // Dispatch remaining handler types
     switch (entry.handler_tag) {
-        .simple_sync_noargs, .simple_sync, .simple_async => unreachable, // handled above
+        .simple_sync_noargs, .simple_sync, .simple_async, .simple_async_eager => unreachable, // handled above
         .model_sync => {
             if (body.len > 0) {
                 if (cached_parse) |cp| {
@@ -1515,34 +1610,7 @@ fn sendTupleResponseAndCache(stream: std.Io.net.Stream, result: *c.PyObject, cac
     cacheResponse(cache_key, body_dupe);
 }
 
-// ── simple_sync_noargs: PyObject_CallNoArgs — no tuple/dict construction ─────
-
-fn callPythonNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.Io.net.Stream) void {
-    py.PyEval_AcquireThread(tstate);
-    defer py.PyEval_ReleaseThread(tstate);
-
-    const result = py.PyObject_CallNoArgs(entry.handler) orelse {
-        c.PyErr_Print();
-        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
-        return;
-    };
-    defer c.Py_DecRef(result);
-    sendTupleResponse(stream, result);
-}
-
-/// Like callPythonNoArgs but caches the pre-rendered response for subsequent calls.
-fn callPythonNoArgsCaching(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.Io.net.Stream, handler_key: []const u8) void {
-    py.PyEval_AcquireThread(tstate);
-    defer py.PyEval_ReleaseThread(tstate);
-
-    const result = py.PyObject_CallNoArgs(entry.handler) orelse {
-        c.PyErr_Print();
-        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
-        return;
-    };
-    defer c.Py_DecRef(result);
-
-    // Extract tuple (status, content_type, body) and cache pre-rendered response
+fn sendTupleResponseAndCacheEntry(stream: std.Io.net.Stream, result: *c.PyObject, entry: *HandlerEntry) void {
     const sc_obj = py.PyTuple_GetItem(result, 0) orelse return;
     const ct_obj = py.PyTuple_GetItem(result, 1) orelse return;
     const body_obj = py.PyTuple_GetItem(result, 2) orelse return;
@@ -1562,12 +1630,39 @@ fn callPythonNoArgsCaching(tstate: ?*anyopaque, entry: HandlerEntry, stream: std
         }
     }
 
-    // Send response now
     sendResponse(stream, status_code, content_type, body_slice);
 
-    // Cache body only (sendResponse adds fresh Date headers on each hit)
     const body_dupe = allocator.dupe(u8, body_slice) catch return;
-    cacheResponse(handler_key, body_dupe);
+    cacheEntryBody(entry, body_dupe);
+}
+
+// ── simple_sync_noargs: PyObject_CallNoArgs — no tuple/dict construction ─────
+
+fn callPythonNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.Io.net.Stream) void {
+    py.PyEval_AcquireThread(tstate);
+    defer py.PyEval_ReleaseThread(tstate);
+
+    const result = py.PyObject_CallNoArgs(entry.handler) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(result);
+    sendTupleResponse(stream, result);
+}
+
+fn callPythonNoArgsEntryCaching(tstate: ?*anyopaque, entry: *HandlerEntry, stream: std.Io.net.Stream) void {
+    py.PyEval_AcquireThread(tstate);
+    defer py.PyEval_ReleaseThread(tstate);
+
+    const result = py.PyObject_CallNoArgs(entry.handler) orelse {
+        c.PyErr_Print();
+        sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
+        return;
+    };
+    defer c.Py_DecRef(result);
+
+    sendTupleResponseAndCacheEntry(stream, result, entry);
 }
 
 /// Fast path for simple_sync handlers with 1+ params.
@@ -1662,7 +1757,7 @@ fn callPythonVectorcall(
     sendTupleResponse(stream, result);
 }
 
-fn callPythonAsyncNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.Io.net.Stream, cache_key: ?[]const u8) void {
+fn callPythonAsyncNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.Io.net.Stream, cache_entry: ?*HandlerEntry, eager: bool) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
 
@@ -1673,14 +1768,14 @@ fn callPythonAsyncNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.I
     };
     defer c.Py_DecRef(result);
 
-    const response_tuple = awaitPythonCoroutineResponse(result) orelse {
+    const response_tuple = (if (eager) awaitPythonCoroutineResponseEager(result) else awaitPythonCoroutineResponse(result)) orelse {
         c.PyErr_Print();
         sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
         return;
     };
     defer c.Py_DecRef(response_tuple);
-    if (cache_key) |key| {
-        sendTupleResponseAndCache(stream, response_tuple, key);
+    if (cache_entry) |target| {
+        sendTupleResponseAndCacheEntry(stream, response_tuple, target);
     } else {
         sendTupleResponse(stream, response_tuple);
     }
@@ -1693,6 +1788,7 @@ fn callPythonAsyncVectorcall(
     params: *const router_mod.RouteParams,
     stream: std.Io.net.Stream,
     cache_key: ?[]const u8,
+    eager: bool,
 ) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
@@ -1755,7 +1851,7 @@ fn callPythonAsyncVectorcall(
     };
     defer c.Py_DecRef(result);
 
-    const response_tuple = awaitPythonCoroutineResponse(result) orelse {
+    const response_tuple = (if (eager) awaitPythonCoroutineResponseEager(result) else awaitPythonCoroutineResponse(result)) orelse {
         c.PyErr_Print();
         sendResponse(stream, 500, "application/json", "{\"error\":\"handler failed\"}");
         return;

@@ -157,10 +157,40 @@ class TestAsyncHandlerClassification:
         except ImportError:
             pytest.skip("dhi module not installed")
 
-    def test_async_simple_handler_classified_correctly(self):
-        """Test async handler without body params is classified as simple_async."""
+    def test_async_simple_no_await_handler_classified_as_eager(self):
+        """Test async handler without await uses eager simple async path."""
 
         async def async_get_handler():
+            return {"message": "hello"}
+
+        class MockRoute:
+            method = type("Method", (), {"value": "GET"})()
+            path = "/test"
+
+        handler_type, param_types, model_info = classify_handler(async_get_handler, MockRoute())
+
+        assert handler_type == "simple_async_eager"
+
+    def test_async_awaiting_handler_classified_as_simple_async(self):
+        """Test async handler with await still uses the event-loop async path."""
+
+        async def async_get_handler():
+            await asyncio.sleep(0)
+            return {"message": "hello"}
+
+        class MockRoute:
+            method = type("Method", (), {"value": "GET"})()
+            path = "/test"
+
+        handler_type, param_types, model_info = classify_handler(async_get_handler, MockRoute())
+
+        assert handler_type == "simple_async"
+
+    def test_async_loop_api_handler_classified_as_simple_async(self):
+        """Test no-await handlers using asyncio loop APIs stay on event-loop path."""
+
+        async def async_get_handler():
+            asyncio.get_running_loop()
             return {"message": "hello"}
 
         class MockRoute:
