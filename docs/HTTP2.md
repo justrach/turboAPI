@@ -6,11 +6,12 @@ push are not implemented in the live runtime.
 
 ## Recommended Deployment
 
-Terminate TLS and HTTP/2 at a reverse proxy, then proxy HTTP/1.1 to TurboAPI:
+Terminate TLS and HTTP/2 at a reverse proxy, then proxy HTTP/1.1 to TurboAPI.
+Use the same edge-termination model for HTTP/3/QUIC:
 
 ```text
 Client
-  -> HTTPS / HTTP/2 at Caddy, nginx, Cloudflare, or another edge proxy
+  -> HTTPS / HTTP/2 or HTTP/3 at Caddy, nginx, Cloudflare, or another edge proxy
   -> HTTP/1.1 to TurboAPI on 127.0.0.1:8000
 ```
 
@@ -28,7 +29,7 @@ api.example.com {
 }
 ```
 
-Caddy handles certificate management, TLS termination, and HTTP/2 negotiation.
+Caddy handles certificate management, TLS termination, and HTTP/2/HTTP/3 negotiation.
 TurboAPI receives normal HTTP/1.1 requests from the proxy.
 
 ## Runtime Stance
@@ -38,6 +39,8 @@ TurboAPI receives normal HTTP/1.1 requests from the proxy.
 - Native HTTP/2 should be revisited with the broader runtime/event-loop work.
   The current blocking connection model is not the right long-term base for
   multiplexed HTTP/2 streams.
+- Native HTTP/3/QUIC is separate UDP transport work and is tracked in issue
+  `#138`.
 - `ssl_certfile`, `ssl_keyfile`, `configure_http2()`, and server push APIs are
   not available in the current Zig server path.
 
@@ -68,5 +71,6 @@ architecture.
 ## See Also
 
 - [TLS Setup](./TLS_SETUP.md)
+- [HTTP/3 and QUIC](./HTTP3_QUIC.md)
 - [Architecture](./ARCHITECTURE.md)
 - [RFC 9113 - HTTP/2](https://datatracker.ietf.org/doc/html/rfc9113)

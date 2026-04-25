@@ -16,6 +16,7 @@ Welcome to the TurboAPI documentation! This directory contains detailed guides f
 | Document | Description |
 |----------|-------------|
 | [HTTP/2](./HTTP2.md) | HTTP/2 runtime status and reverse-proxy guidance |
+| [HTTP/3 and QUIC](./HTTP3_QUIC.md) | HTTP/3/QUIC edge termination and native runtime status |
 | [TLS Setup](./TLS_SETUP.md) | TLS termination status and reverse-proxy guidance |
 | [WebSocket](./WEBSOCKET.md) | WebSocket API surface and runtime status |
 
