@@ -36,6 +36,41 @@ fn timestampSeconds() i64 {
     return ts.sec;
 }
 
+threadlocal var cached_date_second: i64 = -1;
+threadlocal var cached_date_buf: [40]u8 = undefined;
+threadlocal var cached_date_len: usize = 0;
+
+fn currentHttpDate() []const u8 {
+    const timestamp = timestampSeconds();
+    if (cached_date_second == timestamp and cached_date_len > 0) {
+        return cached_date_buf[0..cached_date_len];
+    }
+
+    const epoch_secs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(timestamp) };
+    const day_secs = epoch_secs.getDaySeconds();
+    const epoch_day = epoch_secs.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const dow_idx: usize = @intCast(@mod(@as(i32, @intCast(epoch_day.day)) + 3, 7)); // 0=Mon
+    const dow_names = [7][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+    const mon_names = [12][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+    const formatted = std.fmt.bufPrint(&cached_date_buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+        dow_names[dow_idx],         month_day.day_index + 1,       mon_names[@intFromEnum(month_day.month) - 1], year_day.year,
+        day_secs.getHoursIntoDay(), day_secs.getMinutesIntoHour(), day_secs.getSecondsIntoMinute(),
+    }) catch {
+        const fallback = "Thu, 01 Jan 2026 00:00:00 GMT";
+        @memcpy(cached_date_buf[0..fallback.len], fallback);
+        cached_date_second = timestamp;
+        cached_date_len = fallback.len;
+        return cached_date_buf[0..cached_date_len];
+    };
+
+    cached_date_second = timestamp;
+    cached_date_len = formatted.len;
+    return cached_date_buf[0..cached_date_len];
+}
+
 // ── Route storage ───────────────────────────────────────────────────────────
 
 const MAX_PARAMS: usize = 16;
@@ -1187,10 +1222,29 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
             return;
         },
         .simple_async => {
-            if (entry.param_count == 0) {
-                callPythonAsyncNoArgs(tstate, entry, stream);
+            if (cache_noargs_responses) {
+                if (entry.param_count == 0) {
+                    if (getCachedResponse(match.handler_key)) |cached| {
+                        sendResponse(stream, 200, "application/json", cached);
+                        return;
+                    }
+                    callPythonAsyncNoArgs(tstate, entry, stream, match.handler_key);
+                } else {
+                    var cache_key_buf: [512]u8 = undefined;
+                    const cache_key = if (query_string.len > 0)
+                        std.fmt.bufPrint(&cache_key_buf, "{s} {s}?{s}", .{ method, path, query_string }) catch path
+                    else
+                        std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch path;
+                    if (getCachedResponse(cache_key)) |cached| {
+                        sendResponse(stream, 200, "application/json", cached);
+                        return;
+                    }
+                    callPythonAsyncVectorcall(tstate, entry, query_string, &match.params, stream, cache_key);
+                }
+            } else if (entry.param_count == 0) {
+                callPythonAsyncNoArgs(tstate, entry, stream, null);
             } else {
-                callPythonAsyncVectorcall(tstate, entry, query_string, &match.params, stream);
+                callPythonAsyncVectorcall(tstate, entry, query_string, &match.params, stream, null);
             }
             return;
         },
@@ -1435,6 +1489,32 @@ fn sendTupleResponse(stream: std.Io.net.Stream, result: *c.PyObject) void {
     sendResponse(stream, 500, "application/json", "{\"error\":\"bad tuple body\"}");
 }
 
+fn sendTupleResponseAndCache(stream: std.Io.net.Stream, result: *c.PyObject, cache_key: []const u8) void {
+    const sc_obj = py.PyTuple_GetItem(result, 0) orelse return;
+    const ct_obj = py.PyTuple_GetItem(result, 1) orelse return;
+    const body_obj = py.PyTuple_GetItem(result, 2) orelse return;
+
+    const status_code: u16 = @intCast(c.PyLong_AsLong(sc_obj));
+    const ct_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(ct_obj) orelse "application/json";
+    const content_type = std.mem.span(ct_cstr);
+
+    var body_slice: []const u8 = "";
+    if (c.PyUnicode_Check(body_obj) != 0) {
+        if (c.PyUnicode_AsUTF8(body_obj)) |cs| body_slice = std.mem.span(cs);
+    } else if (c.PyBytes_Check(body_obj) != 0) {
+        var size: c.Py_ssize_t = 0;
+        var buf: [*c]u8 = undefined;
+        if (c.PyBytes_AsStringAndSize(body_obj, @ptrCast(&buf), &size) == 0) {
+            body_slice = buf[0..@intCast(size)];
+        }
+    }
+
+    sendResponse(stream, status_code, content_type, body_slice);
+
+    const body_dupe = allocator.dupe(u8, body_slice) catch return;
+    cacheResponse(cache_key, body_dupe);
+}
+
 // ── simple_sync_noargs: PyObject_CallNoArgs — no tuple/dict construction ─────
 
 fn callPythonNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.Io.net.Stream) void {
@@ -1582,7 +1662,7 @@ fn callPythonVectorcall(
     sendTupleResponse(stream, result);
 }
 
-fn callPythonAsyncNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.Io.net.Stream) void {
+fn callPythonAsyncNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.Io.net.Stream, cache_key: ?[]const u8) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
 
@@ -1599,7 +1679,11 @@ fn callPythonAsyncNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.I
         return;
     };
     defer c.Py_DecRef(response_tuple);
-    sendTupleResponse(stream, response_tuple);
+    if (cache_key) |key| {
+        sendTupleResponseAndCache(stream, response_tuple, key);
+    } else {
+        sendTupleResponse(stream, response_tuple);
+    }
 }
 
 fn callPythonAsyncVectorcall(
@@ -1608,6 +1692,7 @@ fn callPythonAsyncVectorcall(
     query_string: []const u8,
     params: *const router_mod.RouteParams,
     stream: std.Io.net.Stream,
+    cache_key: ?[]const u8,
 ) void {
     py.PyEval_AcquireThread(tstate);
     defer py.PyEval_ReleaseThread(tstate);
@@ -1676,7 +1761,11 @@ fn callPythonAsyncVectorcall(
         return;
     };
     defer c.Py_DecRef(response_tuple);
-    sendTupleResponse(stream, response_tuple);
+    if (cache_key) |key| {
+        sendTupleResponseAndCache(stream, response_tuple, key);
+    } else {
+        sendTupleResponse(stream, response_tuple);
+    }
 }
 
 /// Like callPythonVectorcall but caches the pre-rendered response keyed by full path.
@@ -2392,23 +2481,29 @@ fn statusText(status: u16) []const u8 {
 /// Falls back to two writes only for large responses.
 pub fn sendResponse(stream: std.Io.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
     // TFB requires Server + Date headers
-    var date_buf: [40]u8 = undefined;
-    const timestamp = timestampSeconds();
-    const epoch_secs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(timestamp) };
-    const day_secs = epoch_secs.getDaySeconds();
-    const epoch_day = epoch_secs.getEpochDay();
-    const year_day = epoch_day.calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-    const dow_idx: usize = @intCast(@mod(@as(i32, @intCast(epoch_day.day)) + 3, 7)); // 0=Mon
-    const dow_names = [7][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
-    const mon_names = [12][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-    const dow_str = dow_names[dow_idx];
-    const mon_str = mon_names[@intFromEnum(month_day.month) - 1];
-    // RFC 2822: "Wed, 19 Mar 2026 11:30:27 GMT"
-    const date_str = std.fmt.bufPrint(&date_buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
-        dow_str,                    month_day.day_index + 1,       mon_str,                         year_day.year,
-        day_secs.getHoursIntoDay(), day_secs.getMinutesIntoHour(), day_secs.getSecondsIntoMinute(),
-    }) catch "Thu, 01 Jan 2026 00:00:00 GMT";
+    const date_str = currentHttpDate();
+    const cors = cors_headers; // "" when disabled — zero overhead
+
+    if (status == 200 and cors.len == 0 and std.mem.eql(u8, content_type, "application/json")) {
+        var header_buf: [256]u8 = undefined;
+        const header = std.fmt.bufPrint(
+            &header_buf,
+            "HTTP/1.1 200 OK\r\nServer: TurboAPI\r\nDate: {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n",
+            .{ date_str, body.len },
+        ) catch return;
+
+        const total = header.len + body.len;
+        if (total <= 4096) {
+            var resp_buf: [4096]u8 = undefined;
+            @memcpy(resp_buf[0..header.len], header);
+            @memcpy(resp_buf[header.len..total], body);
+            streamWriteAll(stream, resp_buf[0..total]) catch return;
+        } else {
+            streamWriteAll(stream, header) catch return;
+            if (body.len > 0) streamWriteAll(stream, body) catch return;
+        }
+        return;
+    }
 
     var header_buf: [512]u8 = undefined;
     const header = std.fmt.bufPrint(
@@ -2418,7 +2513,6 @@ pub fn sendResponse(stream: std.Io.net.Stream, status: u16, content_type: []cons
     ) catch return;
 
     // Assemble: header + cors_headers (pre-rendered, "" if disabled) + \r\n\r\n + body
-    const cors = cors_headers; // "" when disabled — zero overhead
     const trailer = "\r\n\r\n";
     const total = header.len + cors.len + trailer.len + body.len;
     if (total <= 4096) {
