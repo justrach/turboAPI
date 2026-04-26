@@ -44,12 +44,14 @@ def _parse_multipart(body: bytes, boundary: str) -> tuple[dict, list]:
         if name is None:
             continue
         if filename is not None:
-            file_fields.append({
-                "name": name,
-                "filename": filename,
-                "content_type": hdrs.get("content-type", "application/octet-stream"),
-                "body": content,
-            })
+            file_fields.append(
+                {
+                    "name": name,
+                    "filename": filename,
+                    "content_type": hdrs.get("content-type", "application/octet-stream"),
+                    "body": content,
+                }
+            )
         else:
             form_fields[name] = content.decode("utf-8", errors="replace")
     return form_fields, file_fields
@@ -457,7 +459,6 @@ class TurboAPI(Router):
             if self.shutdown_handlers:
                 asyncio.run(self._run_shutdown_handlers())
 
-
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         """ASGI fallback — pure Python, ~100x slower than the Zig native backend.
 
@@ -520,11 +521,13 @@ class TurboAPI(Router):
 
         if not match_result:
             resp_body = _json.dumps({"detail": "Not Found"}).encode("utf-8")
-            await send({
-                "type": "http.response.start",
-                "status": 404,
-                "headers": [[b"content-type", b"application/json"]],
-            })
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 404,
+                    "headers": [[b"content-type", b"application/json"]],
+                }
+            )
             await send({"type": "http.response.body", "body": resp_body})
             return
 
@@ -542,11 +545,13 @@ class TurboAPI(Router):
                         param_value = param_def.type(param_value)
                     except (ValueError, TypeError):
                         resp_body = _json.dumps({"detail": f"Invalid {param_name}"}).encode("utf-8")
-                        await send({
-                            "type": "http.response.start",
-                            "status": 422,
-                            "headers": [[b"content-type", b"application/json"]],
-                        })
+                        await send(
+                            {
+                                "type": "http.response.start",
+                                "status": 422,
+                                "headers": [[b"content-type", b"application/json"]],
+                            }
+                        )
                         await send({"type": "http.response.body", "body": resp_body})
                         return
                 call_args[param_name] = param_value
@@ -554,6 +559,7 @@ class TurboAPI(Router):
         # Parse query params
         if query_string:
             from urllib.parse import parse_qs
+
             qs = parse_qs(query_string, keep_blank_values=True)
             for param_name, param in sig.parameters.items():
                 if param_name not in call_args and param_name in qs:
@@ -568,6 +574,7 @@ class TurboAPI(Router):
                 from .datastructures import File as _File
                 from .datastructures import Form as _Form
                 from .datastructures import UploadFile as _UF
+
                 boundary = ""
                 for _part in content_type_val.split(";"):
                     _part = _part.strip()
@@ -583,9 +590,11 @@ class TurboAPI(Router):
                         default = param.default
                         ann = param.annotation
                         is_file_default = isinstance(default, _File)
-                        is_upload_ann = (ann is _UF)
+                        is_upload_ann = ann is _UF
                         if is_file_default or is_upload_ann:
-                            field_name = (default.alias if is_file_default and default.alias else param_name)
+                            field_name = (
+                                default.alias if is_file_default and default.alias else param_name
+                            )
                             if field_name in _file_map:
                                 fd = _file_map[field_name]
                                 call_args[param_name] = _UF(
@@ -608,6 +617,7 @@ class TurboAPI(Router):
                                 call_args[param_name] = default.default
             elif "application/x-www-form-urlencoded" in content_type_val:
                 from .datastructures import Form as _Form
+
                 _qs = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
                 for param_name, param in sig.parameters.items():
                     if param_name in call_args:
@@ -647,11 +657,13 @@ class TurboAPI(Router):
                 result = route.handler(**call_args)
         except Exception as e:
             resp_body = _json.dumps({"detail": str(e)}).encode("utf-8")
-            await send({
-                "type": "http.response.start",
-                "status": 500,
-                "headers": [[b"content-type", b"application/json"]],
-            })
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 500,
+                    "headers": [[b"content-type", b"application/json"]],
+                }
+            )
             await send({"type": "http.response.body", "body": resp_body})
             return
 
@@ -669,12 +681,14 @@ class TurboAPI(Router):
             resp_body = _json.dumps(result).encode("utf-8")
             content_type = b"application/json"
 
-        await send({
-            "type": "http.response.start",
-            "status": 200,
-            "headers": [
-                [b"content-type", content_type],
-                [b"server", b"TurboAPI"],
-            ],
-        })
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    [b"content-type", content_type],
+                    [b"server", b"TurboAPI"],
+                ],
+            }
+        )
         await send({"type": "http.response.body", "body": resp_body})

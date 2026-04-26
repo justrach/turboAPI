@@ -103,7 +103,11 @@ TurboAPI uses buffer pooling to reduce allocations:
 
 ### Response Streaming
 
-For large responses, consider streaming:
+The `StreamingResponse` API surface exists, but true chunked/SSE streaming is
+not implemented in the current Zig HTTP runtime. Do not rely on the live Zig
+server for production streaming endpoints yet.
+
+The intended API shape is:
 
 ```python
 from turboapi.responses import StreamingResponse
@@ -117,16 +121,30 @@ async def large_response():
     return StreamingResponse(generate())
 ```
 
+Until native streaming is implemented, prefer bounded `Response`/`FileResponse`
+payloads or put streaming workloads behind a server that supports chunked/SSE
+delivery.
+
 ## Middleware Overhead
 
-Each middleware adds latency. Use only what you need:
+Each Python middleware adds latency because routes with Python middleware use
+the enhanced handler path. Use only what you need:
 
 | Middleware | Overhead |
 |------------|----------|
-| CORS | ~0.01ms |
-| Rate Limiting | ~0.02ms |
-| Authentication | ~0.1-1ms |
-| GZip (if triggered) | ~1-10ms |
+| CORS | Zig-native when configured through `CORSMiddleware`; otherwise enhanced path |
+| GZip | Enhanced path; buffers and compresses response bodies |
+| HTTPS redirect | Enhanced path; short-circuits before handler execution |
+| Custom logging/tracing | Enhanced path; runs before/after hooks around the handler |
+
+Safe current patterns:
+
+- CORS-only apps can use the Zig-native CORS path.
+- GZip, HTTPS redirect, auth, logging, and tracing are compatible, but they
+  intentionally trade throughput for Python middleware hooks.
+- Middleware-mutated response headers and bodies are supported on the enhanced
+  path.
+- True chunked/SSE streaming remains open runtime work.
 
 ### Order Matters
 

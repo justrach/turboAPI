@@ -157,8 +157,8 @@ class TestAsyncHandlerClassification:
         except ImportError:
             pytest.skip("dhi module not installed")
 
-    def test_async_simple_handler_classified_correctly(self):
-        """Test async handler without body params is classified as simple_async."""
+    def test_async_simple_no_await_handler_classified_as_eager(self):
+        """Test async handler without await uses eager simple async path."""
 
         async def async_get_handler():
             return {"message": "hello"}
@@ -169,7 +169,101 @@ class TestAsyncHandlerClassification:
 
         handler_type, param_types, model_info = classify_handler(async_get_handler, MockRoute())
 
+        assert handler_type == "simple_async_eager"
+
+    def test_async_awaiting_handler_classified_as_simple_async(self):
+        """Test async handler with await still uses the event-loop async path."""
+
+        async def async_get_handler():
+            await asyncio.sleep(0)
+            return {"message": "hello"}
+
+        class MockRoute:
+            method = type("Method", (), {"value": "GET"})()
+            path = "/test"
+
+        handler_type, param_types, model_info = classify_handler(async_get_handler, MockRoute())
+
         assert handler_type == "simple_async"
+
+    def test_async_loop_api_handler_classified_as_simple_async(self):
+        """Test no-await handlers using asyncio loop APIs stay on event-loop path."""
+
+        async def async_get_handler():
+            asyncio.get_running_loop()
+            return {"message": "hello"}
+
+        class MockRoute:
+            method = type("Method", (), {"value": "GET"})()
+            path = "/test"
+
+        handler_type, param_types, model_info = classify_handler(async_get_handler, MockRoute())
+
+        assert handler_type == "simple_async"
+
+    def test_async_helper_loop_api_handler_classified_as_simple_async(self):
+        """Test helper loop API usage keeps no-await handlers off eager path."""
+
+        def helper():
+            asyncio.get_running_loop()
+
+        async def async_get_handler():
+            helper()
+            return {"message": "hello"}
+
+        class MockRoute:
+            method = type("Method", (), {"value": "GET"})()
+            path = "/test"
+
+        handler_type, param_types, model_info = classify_handler(async_get_handler, MockRoute())
+
+        assert handler_type == "simple_async"
+
+    def test_async_loop_api_alias_classified_as_simple_async(self):
+        """Test aliased asyncio loop APIs stay off eager path."""
+
+        get_loop = asyncio.get_running_loop
+
+        async def async_get_handler():
+            get_loop()
+            return {"message": "hello"}
+
+        class MockRoute:
+            method = type("Method", (), {"value": "GET"})()
+            path = "/test"
+
+        handler_type, param_types, model_info = classify_handler(async_get_handler, MockRoute())
+
+        assert handler_type == "simple_async"
+
+    def test_async_post_no_await_handler_classified_as_body_eager(self):
+        """Test no-await async POST handlers use eager body async path."""
+
+        async def async_post_handler(name: str, n: int):
+            return {"name": name, "n": n}
+
+        class MockRoute:
+            method = type("Method", (), {"value": "POST"})()
+            path = "/test"
+
+        handler_type, param_types, model_info = classify_handler(async_post_handler, MockRoute())
+
+        assert handler_type == "body_async_eager"
+
+    def test_async_post_awaiting_handler_classified_as_body_async(self):
+        """Test awaiting async POST handlers stay on event-loop body async path."""
+
+        async def async_post_handler(name: str, n: int):
+            await asyncio.sleep(0)
+            return {"name": name, "n": n}
+
+        class MockRoute:
+            method = type("Method", (), {"value": "POST"})()
+            path = "/test"
+
+        handler_type, param_types, model_info = classify_handler(async_post_handler, MockRoute())
+
+        assert handler_type == "body_async"
 
     def test_async_with_dict_param_classified_as_enhanced(self):
         """Test async handler with dict param needs enhanced path."""

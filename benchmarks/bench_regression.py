@@ -29,6 +29,12 @@ PR_COMMENT_FILE = "/tmp/bench_pr_comment.md"
 DURATION = int(os.environ.get("BENCH_DURATION", "10"))
 THREADS = int(os.environ.get("BENCH_THREADS", "4"))
 CONNECTIONS = int(os.environ.get("BENCH_CONNECTIONS", "100"))
+WORKERS = int(
+    os.environ.get(
+        "BENCH_WORKERS",
+        os.environ.get("WORKERS", os.environ.get("TURBO_THREAD_POOL_SIZE", "24")),
+    )
+)
 
 SERVER_CODE = """
 from turboapi import TurboAPI, JSONResponse
@@ -170,6 +176,7 @@ def save_history(results, detailed=None):
         "duration": DURATION,
         "threads": THREADS,
         "connections": CONNECTIONS,
+        "workers": WORKERS,
     }
     with open(history_file, "w") as f:
         json.dump(payload, f, indent=2)
@@ -181,7 +188,7 @@ def generate_pr_comment(results, detailed, thresholds, avg_threshold, regression
     duration = DURATION
     lines = ["## Performance Regression Report\n"]
     lines.append(
-        f"> Runner: **{runner}** | Duration: **{duration}s** per endpoint | Threads: **{THREADS}** | Connections: **{CONNECTIONS}**\n"
+        f"> Runner: **{runner}** | Duration: **{duration}s** per endpoint | Threads: **{THREADS}** | Connections: **{CONNECTIONS}** | Workers: **{WORKERS}**\n"
     )
     lines.append("| Endpoint | req/s | avg latency | p99 latency | threshold | status |")
     lines.append("|----------|------:|------------:|------------:|----------:|--------|")
@@ -225,6 +232,7 @@ def main():
     env["PYTHON_GIL"] = "0"
     env["TURBO_DISABLE_RATE_LIMITING"] = "1"
     env["TURBO_DISABLE_CACHE"] = "1"
+    env["TURBO_THREAD_POOL_SIZE"] = str(WORKERS)
     proc = subprocess.Popen(
         [sys.executable, "/tmp/turboapi_regbench.py"],
         env=env,
@@ -246,6 +254,9 @@ def main():
 
     results = {}
     detailed = {}
+    print(
+        f"Config: duration={DURATION}s threads={THREADS} connections={CONNECTIONS} workers={WORKERS}"
+    )
     print(f"{'Endpoint':<25} {'req/s':>10} {'avg':>8} {'p99':>8} {'status':>8}")
     print("-" * 65)
 
@@ -287,7 +298,20 @@ def main():
         print(f"\nBaseline saved to {BASELINE_FILE}")
 
     with open(RESULTS_FILE, "w") as f:
-        json.dump({"results": results, "detailed": detailed}, f, indent=2)
+        json.dump(
+            {
+                "metadata": {
+                    "duration": DURATION,
+                    "threads": THREADS,
+                    "connections": CONNECTIONS,
+                    "workers": WORKERS,
+                },
+                "results": results,
+                "detailed": detailed,
+            },
+            f,
+            indent=2,
+        )
 
     if history_mode or save_mode:
         save_history(results, detailed)

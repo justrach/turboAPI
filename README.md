@@ -37,12 +37,14 @@
 
 > **Alpha software — read before using in production**
 >
-> TurboAPI works and has 275+ passing tests, but:
-> - **No TLS** — put nginx or Caddy in front for HTTPS
-> - **No slow-loris protection** — requires a reverse proxy with read timeouts
+> TurboAPI works and has 380+ passing tests, but:
+> - **No native TLS / HTTP/2 / HTTP/3 / QUIC** — put Caddy with Let's Encrypt,
+>   nginx, `cloudflared`, Cloudflare, or another edge proxy in front for HTTPS
+>   and modern protocols
+> - **Basic slow-loris protection** exists via a 30s read timeout, but production
+>   deployments should still use a reverse proxy with stricter limits
 > - **No configurable max body size** — hardcoded 16MB cap
 > - **WebSocket support** is in progress, not production-ready
-> - **HTTP/2** is not yet implemented
 > - **Free-threaded Python 3.14t** is itself relatively new — some C extensions may not be thread-safe
 >
 > See [SECURITY.md](SECURITY.md) for the full threat model and deployment recommendations.
@@ -50,7 +52,7 @@
 | What works today                                       | What's in progress                       |
 |--------------------------------------------------------|------------------------------------------|
 | ~140k req/s on uncached HTTP routes (~16x FastAPI)     | WebSocket support                        |
-| FastAPI-compatible route decorators                    | HTTP/2 and TLS                           |
+| FastAPI-compatible route decorators                    | Native HTTP/2, HTTP/3/QUIC, and TLS     |
 | Zig HTTP server with 24-thread pool + keep-alive       | Cloudflare Workers WASM target           |
 | Zig-native JSON schema validation (dhi)                | Fiber-based concurrency (via [zag](https://github.com/justrach/zag))  |
 | Zero-alloc response pipeline (stack buffers)           |                                          |
@@ -445,7 +447,27 @@ python3.14t app.py
 | Large body support (up to 16MB) | ✅ |
 | Python 3.14t free-threaded | ✅ |
 | WebSocket support | 🔧 In progress |
-| HTTP/2 + TLS | 🔧 In progress |
+| HTTP/2 + TLS via reverse proxy | ✅ |
+| HTTP/3 + QUIC via reverse proxy | ✅ |
+| Native HTTP/2 + TLS | 🔧 Future runtime work |
+| Native HTTP/3 + QUIC | 🔧 Tracked in #138 |
+
+### TurboAPI Extensions
+
+TurboAPI intentionally includes a few convenience behaviors beyond FastAPI when running on
+the Zig HTTP core. One example is implicit header binding for plain string parameters with
+defaults:
+
+```python
+@app.get("/headers")
+def read_headers(authorization: str = "missing", x_request_id: str = "missing"):
+    return {"authorization": authorization, "request_id": x_request_id}
+```
+
+With TurboAPI, `Authorization` and `X-Request-ID` headers can populate those parameters
+without `Header()`. FastAPI does not do this implicit binding for plain `str` parameters;
+use `Header()`/`Annotated` if you need strict FastAPI semantics or want the intent to be
+explicit in shared code.
 
 ---
 

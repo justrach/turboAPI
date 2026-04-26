@@ -21,6 +21,8 @@ import time
 from collections.abc import Callable
 
 from ..models import Request, Response
+
+
 class Middleware:
     """Base middleware class."""
 
@@ -117,6 +119,7 @@ class CORSMiddleware(Middleware):
         response.set_header("Access-Control-Max-Age", str(self.max_age))
 
         return response
+
 
 class TrustedHostMiddleware(Middleware):
     """
@@ -332,6 +335,7 @@ class RateLimitMiddleware(Middleware):
             # Add this request
             self.requests[client_ip].append((now, 1))
 
+
 class LoggingMiddleware(Middleware):
     """
     Request logging middleware.
@@ -374,7 +378,6 @@ class CustomMiddleware(Middleware):
     async def __call__(self, request: Request, call_next: Callable) -> Response:
         """Execute custom middleware function."""
         return await self.func(request, call_next)
-
 
 
 class CSRFMiddleware(Middleware):

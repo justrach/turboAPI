@@ -1,6 +1,7 @@
 """
 Verified audit items — regression tests for issues resolved in the audit.
 """
+
 import os
 import random
 import sys
@@ -31,14 +32,15 @@ def _free_port():
 
 def test_verified_implicit_header_extraction():
     """
-    Issue #97: Implicit header-name mapping must populate plain handler params on Zig runtime.
+    Issue #132: TurboAPI extension for implicit header-name mapping on Zig runtime.
 
-    FastAPI maps snake_case param names to hyphenated HTTP headers:
+    This is intentionally beyond FastAPI's plain-string parameter behavior:
       authorization  -> Authorization
       x_request_id   -> X-Request-ID
     """
     if requests is None:
         import pytest
+
         pytest.skip("requests not installed")
 
     from turboapi import TurboAPI
@@ -78,6 +80,7 @@ def test_verified_gzip_passthrough_round_trip():
     """
     if requests is None:
         import pytest
+
         pytest.skip("requests not installed")
 
     from turboapi import TurboAPI

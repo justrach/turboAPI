@@ -19,7 +19,11 @@ sys.path.insert(0, "python")
 
 from dhi import BaseModel
 from turboapi import TurboAPI
-from turboapi.request_handler import create_fast_handler, create_fast_model_handler
+from turboapi.request_handler import (
+    create_fast_async_handler,
+    create_fast_handler,
+    create_fast_model_handler,
+)
 from turboapi.zig_integration import classify_handler
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -158,6 +162,25 @@ def test_fast_handler_http_exception_returns_tuple():
 
     data = json.loads(result[2])
     assert data["detail"] == "not found"
+
+
+def test_fast_async_handler_eager_returns_tuple_from_body():
+    """No-await async body handler can resolve through eager tuple path."""
+
+    async def handler(name: str, n: int):
+        return {"name": name, "n": n}
+
+    route = FakeRoute("POST")
+    h = create_fast_async_handler(handler, route, eager=True)
+    result = h(path_params={}, query_string="", headers={}, body=b'{"name":"bob","n":123}')
+
+    assert isinstance(result, tuple) and len(result) == 3
+    assert result[0] == 200
+
+    import json
+
+    data = json.loads(result[2])
+    assert data == {"name": "bob", "n": 123}
 
 
 def test_fast_handler_exception_returns_500_tuple():

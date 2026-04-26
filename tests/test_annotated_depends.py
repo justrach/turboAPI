@@ -1,4 +1,5 @@
 """Test Annotated[Type, Depends(...)] pattern — issue #51."""
+
 from typing import Annotated
 
 from turboapi import TurboAPI

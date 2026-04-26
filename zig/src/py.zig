@@ -112,6 +112,7 @@ pub extern fn PyInterpreterState_Get() ?*anyopaque;
 
 // Fast call API — avoids arg tuple/dict construction for simple cases.
 pub extern fn PyObject_CallNoArgs(callable: *c.PyObject) ?*c.PyObject;
+pub extern fn PyObject_CallOneArg(callable: *c.PyObject, arg: *c.PyObject) ?*c.PyObject;
 pub extern fn PyObject_Vectorcall(
     callable: *c.PyObject,
     args: [*]const ?*c.PyObject,

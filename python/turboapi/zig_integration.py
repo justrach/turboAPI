@@ -4,6 +4,7 @@ Connects FastAPI-compatible routing directly to Zig HTTP core with zero overhead
 Phase 3: Handler classification for fast dispatch (bypass Python enhanced wrapper).
 """
 
+import dis
 import inspect
 import json
 import os
@@ -19,11 +20,107 @@ from .main_app import TurboAPI
 from .models import Request, Response
 from .request_handler import (
     create_enhanced_handler,
+    create_fast_async_handler,
     create_fast_handler,
     create_fast_model_handler,
     create_pos_handler,
 )
 from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
+
+_ASYNC_YIELD_OPS = {
+    "ASYNC_GEN_WRAP",
+    "BEFORE_ASYNC_WITH",
+    "END_ASYNC_FOR",
+    "GET_AITER",
+    "GET_ANEXT",
+    "GET_AWAITABLE",
+    "SEND",
+    "YIELD_FROM",
+    "YIELD_VALUE",
+}
+_ASYNC_LOOP_NAMES = {
+    "TaskGroup",
+    "all_tasks",
+    "asyncio",
+    "create_task",
+    "current_task",
+    "get_event_loop",
+    "get_running_loop",
+    "run_coroutine_threadsafe",
+    "to_thread",
+}
+_ASYNCIO_SENSITIVE_CALLABLES = _ASYNC_LOOP_NAMES | {
+    "as_completed",
+    "gather",
+    "shield",
+    "sleep",
+    "wait",
+    "wait_for",
+}
+
+
+def _is_asyncio_sensitive_object(obj) -> bool:
+    obj_name = getattr(obj, "__name__", "")
+    if obj_name == "asyncio":
+        return True
+    obj_module = getattr(obj, "__module__", "")
+    return obj_name in _ASYNCIO_SENSITIVE_CALLABLES and obj_module.startswith(
+        ("asyncio", "_asyncio")
+    )
+
+
+def _function_uses_async_features(fn, seen: set[int] | None = None, depth: int = 0) -> bool:
+    if seen is None:
+        seen = set()
+    fn_id = id(fn)
+    if fn_id in seen:
+        return False
+    seen.add(fn_id)
+
+    try:
+        code = fn.__code__
+    except AttributeError:
+        return False
+
+    if set(code.co_names) & _ASYNC_LOOP_NAMES:
+        return True
+    if any(instr.opname in _ASYNC_YIELD_OPS for instr in dis.get_instructions(fn)):
+        return True
+
+    # Keep the eager path away from simple helper calls that touch the running
+    # loop, even when the top-level handler itself has no asyncio names.
+    if depth >= 2:
+        return False
+
+    globals_ns = getattr(fn, "__globals__", {})
+    closure_ns = {}
+    closure = getattr(fn, "__closure__", None)
+    if closure:
+        for name, cell in zip(code.co_freevars, closure, strict=False):
+            try:
+                closure_ns[name] = cell.cell_contents
+            except ValueError:
+                pass
+
+    for instr in dis.get_instructions(fn):
+        obj = None
+        if instr.opname in ("LOAD_GLOBAL", "LOAD_NAME"):
+            obj = globals_ns.get(instr.argval)
+        elif instr.opname in ("LOAD_DEREF", "LOAD_CLOSURE"):
+            obj = closure_ns.get(instr.argval)
+        if _is_asyncio_sensitive_object(obj):
+            return True
+        if inspect.isfunction(obj) and _function_uses_async_features(obj, seen, depth + 1):
+            return True
+
+    return False
+
+
+def _is_no_await_async_handler(handler) -> bool:
+    try:
+        return not _function_uses_async_features(handler)
+    except (AttributeError, TypeError):
+        return False
 
 
 def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
@@ -31,7 +128,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
 
     Returns:
         (handler_type, param_types, model_info) where:
-        - handler_type: "simple_sync" | "body_sync" | "model_sync" | "form_sync" | "file_sync" | "simple_async" | "body_async" | "enhanced"
+        - handler_type: "simple_sync" | "body_sync" | "model_sync" | "form_sync" | "file_sync" | "simple_async" | "simple_async_eager" | "body_async" | "body_async_eager" | "enhanced"
         - param_types: dict mapping param_name -> type hint string
         - model_info: dict with "param_name" and "model_class" for model handlers
     """
@@ -133,13 +230,22 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
         if method in ("POST", "PUT", "PATCH", "DELETE"):
             return "model_sync", param_types, model_info
 
+    # Header-like default string params require the enhanced parser on routes
+    # that would otherwise use positional-only Zig dispatch.
+    if has_implicit_header_params and method not in ("POST", "PUT", "PATCH", "DELETE"):
+        return "enhanced", param_types, {}
+
     # Async handlers - async fast paths
     if is_async:
         if method in ("POST", "PUT", "PATCH", "DELETE"):
             if needs_body:
                 # Complex body types still need enhanced path
                 return "enhanced", param_types, {}
+            if _is_no_await_async_handler(handler):
+                return "body_async_eager", param_types, {}
             return "body_async", param_types, {}
+        if _is_no_await_async_handler(handler):
+            return "simple_async_eager", param_types, {}
         return "simple_async", param_types, {}
 
     # Sync handlers - Phase 3 sync fast paths
@@ -147,11 +253,6 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
         if needs_body:
             return "enhanced", param_types, {}
         return "body_sync", param_types, {}
-
-    # GET handlers with optional str params may use implicit header mapping —
-    # the Zig vectorcall path doesn't inspect headers, so use the enhanced path.
-    if has_implicit_header_params:
-        return "enhanced", param_types, {}
 
     # Zero-arg GET: use the PyObject_CallNoArgs fast path in Zig
     if not param_types:
@@ -677,6 +778,15 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 try:
                     mw.before_request(request)
                 except Exception as e:
+                    redirect_url = getattr(e, "url", None)
+                    if redirect_url:
+                        safe_location = _sanitize_header_component(str(redirect_url))
+                        return {
+                            "content": "",
+                            "status_code": 307,
+                            "content_type": f"text/plain\r\nLocation: {safe_location}",
+                        }
+
                     # Use status_code from HTTPException if available, else 500
                     status = getattr(e, "status_code", 500)
                     return {
@@ -881,22 +991,48 @@ class ZigIntegratedTurboAPI(TurboAPI):
                         route.handler,
                     )
                     print(f"{CHECK_MARK} [{registered_type}] {route.method.value} {route.path}")
-                elif handler_type in ("simple_async", "body_async"):
+                elif handler_type in (
+                    "simple_async",
+                    "simple_async_eager",
+                    "body_async",
+                    "body_async_eager",
+                ):
                     # ASYNC FAST PATH: Register with async runtime
-                    enhanced_handler = create_enhanced_handler(route.handler, route)
                     if self._middleware_instances:
+                        enhanced_handler = create_enhanced_handler(route.handler, route)
                         enhanced_handler = self._wrap_with_middleware(enhanced_handler)
-                    param_types_json = json.dumps(param_types)
+                        registered_type = "enhanced"
+                        param_meta_str = "{}"
+                    elif handler_type in ("simple_async", "simple_async_eager"):
+                        enhanced_handler = route.handler
+                        registered_type = handler_type
+                        sig = inspect.signature(route.handler)
+                        meta_parts = []
+                        for n, t in param_types.items():
+                            param = sig.parameters.get(n)
+                            is_opt = (
+                                param is not None and param.default is not inspect.Parameter.empty
+                            )
+                            meta_parts.append(f"{n}:{t}{'?' if is_opt else ''}")
+                        param_meta_str = "|".join(meta_parts)
+                    else:
+                        enhanced_handler = create_fast_async_handler(
+                            route.handler,
+                            route,
+                            eager=handler_type == "body_async_eager",
+                        )
+                        registered_type = handler_type
+                        param_meta_str = json.dumps(param_types)
 
                     self.zig_server.add_route_async_fast(
                         route.method.value,
                         route.path,
-                        enhanced_handler,  # Fallback wrapper
-                        handler_type,
-                        param_types_json,
+                        enhanced_handler,
+                        registered_type,
+                        param_meta_str,
                         route.handler,  # Original async handler
                     )
-                    print(f"{CHECK_MARK} [{handler_type}] {route.method.value} {route.path}")
+                    print(f"{CHECK_MARK} [{registered_type}] {route.method.value} {route.path}")
                 elif handler_type in ("form_sync", "file_sync"):
                     # FORM/FILE PATH: Enhanced handler with dedicated Zig dispatch
                     # Zig skips DHI validation and parses multipart/urlencoded natively

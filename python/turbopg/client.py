@@ -6,7 +6,6 @@ and result serialization. Can be used standalone without TurboAPI.
 """
 
 
-
 class Database:
     """Zig-native Postgres connection pool.
 
@@ -134,6 +133,7 @@ class Database:
             "Install it: pip install psycopg2-binary\n"
             "For zero-overhead queries, use TurboAPI's db_query/db_get decorators instead."
         )
+
     def _execute_native(self, sql: str, params: list) -> int:
         if hasattr(self._native, "_db_exec_raw"):
             return self._native._db_exec_raw(sql, params)
@@ -162,7 +162,10 @@ class Database:
                     columns = [desc[0] for desc in cur.description]
                     rows = cur.fetchall()
                     return [
-                        {col: self._serialize_value(val) for col, val in zip(columns, row, strict=False)}
+                        {
+                            col: self._serialize_value(val)
+                            for col, val in zip(columns, row, strict=False)
+                        }
                         for row in rows
                     ]
                 return []
@@ -179,7 +182,10 @@ class Database:
                     columns = [desc.name for desc in cur.description]
                     rows = cur.fetchall()
                     return [
-                        {col: self._serialize_value(val) for col, val in zip(columns, row, strict=False)}
+                        {
+                            col: self._serialize_value(val)
+                            for col, val in zip(columns, row, strict=False)
+                        }
                         for row in rows
                     ]
                 return []

@@ -508,6 +508,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against a PBKDF2-HMAC-SHA256 hash."""
     import hashlib
     import secrets
+
     try:
         algorithm, iterations_str, salt_b64, hash_b64 = hashed_password.split("$")
         if algorithm != "pbkdf2-sha256":
@@ -519,14 +520,19 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return secrets.compare_digest(digest, expected)
     except Exception:
         return False
+
+
 def get_password_hash(password: str) -> str:
     """Hash a password using PBKDF2-HMAC-SHA256."""
     import hashlib
     import os
+
     iterations = 260_000
     salt = os.urandom(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
     return f"pbkdf2-sha256${iterations}${salt.hex()}${digest.hex()}"
+
+
 # ============================================================================
 # Dependency Injection Helper
 # ============================================================================
@@ -550,7 +556,6 @@ class Depends:
         self.use_cache = use_cache
 
 
-
 def get_depends(param: inspect.Parameter) -> Depends | None:
     """Extract a Depends instance from a parameter — supports both patterns:
 
@@ -572,6 +577,8 @@ def get_depends(param: inspect.Parameter) -> Depends | None:
         if isinstance(metadata, Depends):
             return metadata
     return None
+
+
 class Security(Depends):
     """
     Security dependency with scopes (compatible with FastAPI).

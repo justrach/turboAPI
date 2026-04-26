@@ -9,6 +9,7 @@ import pytest
 
 # ── Bug #10: RateLimitMiddleware thread safety ──────────────────────────────
 
+
 def test_rate_limiter_has_lock():
     """Bug #10: RateLimitMiddleware.requests dict must be guarded by a lock."""
     from turboapi.middleware import RateLimitMiddleware
@@ -52,6 +53,7 @@ def test_rate_limiter_thread_safe():
 
 # ── Bug #9: RateLimitMiddleware prefers X-Real-IP ───────────────────────────
 
+
 def test_rate_limiter_prefers_x_real_ip():
     """Bug #9: Should prefer X-Real-IP over X-Forwarded-For when peer is trusted."""
     from turboapi.middleware import RateLimitMiddleware
@@ -76,7 +78,9 @@ def test_rate_limiter_prefers_x_real_ip():
     req3.client_addr = "127.0.0.1"
     rl.before_request(req3)  # should not raise
 
+
 # ── Bug #12: CORS wildcard + credentials ────────────────────────────────────
+
 
 def test_cors_wildcard_credentials_raises():
     """Bug #12: CORSMiddleware must reject allow_credentials=True with wildcard origin."""
@@ -107,6 +111,7 @@ def test_cors_explicit_origin_with_credentials_ok():
 
 # ── Bug #11: Password hash placeholder ──────────────────────────────────────
 
+
 def test_get_password_hash_raises():
     """Bug #11: get_password_hash now returns a real hash (not plaintext)."""
     from turboapi.security import get_password_hash
@@ -114,6 +119,8 @@ def test_get_password_hash_raises():
     h = get_password_hash("secret123")
     assert h != "secret123", "must not return plaintext"
     assert "pbkdf2" in h, "must use pbkdf2"
+
+
 def test_verify_password_raises():
     """Bug #11: verify_password now works correctly (returns bool, not raises)."""
     from turboapi.security import get_password_hash, verify_password
@@ -138,8 +145,11 @@ def test_top_level_hash_and_verify_password_work_together():
     hashed = hash_password("secret123")
     assert verify_password("secret123", hashed) is True
     assert verify_password("wrong", hashed) is False
+
+
 # ── Bug #5: Port range validation ───────────────────────────────────────────
 # (Zig-side — tested via integration; can't unit test @intCast directly)
+
 
 def test_port_validation_documented():
     """Bug #5: SECURITY.md must document port range validation fix."""
@@ -150,6 +160,7 @@ def test_port_validation_documented():
 
 # ── Bug #1: setError null terminator ────────────────────────────────────────
 
+
 def test_seterror_fix_documented():
     """Bug #1: SECURITY.md must document bufPrintZ fix."""
     with open("SECURITY.md") as f:
@@ -159,6 +170,7 @@ def test_seterror_fix_documented():
 
 # ── Bug #2: Dangling pointers ──────────────────────────────────────────────
 
+
 def test_dangling_pointer_fix_documented():
     """Bug #2: SECURITY.md must document allocator.dupe fix."""
     with open("SECURITY.md") as f:
@@ -167,6 +179,7 @@ def test_dangling_pointer_fix_documented():
 
 
 # ── Slowloris protection ────────────────────────────────────────────────────
+
 
 def test_slowloris_protection_documented():
     """Slowloris: SECURITY.md must document read timeout mitigation."""

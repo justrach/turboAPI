@@ -1,6 +1,11 @@
-# WebSocket Support in TurboAPI
+# WebSocket Status in TurboAPI
 
-TurboAPI provides WebSocket support for real-time bidirectional communication.
+TurboAPI currently exposes provisional Python WebSocket API objects and route
+registration, but the Zig HTTP runtime does not yet implement real WebSocket
+upgrade handling, frame parsing, or live connection wiring.
+
+The examples below describe the intended API shape. They should not be treated
+as production-ready runtime support until issue `#114` is implemented and tested.
 
 ## Quick Start
 
@@ -118,11 +123,10 @@ async def broadcast_handler(websocket):
         connected_clients.remove(websocket)
 ```
 
-## Zig Integration
+## Zig Runtime Status
 
-TurboAPI's WebSocket support is planned for the Zig backend:
-
-WebSocket support is planned for the Zig HTTP core (Issue #24).
+WebSocket support is planned for the Zig HTTP core. The remaining runtime work
+is tracked in issue `#114`.
 
 ## Performance Tips
 

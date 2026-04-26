@@ -14,7 +14,13 @@ import time
 import pytest
 import requests
 from turboapi import TurboAPI
-from turboapi.middleware import CORSMiddleware, GZipMiddleware, LoggingMiddleware
+from turboapi.middleware import (
+    CORSMiddleware,
+    GZipMiddleware,
+    HTTPSRedirectMiddleware,
+    LoggingMiddleware,
+    Middleware,
+)
 
 
 def _free_port() -> int:
@@ -22,6 +28,7 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
 
 def _start(app, port):
     t = threading.Thread(target=lambda: app.run(host="127.0.0.1", port=port), daemon=True)
@@ -134,14 +141,13 @@ def gzip_app():
     return f"http://127.0.0.1:{port}"
 
 
-@pytest.mark.xfail(reason="Requires middleware header/body passthrough (PR #55)")
 def test_gzip_middleware_compat(gzip_app):
     """GZip middleware must correctly compress and return 200."""
     r = requests.get(f"{gzip_app}/large", headers={"Accept-Encoding": "gzip"})
     assert r.status_code == 200, r.text
     assert r.headers.get("Content-Encoding") == "gzip"
 
-@pytest.mark.xfail(reason="Requires middleware header/body passthrough (PR #55)")
+
 def test_gzip_body_is_actually_compressed(gzip_app):
     """The body must actually be gzip-compressed bytes, not original JSON.
     Decompress and verify the data survived the round trip."""
@@ -176,7 +182,9 @@ def test_no_middleware_body_unchanged():
     _start(app, port)
     r = requests.get(f"http://127.0.0.1:{port}/raw")
     assert r.status_code == 200
-    assert r.json() == {"exact": "value", "number": 42}, f"Body mutated without middleware: {r.json()}"
+    assert r.json() == {"exact": "value", "number": 42}, (
+        f"Body mutated without middleware: {r.json()}"
+    )
 
 
 def test_async_handler_under_middleware():
@@ -234,5 +242,62 @@ def test_stacked_middleware_all_headers_present():
     _start(app, port)
     r = requests.get(f"http://127.0.0.1:{port}/multi")
     assert r.status_code == 200
-    assert r.headers.get("Access-Control-Allow-Origin") is not None, "CORS header missing after stacking"
+    assert r.headers.get("Access-Control-Allow-Origin") is not None, (
+        "CORS header missing after stacking"
+    )
     assert r.json()["stacked"] is True
+
+
+def test_https_redirect_middleware_runtime_redirect():
+    """HTTPSRedirectMiddleware should return a redirect, not a 500 error."""
+    app = TurboAPI()
+    app.add_middleware(HTTPSRedirectMiddleware)
+
+    @app.get("/secure")
+    def secure():
+        return {"secure": True}
+
+    port = _free_port()
+    _start(app, port)
+    r = requests.get(
+        f"http://127.0.0.1:{port}/secure?x=1",
+        headers={"Host": "example.test"},
+        allow_redirects=False,
+    )
+
+    assert r.status_code == 307
+    assert r.headers.get("Location") == "https://example.test/secure?x=1"
+
+
+def test_custom_logging_style_middleware_runtime_hooks():
+    """A custom logging-style middleware should run before and after the handler."""
+
+    class CaptureLoggingMiddleware(Middleware):
+        calls: list[tuple[str, str, int]] = []
+
+        def before_request(self, request):
+            request._seen_by_custom_logging = True
+
+        def after_request(self, request, response):
+            assert getattr(request, "_seen_by_custom_logging", False) is True
+            self.calls.append((request.method, request.path, response.status_code))
+            response.set_header("X-Custom-Logged", "yes")
+            return response
+
+    CaptureLoggingMiddleware.calls.clear()
+
+    app = TurboAPI()
+    app.add_middleware(CaptureLoggingMiddleware)
+
+    @app.get("/logged")
+    def logged():
+        return {"logged": True}
+
+    port = _free_port()
+    _start(app, port)
+    r = requests.get(f"http://127.0.0.1:{port}/logged")
+
+    assert r.status_code == 200
+    assert r.headers.get("X-Custom-Logged") == "yes"
+    assert r.json() == {"logged": True}
+    assert CaptureLoggingMiddleware.calls == [("GET", "/logged", 200)]

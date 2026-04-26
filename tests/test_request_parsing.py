@@ -10,14 +10,8 @@ import json
 import threading
 import time
 
-import pytest
 import requests
 from turboapi import TurboAPI
-
-# Mark tests that require header extraction feature (not yet implemented)
-HEADER_EXTRACTION = pytest.mark.xfail(
-    reason="Header extraction from parameter names not yet implemented - requires Header() annotation"
-)
 
 
 def test_query_parameters():
@@ -150,7 +144,6 @@ def test_path_parameters():
     print("\n✅ ALL PATH PARAM TESTS PASSED!")
 
 
-@HEADER_EXTRACTION
 def test_headers():
     """Test header parsing and extraction"""
     print("\n" + "=" * 70)
@@ -222,7 +215,6 @@ def test_headers():
     print("\n✅ ALL HEADER TESTS PASSED!")
 
 
-@HEADER_EXTRACTION
 def test_combined_parameters():
     """Test combining query params, path params, headers, and body"""
     print("\n" + "=" * 70)
