@@ -43,15 +43,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            python: '3.13'
-          - os: ubuntu-latest
-            python: '3.14'
-          - os: ubuntu-latest
             python: '3.14t'
-          - os: macos-latest
-            python: '3.13'
-          - os: macos-latest
-            python: '3.14'
           - os: macos-latest
             python: '3.14t'
       fail-fast: false
@@ -78,7 +70,8 @@ jobs:
           # --no-isolation so the .so installed by build_turbonet.py is included
           python -m build --wheel --no-isolation --outdir dist-tmp/
           # Re-tag as platform-specific (contains compiled .so)
-          PYTAG=$(python -c "import sys; ft='t' if hasattr(sys,'_is_gil_enabled') and not sys._is_gil_enabled() else ''; print(f'cp{sys.version_info.major}{sys.version_info.minor}{ft}')")
+          PYTAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          ABITAG=$(python -c "import sys; ft='t' if hasattr(sys,'_is_gil_enabled') and not sys._is_gil_enabled() else ''; print(f'cp{sys.version_info.major}{sys.version_info.minor}{ft}')")
           PLAT=$(python -c "
           import sysconfig, platform
           p = sysconfig.get_platform().replace('-','_').replace('.','_')
@@ -87,8 +80,43 @@ jobs:
               p = f'manylinux_2_17_{arch}.manylinux2014_{arch}'
           print(p)
           ")
-          python -m wheel tags --python-tag=$PYTAG --abi-tag=$PYTAG --platform-tag=$PLAT --remove dist-tmp/*.whl
+          python -m wheel tags --python-tag=$PYTAG --abi-tag=$ABITAG --platform-tag=$PLAT --remove dist-tmp/*.whl
           mkdir -p dist && mv dist-tmp/*.whl dist/
+
+      - name: Verify wheel can import native backend
+        run: |
+          python -m venv /tmp/turboapi-wheel-smoke
+          /tmp/turboapi-wheel-smoke/bin/python -m pip install dist/*.whl
+          /tmp/turboapi-wheel-smoke/bin/python - <<'PY'
+          import turboapi.turbonet as turbonet
+
+          assert hasattr(turbonet, "TurboServer")
+          assert hasattr(turbonet, "ResponseView")
+          print("native backend import ok")
+          PY
+
+      - name: Verify macOS wheel has no Python framework dependency
+        if: runner.os == 'macOS'
+        run: |
+          python - <<'PY'
+          import pathlib
+          import subprocess
+          import zipfile
+
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          extract_dir = pathlib.Path("/tmp/turboapi-wheel-linkcheck")
+          if extract_dir.exists():
+              import shutil
+              shutil.rmtree(extract_dir)
+          with zipfile.ZipFile(wheel) as zf:
+              zf.extractall(extract_dir)
+          extensions = list(extract_dir.glob("turboapi/turbonet*.so"))
+          assert extensions, "turbonet extension missing from wheel"
+          output = subprocess.check_output(["otool", "-L", str(extensions[0])], text=True)
+          print(output)
+          assert "Python.framework" not in output
+          assert "PythonT.framework" not in output
+          PY
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4

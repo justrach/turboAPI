@@ -71,10 +71,13 @@ pub fn build(b: *std.Build) void {
     lib.root_module.addIncludePath(.{ .cwd_relative = include_path });
     lib.root_module.addRPathSpecial("@loader_path");
 
+    // Python extension modules should resolve Python API symbols from the
+    // running interpreter at import time. Linking libpython into release wheels
+    // can bake in non-portable paths such as macOS framework locations.
+    lib.linker_allow_shlib_undefined = true;
+
     if (is_free_threaded) {
-        // Free-threaded: link libpython + atomic shim
-        lib.root_module.addLibraryPath(.{ .cwd_relative = lib_path });
-        lib.root_module.linkSystemLibrary(py_lib_name, .{});
+        // Free-threaded: include atomic/GIL shims, but do not link libpython.
         lib.root_module.addCSourceFile(.{
             .file = b.path("src/py_atomic_shim.c"),
             .flags = &.{ "-I", include_path },
@@ -84,8 +87,7 @@ pub fn build(b: *std.Build) void {
             .flags = &.{ "-I", include_path },
         });
     } else {
-        // Standard: allow undefined (symbols resolve at import time)
-        lib.linker_allow_shlib_undefined = true;
+        // Standard: symbols resolve at import time.
         lib.root_module.addCSourceFile(.{
             .file = b.path("src/py_gil_shim.c"),
             .flags = &.{ "-I", include_path },
