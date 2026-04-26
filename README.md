@@ -1,4 +1,8 @@
 <p align="center">
+  <a href="https://trendshift.io/repositories/23663" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/23663" alt="justrach%2FturboAPI | Trendshift" style="width: 250px; height: 55px;" width="250" height="55" /></a>
+</p>
+
+<p align="center">
   <img src="assets/turbito.png" alt="TurboAPI" width="200" />
 </p>
 
@@ -9,10 +13,6 @@
   <img src="https://img.shields.io/badge/zig-0.16.0-f7a41d?style=flat-square" alt="Zig 0.16.0" />
   <img src="https://img.shields.io/badge/status-alpha-orange?style=flat-square" alt="Alpha" />
   <a href="https://deepwiki.com/justrach/turboAPI"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" /></a>
-</p>
-
-<p align="center">
-  <a href="https://trendshift.io/repositories/23663" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/23663" alt="justrach%2FturboAPI | Trendshift" style="width: 250px; height: 55px;" width="250" height="55" /></a>
 </p>
 
 <h1 align="center">TurboAPI</h1>
