@@ -1,0 +1,5 @@
+# Built artifacts and per-iter bench outputs
+zig-out/
+.zig-cache/
+zig-pkg/
+results/

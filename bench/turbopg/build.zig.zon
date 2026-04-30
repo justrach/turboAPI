@@ -1,0 +1,11 @@
+.{
+    .name = .turbopg_bench,
+    .version = "0.0.0",
+    .fingerprint = 0x86359a9f291096a0,
+    .paths = .{""},
+    .dependencies = .{
+        .pg = .{
+            .path = "../../zig/pg",
+        },
+    },
+}
