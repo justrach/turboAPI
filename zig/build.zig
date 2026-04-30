@@ -14,6 +14,18 @@ pub fn build(b: *std.Build) void {
     const lib_path = b.option([]const u8, "py-libdir", "Python lib path (required)") orelse
         @panic("pass -Dpy-libdir=<path> or use: python zig/build_turbonet.py");
 
+    // ── Optional Linux io_uring accept loop ──
+    // -Diouring=true enables IORING_OP_ACCEPT_MULTISHOT on the listen socket
+    // and dispatches accepted fds onto the existing thread pool. No-op on
+    // non-Linux targets even when set. Off by default; the per-connection
+    // recv/send fast path is *not* on io_uring yet — see zig/src/iouring.zig
+    // for the staged plan.
+    const iouring_enabled = b.option(bool, "iouring", "Enable Linux io_uring accept loop (Linux only, off by default)") orelse false;
+
+    const turbo_options = b.addOptions();
+    turbo_options.addOption(bool, "iouring_enabled", iouring_enabled);
+    const turbo_options_mod = turbo_options.createModule();
+
     const py_lib_name: []const u8 = if (is_free_threaded)
         "python3.14t"
     else if (std.mem.eql(u8, py_version, "3.14"))
@@ -67,6 +79,7 @@ pub fn build(b: *std.Build) void {
     lib.root_module.addImport("model", model_mod);
     lib.root_module.addImport("pg", pg_mod);
     lib.root_module.addImport("turboapi-core", core_mod);
+    lib.root_module.addImport("turbo_build_options", turbo_options_mod);
 
     lib.root_module.addIncludePath(.{ .cwd_relative = include_path });
     lib.root_module.addRPathSpecial("@loader_path");
@@ -111,6 +124,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("model", model_mod);
     tests.root_module.addImport("pg", pg_mod);
     tests.root_module.addImport("turboapi-core", core_mod);
+    tests.root_module.addImport("turbo_build_options", turbo_options_mod);
     tests.root_module.addIncludePath(.{ .cwd_relative = include_path });
     tests.root_module.addLibraryPath(.{ .cwd_relative = lib_path });
     tests.root_module.linkSystemLibrary(py_lib_name, .{});

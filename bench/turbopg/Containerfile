@@ -1,0 +1,25 @@
+# Build + run the turbopg driver-only A/B bench against a Postgres 18
+# container. Per AGENTS.md: results from this container are NOT suitable
+# for release notes or comparison tables.
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/opt/zig:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl xz-utils postgresql-client python3 \
+ && rm -rf /var/lib/apt/lists/*
+
+# Zig 0.16.0 aarch64-linux (matches host arch in apple/container on M-series).
+RUN mkdir -p /opt && cd /opt \
+ && curl -fsSL https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz -o zig.tar.xz \
+ && tar -xJf zig.tar.xz \
+ && mv zig-aarch64-linux-0.16.0 zig \
+ && rm zig.tar.xz
+
+WORKDIR /work
+
+COPY run.sh /usr/local/bin/run.sh
+RUN chmod +x /usr/local/bin/run.sh
+
+ENTRYPOINT ["/usr/local/bin/run.sh"]

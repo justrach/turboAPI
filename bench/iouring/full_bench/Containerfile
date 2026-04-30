@@ -1,0 +1,42 @@
+# Linux io_uring vs blocking-accept benchmark image for TurboAPI.
+# Builds the Zig extension twice (once with -Diouring=true, once without),
+# runs the same TurboAPI app under each, and drives wrk against it from
+# inside the same container.
+#
+# Honest scope: the ONLY thing that differs between the two builds in the
+# current PR (#144) is the accept loop. Per-connection recv/send still goes
+# through the same thread-pool synchronous syscalls. Treat the deltas
+# accordingly.
+
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/root/.local/bin:/opt/zig:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl xz-utils build-essential pkg-config \
+    git wrk \
+ && rm -rf /var/lib/apt/lists/*
+
+# Install Zig 0.16.0 (aarch64-linux).
+RUN mkdir -p /opt && cd /opt \
+ && curl -fsSL https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz -o zig.tar.xz \
+ && tar -xJf zig.tar.xz \
+ && mv zig-aarch64-linux-0.16.0 zig \
+ && rm zig.tar.xz
+
+# Install uv to fetch Python 3.14 free-threaded.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Pre-fetch Python 3.14t so the first run is fast.
+RUN /root/.local/bin/uv python install 3.14t
+
+WORKDIR /work
+
+# The repo will be bind-mounted at /work at run time. The driver script
+# (build_and_bench.sh) handles the per-build steps.
+COPY build_and_bench.sh /usr/local/bin/build_and_bench.sh
+COPY app.py /app/app.py
+RUN chmod +x /usr/local/bin/build_and_bench.sh
+
+ENTRYPOINT ["/usr/local/bin/build_and_bench.sh"]

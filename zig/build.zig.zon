@@ -7,8 +7,10 @@
             .hash = "dhi-0.1.0-Fz3bn1CFAwDexo2jviNTcIrQeJZ5TM6fCcHcdPIO2wK1",
         },
         .pg = .{
-            .url = "git+https://github.com/justrach/pg.zig?ref=master#7605502f24e348c50341cbdf84ac135613d512af",
-            .hash = "pg-0.0.0-Wp_7gYTxBgDOvvLXaKfiXksk9WArPQJWgY833oQjfk1y",
+            // Vendored from justrach/pg.zig (was a git+url dep) so we
+            // can stage an io_uring transport behind the Stream
+            // abstraction. See zig/pg/src/stream.zig.
+            .path = "pg",
         },
         .turboapi_core = .{
             .path = "../turboapi-core",

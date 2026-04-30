@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgis/postgis
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "postgres"
+      PGDATA: "/var/lib/postgresql/pgdata/"
+      LANG: "en_US.utf8"
+    ports:
+      - 5432:5432
+    volumes:
+      - "./root.crt:/etc/postgresql/root.crt:ro"
+      - "./server.crt:/etc/postgresql/server.crt:ro"
+      - "./server.key:/etc/postgresql/server.key:ro"
+      - "./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro"
+      - "./postgresql.conf:/etc/postgresql/postgresql.conf:ro"
+      - "./init_ssl.sql:/docker-entrypoint-initdb.d/init_ssl.sql:ro"
+    command:
+      - "postgres"
+      - "-c"
+      - "config_file=/etc/postgresql/postgresql.conf"
+      - "-c"
+      - "hba_file=/etc/postgresql/pg_hba.conf"
+
