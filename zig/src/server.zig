@@ -13,6 +13,7 @@ const multipart_mod = @import("multipart.zig");
 const logger = @import("logger.zig");
 const runtime = @import("runtime.zig");
 const telemetry = @import("telemetry.zig");
+const iouring = @import("iouring.zig");
 
 const allocator = std.heap.c_allocator;
 const posix = std.posix;
@@ -1065,13 +1066,62 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     // Release the GIL — workers acquire it per-request via AcquireThread.
     const save = py.PyEval_SaveThread();
 
-    while (true) {
-        const stream = tcp_server.accept(runtime.io) catch continue;
-        pool.queue.push(stream);
+    if (iouring.enabled()) {
+        runIoUringAcceptLoop(&tcp_server) catch |err| {
+            // Fall back to the blocking accept path if the io_uring setup
+            // failed at runtime (kernel < 5.19, io_uring disabled, etc.).
+            logger.warn("[iouring] accept loop unavailable ({s}); falling back to blocking accept", .{@errorName(err)});
+            runBlockingAcceptLoop(&tcp_server);
+        };
+    } else {
+        runBlockingAcceptLoop(&tcp_server);
     }
 
     py.PyEval_RestoreThread(save);
     return py.pyNone();
+}
+
+fn runBlockingAcceptLoop(tcp_server: *std.Io.net.Server) void {
+    while (true) {
+        const stream = tcp_server.accept(runtime.io) catch continue;
+        pool.queue.push(stream);
+    }
+}
+
+/// Linux-only path. On other platforms `iouring.enabled()` is always false so
+/// this function is unreachable; we still compile-test it via a stub on
+/// non-Linux to keep the call site identical.
+fn runIoUringAcceptLoop(tcp_server: *std.Io.net.Server) !void {
+    if (!iouring.Available) return iouring.Error.NotEnabled;
+
+    // Pull the underlying listen fd out of std.Io.net.Server. The Server
+    // owns it; we only borrow it for the duration of the accept loop.
+    const listen_fd: posix.fd_t = tcp_server.socket.handle;
+    logger.info("[iouring] enabling IORING_OP_ACCEPT_MULTISHOT on fd={d}", .{listen_fd});
+
+    var loop = try iouring.Linux.AcceptLoop.init(
+        listen_fd,
+        iouringOnAccept,
+        @ptrCast(&pool),
+        iouring.DEFAULT_SQ_ENTRIES,
+    );
+    defer loop.deinit();
+
+    try loop.run();
+}
+
+/// Wrap a raw fd from io_uring back into a `std.Io.net.Stream` so the
+/// existing per-connection thread-pool code can consume it unchanged.
+fn iouringOnAccept(ctx: *anyopaque, fd: posix.fd_t) void {
+    const conn_pool: *ConnectionPool = @ptrCast(@alignCast(ctx));
+    const stream = std.Io.net.Stream{ .socket = .{
+        .handle = fd,
+        // peer address isn't reported by ACCEPT_MULTISHOT when we pass a
+        // null sockaddr; the existing handlers don't read it, so leave it
+        // zero rather than paying for getpeername(2) on the hot path.
+        .address = .{ .ip4 = std.Io.net.Ip4Address.unspecified(0) },
+    } };
+    conn_pool.queue.push(stream);
 }
 
 const HeaderList = std.ArrayListUnmanaged(HeaderPair);

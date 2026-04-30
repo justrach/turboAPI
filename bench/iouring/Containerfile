@@ -1,0 +1,11 @@
+# Linux smoke-test image for the io_uring AcceptLoop in zig/src/iouring.zig.
+#
+# Pre-built static aarch64-linux-musl binary; no compiler needed at image
+# time. Build the binary on the host first with:
+#   ./bench/iouring/build.sh
+FROM alpine:3.20
+
+COPY iouring_smoke /usr/local/bin/iouring_smoke
+RUN chmod +x /usr/local/bin/iouring_smoke
+
+ENTRYPOINT ["/usr/local/bin/iouring_smoke"]
