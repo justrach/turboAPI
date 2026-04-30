@@ -239,7 +239,8 @@ class PathParamParser:
 
     @staticmethod
     def extract_path_params(
-        route_pattern: str, actual_path: str, handler_signature: inspect.Signature | None = None
+        route_pattern: str, actual_path: str, handler_signature: inspect.Signature | None = None,
+        handler: Any | None = None,
     ) -> dict[str, Any]:
         """
         Extract path parameters from actual path using route pattern.
@@ -248,6 +249,7 @@ class PathParamParser:
             route_pattern: Route pattern with {param} placeholders (e.g., "/users/{user_id}")
             actual_path: Actual request path (e.g., "/users/123")
             handler_signature: Optional handler signature for type coercion
+            handler: Optional callable; used to resolve PEP 563 stringified annotations
 
         Returns:
             Dictionary of extracted path parameters (type-coerced if signature provided)
@@ -265,11 +267,32 @@ class PathParamParser:
 
         params = match.groupdict()
 
+        # Resolve stringified annotations so ``from __future__ import annotations``
+        # does not silently break type coercion below.
+        resolved_hints: dict[str, Any] = {}
+        if handler is not None:
+            try:
+                import typing as _typing
+
+                resolved_hints = _typing.get_type_hints(handler)
+            except Exception:
+                resolved_hints = {}
+
         # Coerce types based on handler signature annotations
         if handler_signature:
             for name, value in params.items():
                 if name in handler_signature.parameters:
-                    annotation = handler_signature.parameters[name].annotation
+                    annotation = resolved_hints.get(
+                        name, handler_signature.parameters[name].annotation
+                    )
+                    # Resolve raw string annotations to built-in types where possible.
+                    if isinstance(annotation, str):
+                        annotation = {
+                            "int": int,
+                            "float": float,
+                            "bool": bool,
+                            "str": str,
+                        }.get(annotation, annotation)
                     try:
                         if annotation is int:
                             params[name] = int(value)
@@ -785,6 +808,18 @@ def create_enhanced_handler(original_handler, route_definition):
     sig = inspect.signature(original_handler)
     is_async = inspect.iscoroutinefunction(original_handler)
 
+    # Resolve PEP 563 stringified annotations (``from __future__ import annotations``)
+    # so all downstream identity / isclass / issubclass checks see real types.
+    try:
+        import typing as _typing
+
+        _resolved_hints = _typing.get_type_hints(original_handler)
+    except Exception:
+        _resolved_hints = {}
+
+    def _ann(pname: str, param: inspect.Parameter):
+        return _resolved_hints.get(pname, param.annotation)
+
     # Pre-compile path param regex and type converters at registration time
     import re as _re
 
@@ -795,7 +830,7 @@ def create_enhanced_handler(original_handler, route_definition):
         if "{" in rp:
             _path_pattern = _re.compile("^" + _re.sub(r"\{(\w+)\}", r"(?P<\1>[^/]+)", rp) + "$")
         for pname, param in sig.parameters.items():
-            ann = param.annotation
+            ann = _ann(pname, param)
             if ann is int:
                 _path_param_types[pname] = int
             elif ann is float:
@@ -816,10 +851,10 @@ def create_enhanced_handler(original_handler, route_definition):
     _raw_body_param_names: set[str] = set()
     _request_param_names: set[str] = set()
     for _pname, _param in sig.parameters.items():
-        _ann = _param.annotation
-        if _ann is bytes or _ann is bytearray:
+        _a = _ann(_pname, _param)
+        if _a is bytes or _a is bytearray:
             _raw_body_param_names.add(_pname)
-        elif isinstance(_ann, type) and issubclass(_ann, _TurboRequest):
+        elif isinstance(_a, type) and issubclass(_a, _TurboRequest):
             _request_param_names.add(_pname)
     _skip_json_body = bool(_raw_body_param_names or _request_param_names)
 
@@ -1304,10 +1339,19 @@ def create_fast_handler(original_handler, route_definition):
     sig = inspect.signature(original_handler)
     param_names = set(sig.parameters.keys())
 
+    # Resolve stringified annotations (``from __future__ import annotations``) so
+    # path-param type coercion below still fires on ``get(item_id: int)`` etc.
+    try:
+        import typing as _typing
+
+        _hints = _typing.get_type_hints(original_handler)
+    except Exception:
+        _hints = {}
+
     # Pre-build type converters for path params
     _converters: dict[str, type] = {}
     for pname, param in sig.parameters.items():
-        ann = param.annotation
+        ann = _hints.get(pname, param.annotation)
         if ann is int:
             _converters[pname] = int
         elif ann is float:
@@ -1427,9 +1471,17 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
     sig = inspect.signature(original_handler)
     param_names = set(sig.parameters.keys())
 
+    # Resolve stringified annotations for ``from __future__ import annotations``.
+    try:
+        import typing as _typing
+
+        _hints = _typing.get_type_hints(original_handler)
+    except Exception:
+        _hints = {}
+
     _converters: dict[str, type] = {}
     for pname, param in sig.parameters.items():
-        ann = param.annotation
+        ann = _hints.get(pname, param.annotation)
         if ann is int:
             _converters[pname] = int
         elif ann is float:

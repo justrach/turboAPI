@@ -8,6 +8,7 @@ import dis
 import inspect
 import json
 import os
+import typing
 from typing import Any, get_origin
 
 try:
@@ -26,6 +27,57 @@ from .request_handler import (
     create_pos_handler,
 )
 from .version_check import CHECK_MARK, CROSS_MARK, ROCKET
+
+# ── PEP 563 helpers ──────────────────────────────────────────────────────────
+# Resolve stringified annotations produced by ``from __future__ import
+# annotations`` so identity checks like ``ann is int`` and ``inspect.isclass``
+# below keep working. See issue #142 (Bug 3).
+
+
+def _resolve_handler_hints(handler) -> dict[str, Any]:
+    """Resolve stringified annotations (PEP 563 / ``from __future__ import annotations``).
+
+    Returns a mapping of parameter name -> resolved type. Silently falls back to
+    ``inspect`` annotations (which may still be strings) if resolution fails —
+    callers that truly need the resolved type should guard identity checks with
+    :func:`_coerce_annotation`.
+    """
+    try:
+        return typing.get_type_hints(handler, include_extras=True)
+    except Exception:
+        out: dict[str, Any] = {}
+        try:
+            sig = inspect.signature(handler)
+        except (TypeError, ValueError):
+            return out
+        for name, param in sig.parameters.items():
+            if param.annotation is not inspect.Parameter.empty:
+                out[name] = param.annotation
+        return out
+
+
+_STR_TYPE_ALIASES: dict[str, Any] = {
+    "int": int,
+    "float": float,
+    "bool": bool,
+    "str": str,
+    "bytes": bytes,
+    "bytearray": bytearray,
+    "list": list,
+    "dict": dict,
+    "tuple": tuple,
+    "set": set,
+}
+
+
+def _coerce_annotation(annotation: Any) -> Any:
+    """Best-effort resolution for a single stringified annotation.
+
+    Only handles built-in type names; anything else is returned unchanged.
+    """
+    if isinstance(annotation, str):
+        return _STR_TYPE_ALIASES.get(annotation, annotation)
+    return annotation
 
 _ASYNC_YIELD_OPS = {
     "ASYNC_GEN_WRAP",
@@ -135,6 +187,15 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
     is_async = inspect.iscoroutinefunction(handler)
 
     sig = inspect.signature(handler)
+    # Resolve PEP 563 stringified annotations so identity checks below (``is int``,
+    # ``issubclass``, ``isclass`` …) work even when the handler's module uses
+    # ``from __future__ import annotations``.
+    _resolved_hints = _resolve_handler_hints(handler)
+
+    def _ann_of(p_name: str, param: inspect.Parameter) -> Any:
+        ann = _resolved_hints.get(p_name, param.annotation)
+        return _coerce_annotation(ann)
+
     param_types = {}
     needs_body = False
     has_depends = False
@@ -161,14 +222,15 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
         from .datastructures import File, Form, UploadFile
 
         for pname, param in sig.parameters.items():
+            ann = _ann_of(pname, param)
             if isinstance(param.default, Form):
                 has_form = True
                 param_types[pname] = "form"
             elif isinstance(param.default, File):
                 has_file = True
                 param_types[pname] = "file"
-            elif param.annotation is UploadFile or (
-                isinstance(param.annotation, type) and issubclass(param.annotation, UploadFile)
+            elif ann is UploadFile or (
+                isinstance(ann, type) and issubclass(ann, UploadFile)
             ):
                 has_file = True
                 param_types[pname] = "file"
@@ -177,7 +239,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
 
     has_implicit_header_params = False
     for param_name, param in sig.parameters.items():
-        annotation = param.annotation
+        annotation = _ann_of(param_name, param)
 
         if param_types.get(param_name) in ("form", "file"):
             needs_body = True
