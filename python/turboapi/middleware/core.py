@@ -89,6 +89,15 @@ class CORSMiddleware(Middleware):
         self.expose_headers = expose_headers or []
         self.max_age = max_age
 
+        # Cache joined strings + max_age stringification for after_request().
+        # The underlying lists/int are immutable after __init__, so building
+        # these values per response is wasted work on every CORS-enabled
+        # response.
+        self._allow_methods_str = ", ".join(self.allow_methods)
+        self._allow_headers_str = ", ".join(self.allow_headers)
+        self._expose_headers_str = ", ".join(self.expose_headers) if self.expose_headers else ""
+        self._max_age_str = str(self.max_age)
+
     def before_request(self, request: Request) -> None:
         """Handle preflight OPTIONS requests."""
         if request.method == "OPTIONS":
@@ -107,20 +116,18 @@ class CORSMiddleware(Middleware):
         elif origin in self.allow_origins:
             response.set_header("Access-Control-Allow-Origin", origin)
 
-        response.set_header("Access-Control-Allow-Methods", ", ".join(self.allow_methods))
-        response.set_header("Access-Control-Allow-Headers", ", ".join(self.allow_headers))
+        response.set_header("Access-Control-Allow-Methods", self._allow_methods_str)
+        response.set_header("Access-Control-Allow-Headers", self._allow_headers_str)
 
-        if self.expose_headers:
-            response.set_header("Access-Control-Expose-Headers", ", ".join(self.expose_headers))
+        if self._expose_headers_str:
+            response.set_header("Access-Control-Expose-Headers", self._expose_headers_str)
 
         if self.allow_credentials:
             response.set_header("Access-Control-Allow-Credentials", "true")
 
-        response.set_header("Access-Control-Max-Age", str(self.max_age))
+        response.set_header("Access-Control-Max-Age", self._max_age_str)
 
         return response
-
-
 class TrustedHostMiddleware(Middleware):
     """
     Trusted Host middleware - prevents HTTP Host Header attacks.
