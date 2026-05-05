@@ -8,6 +8,9 @@ import inspect
 import json
 import typing
 import urllib.parse
+from urllib.parse import parse_qs
+
+from turboapi.exceptions import HTTPException
 from typing import Any, get_origin
 
 from dhi import BaseModel as Model
@@ -95,8 +98,6 @@ class DependencyResolver:
                 result = dep_fn(headers=context.get("headers", {}))
             elif "query_params" in call_params:
                 # APIKeyQuery — parse query string into dict
-                from urllib.parse import parse_qs
-
                 qs = context.get("query_string", "")
                 qp = (
                     {k: v[0] for k, v in parse_qs(qs, keep_blank_values=True).items()} if qs else {}
@@ -1248,13 +1249,8 @@ def create_pos_handler(original_handler):
                 return (result[1], "application/json", _dumps(result[0]))
             return (200, "application/json", _dumps(result))
         except Exception as e:
-            try:
-                from turboapi.exceptions import HTTPException as _HTTPException
-
-                if isinstance(e, _HTTPException):
-                    return (e.status_code, "application/json", _dumps({"detail": e.detail}))
-            except ImportError:
-                pass
+            if isinstance(e, HTTPException):
+                return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             return (500, "application/json", _dumps({"error": str(e)}))
 
     return pos_handler
@@ -1281,13 +1277,8 @@ def create_async_pos_handler(original_handler):
                 return (result[1], "application/json", _dumps(result[0]))
             return (200, "application/json", _dumps(result))
         except Exception as e:
-            try:
-                from turboapi.exceptions import HTTPException as _HTTPException
-
-                if isinstance(e, _HTTPException):
-                    return (e.status_code, "application/json", _dumps({"detail": e.detail}))
-            except ImportError:
-                pass
+            if isinstance(e, HTTPException):
+                return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             return (500, "application/json", _dumps({"error": str(e)}))
 
     return pos_handler
@@ -1342,13 +1333,8 @@ def create_fast_handler(original_handler, route_definition):
                     result = result.model_dump()
                 return (200, "application/json", _dumps(result))
             except Exception as e:
-                try:
-                    from turboapi.exceptions import HTTPException as _HTTPException
-
-                    if isinstance(e, _HTTPException):
-                        return (e.status_code, "application/json", _dumps({"detail": e.detail}))
-                except ImportError:
-                    pass
+                if isinstance(e, HTTPException):
+                    return (e.status_code, "application/json", _dumps({"detail": e.detail}))
                 return (500, "application/json", _dumps({"error": str(e)}))
 
         return fast_handler_noargs
@@ -1367,8 +1353,6 @@ def create_fast_handler(original_handler, route_definition):
             if len(call_kwargs) < len(param_names):
                 qs = kwargs.get("query_string", "")
                 if qs:
-                    from urllib.parse import parse_qs
-
                     for k, v in parse_qs(qs, keep_blank_values=True).items():
                         if k in param_names and k not in call_kwargs:
                             call_kwargs[k] = v[0]
@@ -1408,13 +1392,8 @@ def create_fast_handler(original_handler, route_definition):
         except RequestParsingError as e:
             return (400, "application/json", _dumps({"error": "Bad Request", "detail": str(e)}))
         except Exception as e:
-            try:
-                from turboapi.exceptions import HTTPException
-
-                if isinstance(e, HTTPException):
-                    return (e.status_code, "application/json", _dumps({"detail": e.detail}))
-            except ImportError:
-                pass
+            if isinstance(e, HTTPException):
+                return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             return (500, "application/json", _dumps({"error": str(e)}))
 
     return fast_handler
@@ -1458,8 +1437,6 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
         if len(call_kwargs) < len(param_names):
             qs = kwargs.get("query_string", "")
             if qs:
-                from urllib.parse import parse_qs
-
                 for k, v in parse_qs(qs, keep_blank_values=True).items():
                     if k in param_names and k not in call_kwargs:
                         call_kwargs[k] = v[0]
@@ -1497,13 +1474,8 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
                     _dumps({"error": "Bad Request", "detail": str(e)}),
                 )
             except Exception as e:
-                try:
-                    from turboapi.exceptions import HTTPException
-
-                    if isinstance(e, HTTPException):
-                        return (e.status_code, "application/json", _dumps({"detail": e.detail}))
-                except ImportError:
-                    pass
+                if isinstance(e, HTTPException):
+                    return (e.status_code, "application/json", _dumps({"detail": e.detail}))
                 return (500, "application/json", _dumps({"error": str(e)}))
 
         return fast_handler_eager
@@ -1528,13 +1500,8 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
         except RequestParsingError as e:
             return (400, "application/json", _dumps({"error": "Bad Request", "detail": str(e)}))
         except Exception as e:
-            try:
-                from turboapi.exceptions import HTTPException
-
-                if isinstance(e, HTTPException):
-                    return (e.status_code, "application/json", _dumps({"detail": e.detail}))
-            except ImportError:
-                pass
+            if isinstance(e, HTTPException):
+                return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             return (500, "application/json", _dumps({"error": str(e)}))
 
     return fast_handler
@@ -1569,13 +1536,8 @@ def create_fast_model_handler(original_handler, model_class, param_name):
                 return (result[1], "application/json", _dumps(result[0]))
             return (200, "application/json", _dumps(result))
         except Exception as e:
-            try:
-                from turboapi.exceptions import HTTPException
-
-                if isinstance(e, HTTPException):
-                    return (e.status_code, "application/json", _dumps({"detail": e.detail}))
-            except ImportError:
-                pass
+            if isinstance(e, HTTPException):
+                return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             return (500, "application/json", _dumps({"error": str(e)}))
 
     return fast_model_handler
