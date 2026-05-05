@@ -31,5 +31,14 @@ def test_release_versions_are_in_sync():
 
 
 def test_release_version_bumped_past_bad_1_0_25_publish():
-    """This release must move past the broken 1.0.25/1.0.26 artifact publishes."""
-    assert _read_pyproject_version() == "1.0.27"
+    """This release must move past the broken 1.0.25/1.0.26 artifact publishes.
+
+    Compares as a tuple of integers so the guard keeps holding through
+    future patch / minor / major bumps without needing per-release edits.
+    """
+    version = _read_pyproject_version()
+    parts = tuple(int(p) for p in version.split(".")[:3])
+    assert parts >= (1, 0, 27), (
+        f"version {version} must be >= 1.0.27 (skipping the broken "
+        f"1.0.25 / 1.0.26 publishes)"
+    )
