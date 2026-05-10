@@ -11,7 +11,7 @@ import sys
 import threading
 
 from .exceptions import HTTPException
-from .responses import Response
+from .responses import Response, StreamingResponse
 
 _dumps = json.dumps
 _thread_local = threading.local()
@@ -148,6 +148,15 @@ def run_coroutine(coro):
 
 
 def _normalize_response_tuple(result):
+    if isinstance(result, StreamingResponse):
+        # 5-tuple streaming ABI: (status, content_type, b"", iterator, headers)
+        return (
+            result.status_code,
+            result.media_type or "text/plain",
+            b"",
+            result.body_iter(),
+            result.headers or {},
+        )
     if isinstance(result, Response):
         body = result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
         return (result.status_code, result.media_type or "application/json", body)

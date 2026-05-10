@@ -1257,10 +1257,19 @@ def create_pos_handler(original_handler):
     _dumps = _json.dumps
     _returns_md = _returns_model(original_handler)
     from turboapi.responses import Response as _Response
+    from turboapi.responses import StreamingResponse as _StreamingResponse
 
     def pos_handler(*args):
         try:
             result = original_handler(*args)
+            if isinstance(result, _StreamingResponse):
+                return (
+                    result.status_code,
+                    result.media_type or "text/plain",
+                    b"",
+                    result.body_iter(),
+                    result.headers or {},
+                )
             if isinstance(result, _Response):
                 body = (
                     result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
@@ -1286,10 +1295,19 @@ def create_async_pos_handler(original_handler):
     _dumps = _json.dumps
     _returns_md = _returns_model(original_handler)
     from turboapi.responses import Response as _Response
+    from turboapi.responses import StreamingResponse as _StreamingResponse
 
     async def pos_handler(*args):
         try:
             result = await original_handler(*args)
+            if isinstance(result, _StreamingResponse):
+                return (
+                    result.status_code,
+                    result.media_type or "text/plain",
+                    b"",
+                    result.body_iter(),
+                    result.headers or {},
+                )
             if isinstance(result, _Response):
                 body = (
                     result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
@@ -1338,12 +1356,22 @@ def create_fast_handler(original_handler, route_definition):
     _returns_md = _returns_model(original_handler)
 
     from turboapi.responses import Response as _Response
+    from turboapi.responses import StreamingResponse as _StreamingResponse
 
     if not param_names:
         # Zero-arg handler: fastest possible path — returns 3-tuple for Zig
         def fast_handler_noargs(**kwargs):
             try:
                 result = original_handler()
+                if isinstance(result, _StreamingResponse):
+                    ct = result.media_type or "text/plain"
+                    return (
+                        result.status_code,
+                        ct,
+                        b"",
+                        result.body_iter(),
+                        result.headers or {},
+                    )
                 if isinstance(result, _Response):
                     ct = result.media_type or "application/json"
                     body = (
@@ -1402,6 +1430,15 @@ def create_fast_handler(original_handler, route_definition):
 
             result = original_handler(**call_kwargs)
 
+            if isinstance(result, _StreamingResponse):
+                ct = result.media_type or "text/plain"
+                return (
+                    result.status_code,
+                    ct,
+                    b"",
+                    result.body_iter(),
+                    result.headers or {},
+                )
             if isinstance(result, _Response):
                 ct = result.media_type or "application/json"
                 body = (
@@ -1449,6 +1486,7 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
     _returns_md = _returns_model(original_handler)
 
     from turboapi.responses import Response as _Response
+    from turboapi.responses import StreamingResponse as _StreamingResponse
 
     def build_call_kwargs(kwargs):
         call_kwargs = {}
@@ -1511,6 +1549,15 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
             call_kwargs = build_call_kwargs(kwargs)
             result = await original_handler(**call_kwargs)
 
+            if isinstance(result, _StreamingResponse):
+                ct = result.media_type or "text/plain"
+                return (
+                    result.status_code,
+                    ct,
+                    b"",
+                    result.body_iter(),
+                    result.headers or {},
+                )
             if isinstance(result, _Response):
                 ct = result.media_type or "application/json"
                 body = (
