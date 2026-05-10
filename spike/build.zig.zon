@@ -1,0 +1,12 @@
+.{
+    .name = .turboapi_spike,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .nanoapi = .{
+            .path = "../../../../../nanoapi",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+    .fingerprint = 0x48a2bf95e10e09d4,
+}
