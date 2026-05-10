@@ -1381,7 +1381,7 @@ def create_fast_handler(original_handler, route_definition):
                             call_kwargs[k] = v[0]
 
             if len(call_kwargs) < len(param_names):
-                headers = kwargs.get("headers", {})
+                headers = kwargs.get("headers")
                 if headers:
                     for k, v in HeaderParser.parse_headers(headers, sig).items():
                         if k in param_names and k not in call_kwargs:
@@ -1466,7 +1466,7 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
                         call_kwargs[k] = v[0]
 
         if len(call_kwargs) < len(param_names):
-            headers = kwargs.get("headers", {})
+            headers = kwargs.get("headers")
             if headers:
                 for k, v in HeaderParser.parse_headers(headers, sig).items():
                     if k in param_names and k not in call_kwargs:
