@@ -1255,6 +1255,7 @@ def create_pos_handler(original_handler):
     import json as _json
 
     _dumps = _json.dumps
+    _returns_md = _returns_model(original_handler)
     from turboapi.responses import Response as _Response
 
     def pos_handler(*args):
@@ -1265,7 +1266,7 @@ def create_pos_handler(original_handler):
                     result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
                 )
                 return (result.status_code, result.media_type or "application/json", body)
-            if hasattr(result, "model_dump"):
+            if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
                 return (result[1], "application/json", _dumps(result[0]))
@@ -1283,6 +1284,7 @@ def create_async_pos_handler(original_handler):
     import json as _json
 
     _dumps = _json.dumps
+    _returns_md = _returns_model(original_handler)
     from turboapi.responses import Response as _Response
 
     async def pos_handler(*args):
@@ -1293,7 +1295,7 @@ def create_async_pos_handler(original_handler):
                     result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
                 )
                 return (result.status_code, result.media_type or "application/json", body)
-            if hasattr(result, "model_dump"):
+            if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
                 return (result[1], "application/json", _dumps(result[0]))
@@ -1541,6 +1543,7 @@ def create_fast_model_handler(original_handler, model_class, param_name):
 
     _loads = _json.loads
     _dumps = _json.dumps
+    _returns_md = _returns_model(original_handler)
 
     def fast_model_handler(**kwargs):
         try:
@@ -1554,7 +1557,7 @@ def create_fast_model_handler(original_handler, model_class, param_name):
             model = model_class(**data)
             result = original_handler(**{param_name: model})
 
-            if hasattr(result, "model_dump"):
+            if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
                 return (result[1], "application/json", _dumps(result[0]))
