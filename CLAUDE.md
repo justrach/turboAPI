@@ -27,8 +27,7 @@ docker compose up --build
 
 ```bash
 # Python tests (requires Python 3.14t)
-uv run --python 3.14t python -m pytest tests/ -p no:anchorpy \
-  --deselect tests/test_fastapi_parity.py::TestWebSocket
+uv run --python 3.14t python -m pytest tests/ -p no:anchorpy
 
 # Zig unit tests (includes fuzz seed corpus)
 cd zig && zig build test
@@ -38,7 +37,6 @@ cd zig && zig build test --fuzz
 ```
 
 **Known test exclusions:**
-- WebSocket tests (`TestWebSocket`) — pre-existing failure, deselect
 - `anchorpy` plugin — causes import error, disable with `-p no:anchorpy`
 
 ## Benchmarks

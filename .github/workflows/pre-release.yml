@@ -57,9 +57,7 @@ jobs:
 
       - name: Run tests
         run: |
-          python -m pytest tests/ -v --tb=short \
-            --deselect tests/test_fastapi_parity.py::TestWebSocket::test_websocket_send_receive \
-            --deselect tests/test_fastapi_parity.py::TestWebSocket::test_websocket_send_json
+          python -m pytest tests/ -v --tb=short
         # Linux x86_64 segfaults on Zig thread cleanup between tests (known issue)
         continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
 
