@@ -909,7 +909,7 @@ def create_enhanced_handler(original_handler, route_definition):
 
                 # 3. Parse headers
                 if "headers" in kwargs:
-                    headers_dict = kwargs.get("headers", {})
+                    headers_dict = kwargs.get("headers")
                     if headers_dict:
                         header_params = HeaderParser.parse_headers(headers_dict, sig)
                         parsed_params.update(header_params)
@@ -983,7 +983,7 @@ def create_enhanced_handler(original_handler, route_definition):
                             method=kwargs.get("method", "GET"),
                             path=kwargs.get("path", ""),
                             query_string=kwargs.get("query_string", ""),
-                            headers=kwargs.get("headers", {}) or {},
+                            headers=kwargs.get("headers") or {},
                             body=_raw_body,
                         )
                         for _pname in _request_param_names:
@@ -1001,7 +1001,7 @@ def create_enhanced_handler(original_handler, route_definition):
 
                 # 5. Resolve dependencies
                 context = {
-                    "headers": kwargs.get("headers", {}),
+                    "headers": kwargs.get("headers") or {},
                     "query_string": kwargs.get("query_string", ""),
                     "body": kwargs.get("body", b""),
                 }
@@ -1092,7 +1092,7 @@ def create_enhanced_handler(original_handler, route_definition):
 
                 # 3. Parse headers (only if handler needs them)
                 if _has_header_params:
-                    headers_dict = kwargs.get("headers", {})
+                    headers_dict = kwargs.get("headers")
                     if headers_dict:
                         header_params = HeaderParser.parse_headers(headers_dict, sig)
                         parsed_params.update(header_params)
@@ -1167,7 +1167,7 @@ def create_enhanced_handler(original_handler, route_definition):
                             method=kwargs.get("method", "GET"),
                             path=kwargs.get("path", ""),
                             query_string=query_string,
-                            headers=kwargs.get("headers", {}) or {},
+                            headers=kwargs.get("headers") or {},
                             body=_raw_body,
                         )
                         for _pname in _request_param_names:
@@ -1183,7 +1183,7 @@ def create_enhanced_handler(original_handler, route_definition):
                 # 5. Resolve dependencies (only if handler uses Depends/Security)
                 if _has_dependencies:
                     context = {
-                        "headers": kwargs.get("headers", {}),
+                        "headers": kwargs.get("headers") or {},
                         "query_string": query_string,
                         "body": body_data,
                     }
