@@ -8,15 +8,37 @@ import inspect
 import json
 import typing
 import urllib.parse
-from urllib.parse import parse_qs
-
-from turboapi.exceptions import HTTPException
 from typing import Any, get_origin
+from urllib.parse import parse_qs
 
 from dhi import BaseModel as Model
 
+from turboapi.exceptions import HTTPException
+
 _NO_COERCION = object()
 
+
+def _returns_model(handler) -> bool | None:
+    """Decide at handler-creation time whether `result.model_dump()` will be needed.
+
+    Returns:
+        True  — annotation is a class with model_dump (Pydantic/dhi BaseModel).
+        False — annotation is a known leaf type (dict/list/str/int/...).
+        None  — unknown (no annotation, generic alias, Union, forward ref, etc.).
+                Caller falls back to per-response hasattr.
+    """
+    try:
+        rt = typing.get_type_hints(handler).get("return")
+    except Exception:
+        return None
+    if rt is None:
+        return None
+    if isinstance(rt, type):
+        if hasattr(rt, "model_dump"):
+            return True
+        if rt in (dict, list, tuple, set, frozenset, str, bytes, bytearray, int, float, bool, type(None)):
+            return False
+    return None
 
 class RequestParsingError(ValueError):
     """Raised when request data cannot be parsed into handler parameters."""
@@ -1311,6 +1333,7 @@ def create_fast_handler(original_handler, route_definition):
     _parse_simple_body = _create_simple_json_body_parser(sig) if _needs_body else None
 
     _dumps = _json.dumps
+    _returns_md = _returns_model(original_handler)
 
     from turboapi.responses import Response as _Response
 
@@ -1329,7 +1352,7 @@ def create_fast_handler(original_handler, route_definition):
                     return (result.status_code, ct, body)
                 if isinstance(result, tuple) and len(result) == 2:
                     return (result[1], "application/json", _dumps(result[0]))
-                if hasattr(result, "model_dump"):
+                if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                     result = result.model_dump()
                 return (200, "application/json", _dumps(result))
             except Exception as e:
@@ -1384,7 +1407,7 @@ def create_fast_handler(original_handler, route_definition):
                 )
                 return (result.status_code, ct, body)
 
-            if hasattr(result, "model_dump"):
+            if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
                 return (result[1], "application/json", _dumps(result[0]))
@@ -1421,6 +1444,7 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
     _parse_simple_body = _create_simple_json_body_parser(sig) if _needs_body else None
 
     _dumps = _json.dumps
+    _returns_md = _returns_model(original_handler)
 
     from turboapi.responses import Response as _Response
 
@@ -1492,7 +1516,7 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
                 )
                 return (result.status_code, ct, body)
 
-            if hasattr(result, "model_dump"):
+            if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
                 return (result[1], "application/json", _dumps(result[0]))
