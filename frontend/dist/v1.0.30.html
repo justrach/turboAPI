@@ -264,6 +264,46 @@ async def handler(ws: WebSocket):
 </section>
 
 <hr class="section-divider">
+<section class="section section-tight" id="ws-frameworks">
+  <div class="section-header">
+    <div class="section-tag">Framework comparison - WebSocket</div>
+    <h2 class="section-title">Same-shape echo against FastAPI, Flask, and Go gorilla</h2>
+    <p class="section-sub">One TCP connection, 5,000 round-trips, 100 warmup, <code>await ws.send("x"); await ws.recv()</code>. Same <code>websockets</code> Python client driving each server. Loopback on macOS arm64 (Apple M-series). Source: <code>/tmp/wsbench_runner.py</code> driving identical echo handlers in each framework.</p>
+  </div>
+  <div class="compare-grid">
+    <div class="table-card">
+      <div class="table-title">WebSocket round-trip throughput, sorted descending</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Framework</th><th>Transport</th><th>msgs/s</th><th>p50</th><th>p99</th><th>vs TurboAPI Zig</th></tr></thead>
+          <tbody>
+            <tr><td>Go <code>gorilla/websocket</code></td><td>net/http</td><td class="num win">19,274/s</td><td class="num">50 µs</td><td class="num">100 µs</td><td class="num">1.05x</td></tr>
+            <tr><td><strong>TurboAPI <code>/ws-echo</code></strong></td><td>Zig core (no Python in the loop)</td><td class="num turbo">18,379/s</td><td class="num">50 µs</td><td class="num">111 µs</td><td class="num turbo">baseline</td></tr>
+            <tr><td>TurboAPI <code>/ws-py</code></td><td>Zig + Python handler via FFI</td><td class="num turbo">16,039/s</td><td class="num">56 µs</td><td class="num">128 µs</td><td class="num">0.87x</td></tr>
+            <tr><td>Flask + <code>flask-sock</code></td><td>Werkzeug threaded + simple-websocket</td><td class="num">9,452/s</td><td class="num">99 µs</td><td class="num">194 µs</td><td class="num">0.51x</td></tr>
+            <tr><td>FastAPI + uvicorn</td><td>uvicorn websockets-protocol</td><td class="num">6,916/s</td><td class="num">137 µs</td><td class="num">252 µs</td><td class="num">0.38x</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="note-card">
+      <h3>Honest read</h3>
+      <p><strong>Go <code>gorilla/websocket</code> narrowly wins by 5%.</strong> Same p50 (50 µs) as the TurboAPI Zig path; slightly tighter p99 (100 µs vs 111 µs). Both are compiled-native — gorilla is the canonical Go WS library, this is the comparison TurboAPI cares about.</p>
+      <p style="margin-top:14px">TurboAPI's Python handler path (<code>/ws-py</code>) costs ~6 µs over the pure-Zig route — that's the FFI hop into the Python <code>async def</code> handler. Still <strong>2.3x faster than FastAPI + uvicorn</strong> on the same shape.</p>
+      <div class="bars" style="margin-top:18px">
+        <div class="bar-row"><div class="bar-name turbo">Go gorilla</div><div class="bar-track"><div class="bar-fill turbo" style="width:100%"></div></div><div class="bar-num turbo">19,274</div></div>
+        <div class="bar-row"><div class="bar-name turbo">TurboAPI Zig</div><div class="bar-track"><div class="bar-fill turbo" style="width:95%"></div></div><div class="bar-num turbo">18,379</div></div>
+        <div class="bar-row"><div class="bar-name turbo">TurboAPI Py</div><div class="bar-track"><div class="bar-fill turbo" style="width:83%"></div></div><div class="bar-num turbo">16,039</div></div>
+        <div class="bar-row"><div class="bar-name">Flask</div><div class="bar-track"><div class="bar-fill" style="width:49%"></div></div><div class="bar-num">9,452</div></div>
+        <div class="bar-row"><div class="bar-name">FastAPI</div><div class="bar-track"><div class="bar-fill" style="width:36%"></div></div><div class="bar-num">6,916</div></div>
+      </div>
+      <p style="margin-top:18px">Versions: TurboAPI 1.0.30 (Python 3.14t) · FastAPI 0.121 + uvicorn 0.46 · Flask 3.1 + flask-sock 0.7 · Go 1.25.6 + gorilla/websocket 1.5.3. <code>wrk</code>-style multi-client benches would shift these numbers — this is single-connection latency throughput.</p>
+    </div>
+  </div>
+</section>
+
+<hr class="section-divider">
+
 
 <section class="section section-tight" id="release-graphs">
   <div class="section-header">
