@@ -9,7 +9,8 @@ const app_turbopg = @import("app/turbopg");
 const app_turboboto = @import("app/turboboto");
 const app_httpcore = @import("app/httpcore");
 const app_v1_0_28 = @import("app/v1_0_28");
-
+const app_v1_0_29 = @import("app/v1_0_29");
+const app_v1_0_30 = @import("app/v1_0_30");
 pub const routes: []const Route = &.{
     .{ .path = "/benchmarks", .render = app_benchmarks.render, .render_stream = if (@hasDecl(app_benchmarks, "renderStream")) app_benchmarks.renderStream else null, .meta = if (@hasDecl(app_benchmarks, "meta")) app_benchmarks.meta else .{}, .prerender = if (@hasDecl(app_benchmarks, "prerender")) app_benchmarks.prerender else false },
     .{ .path = "/docs", .render = app_docs.render, .render_stream = if (@hasDecl(app_docs, "renderStream")) app_docs.renderStream else null, .meta = if (@hasDecl(app_docs, "meta")) app_docs.meta else .{}, .prerender = if (@hasDecl(app_docs, "prerender")) app_docs.prerender else false },
@@ -21,7 +22,8 @@ pub const routes: []const Route = &.{
     .{ .path = "/httpcore", .render = app_httpcore.render, .render_stream = if (@hasDecl(app_httpcore, "renderStream")) app_httpcore.renderStream else null, .meta = if (@hasDecl(app_httpcore, "meta")) app_httpcore.meta else .{}, .prerender = if (@hasDecl(app_httpcore, "prerender")) app_httpcore.prerender else false },
     .{ .path = "/v1.0.28", .render = app_v1_0_28.render, .render_stream = if (@hasDecl(app_v1_0_28, "renderStream")) app_v1_0_28.renderStream else null, .meta = if (@hasDecl(app_v1_0_28, "meta")) app_v1_0_28.meta else .{}, .prerender = if (@hasDecl(app_v1_0_28, "prerender")) app_v1_0_28.prerender else false },
 };
-
+    .{ .path = "/v1.0.29", .render = app_v1_0_29.render, .render_stream = if (@hasDecl(app_v1_0_29, "renderStream")) app_v1_0_29.renderStream else null, .meta = if (@hasDecl(app_v1_0_29, "meta")) app_v1_0_29.meta else .{}, .prerender = if (@hasDecl(app_v1_0_29, "prerender")) app_v1_0_29.prerender else false },
+    .{ .path = "/v1.0.30", .render = app_v1_0_30.render, .render_stream = if (@hasDecl(app_v1_0_30, "renderStream")) app_v1_0_30.renderStream else null, .meta = if (@hasDecl(app_v1_0_30, "meta")) app_v1_0_30.meta else .{}, .prerender = if (@hasDecl(app_v1_0_30, "prerender")) app_v1_0_30.prerender else false },
 const app_layout = @import("app/layout");
 pub const layout = app_layout.wrap;
 pub const streamLayout = if (@hasDecl(app_layout, "streamWrap")) app_layout.streamWrap else null;
