@@ -295,8 +295,8 @@ const html =
     \\      <div class="graph-head"><div class="graph-title">WebSocket round-trip throughput</div><div class="graph-pill">2.3x vs FastAPI</div></div>
     \\      <div class="graph-bars">
     \\        <div class="graph-row"><div class="graph-label">Go gorilla</div><div class="graph-track"><div class="graph-fill previous" style="width:100%"></div></div><div class="graph-value">19,274/s</div></div>
-    \\        <div class="graph-row"><div class="graph-label current">TurboAPI Zig</div><div class="graph-track"><div class="graph-fill current" style="width:95%"></div></div><div class="graph-value current">18,379/s</div></div>
-    \\        <div class="graph-row"><div class="graph-label current">TurboAPI Py</div><div class="graph-track"><div class="graph-fill current" style="width:83%"></div></div><div class="graph-value current">16,039/s</div></div>
+    \\        <div class="graph-row"><div class="graph-label current">Turbo Zig</div><div class="graph-track"><div class="graph-fill current" style="width:95%"></div></div><div class="graph-value current">18,379/s</div></div>
+    \\        <div class="graph-row"><div class="graph-label current">Turbo Py</div><div class="graph-track"><div class="graph-fill current" style="width:83%"></div></div><div class="graph-value current">16,039/s</div></div>
     \\        <div class="graph-row"><div class="graph-label">Flask</div><div class="graph-track"><div class="graph-fill previous" style="width:49%"></div></div><div class="graph-value">9,452/s</div></div>
     \\        <div class="graph-row"><div class="graph-label">FastAPI</div><div class="graph-track"><div class="graph-fill previous" style="width:36%"></div></div><div class="graph-value">6,916/s</div></div>
     \\    </div>
@@ -305,8 +305,8 @@ const html =
     \\        <div class="graph-head"><div class="graph-title">p50 latency</div><div class="graph-pill">lower is better</div></div>
     \\        <div class="graph-bars">
     \\          <div class="graph-row"><div class="graph-label">Go gorilla</div><div class="graph-track"><div class="graph-fill previous" style="width:36%"></div></div><div class="graph-value">50 µs</div></div>
-    \\          <div class="graph-row"><div class="graph-label current">TurboAPI Zig</div><div class="graph-track"><div class="graph-fill current" style="width:36%"></div></div><div class="graph-value current">50 µs</div></div>
-    \\          <div class="graph-row"><div class="graph-label current">TurboAPI Py</div><div class="graph-track"><div class="graph-fill current" style="width:41%"></div></div><div class="graph-value current">56 µs</div></div>
+    \\          <div class="graph-row"><div class="graph-label current">Turbo Zig</div><div class="graph-track"><div class="graph-fill current" style="width:36%"></div></div><div class="graph-value current">50 µs</div></div>
+    \\          <div class="graph-row"><div class="graph-label current">Turbo Py</div><div class="graph-track"><div class="graph-fill current" style="width:41%"></div></div><div class="graph-value current">56 µs</div></div>
     \\          <div class="graph-row"><div class="graph-label">Flask</div><div class="graph-track"><div class="graph-fill previous" style="width:72%"></div></div><div class="graph-value">99 µs</div></div>
     \\          <div class="graph-row"><div class="graph-label">FastAPI</div><div class="graph-track"><div class="graph-fill previous" style="width:100%"></div></div><div class="graph-value">137 µs</div></div>
     \\        </div>
@@ -315,8 +315,8 @@ const html =
     \\        <div class="graph-head"><div class="graph-title">p99 latency</div><div class="graph-pill">lower is better</div></div>
     \\        <div class="graph-bars">
     \\          <div class="graph-row"><div class="graph-label">Go gorilla</div><div class="graph-track"><div class="graph-fill previous" style="width:40%"></div></div><div class="graph-value">100 µs</div></div>
-    \\          <div class="graph-row"><div class="graph-label current">TurboAPI Zig</div><div class="graph-track"><div class="graph-fill current" style="width:44%"></div></div><div class="graph-value current">111 µs</div></div>
-    \\          <div class="graph-row"><div class="graph-label current">TurboAPI Py</div><div class="graph-track"><div class="graph-fill current" style="width:51%"></div></div><div class="graph-value current">128 µs</div></div>
+    \\          <div class="graph-row"><div class="graph-label current">Turbo Zig</div><div class="graph-track"><div class="graph-fill current" style="width:44%"></div></div><div class="graph-value current">111 µs</div></div>
+    \\          <div class="graph-row"><div class="graph-label current">Turbo Py</div><div class="graph-track"><div class="graph-fill current" style="width:51%"></div></div><div class="graph-value current">128 µs</div></div>
     \\          <div class="graph-row"><div class="graph-label">Flask</div><div class="graph-track"><div class="graph-fill previous" style="width:77%"></div></div><div class="graph-value">194 µs</div></div>
     \\          <div class="graph-row"><div class="graph-label">FastAPI</div><div class="graph-track"><div class="graph-fill previous" style="width:100%"></div></div><div class="graph-value">252 µs</div></div>
     \\        </div>
