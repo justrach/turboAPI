@@ -249,7 +249,7 @@ test "parse: smallest text frame from client" {
 test "parse: 16-bit length encoding" {
     var payload: [200]u8 = undefined;
     @memset(&payload, 'A');
-    var buf: [206]u8 = undefined;
+    var buf: [208]u8 = undefined;
     buf[0] = 0x81;
     buf[1] = 0x80 | 126;
     std.mem.writeInt(u16, buf[2..4], 200, .big);
@@ -261,7 +261,7 @@ test "parse: 16-bit length encoding" {
 
     const frame = try parseServerFrame(&buf, PARSE_DEFAULT_MAX_PAYLOAD);
     try std.testing.expectEqual(@as(usize, 200), frame.payload.len);
-    try std.testing.expectEqual(@as(usize, 206), frame.consumed);
+    try std.testing.expectEqual(@as(usize, 208), frame.consumed);
 }
 
 test "parse: incomplete returns error.Incomplete" {
