@@ -201,9 +201,23 @@ class TurboAPI(Router):
                 data = await websocket.receive_text()
                 await websocket.send_text(f"Echo: {data}")
         """
-
         def decorator(func: Callable):
             self._websocket_routes[path] = func
+            # Register with the Zig server if it's running. The decorator may
+            # be invoked at module-import time (before app.run()) — in that
+            # case we keep _websocket_routes around and register lazily on
+            # run(). If a turbonet server instance already exists, register
+            # immediately so the route is live without an app.run() round-trip
+            # (useful in tests).
+            try:
+                import importlib.util
+
+                if importlib.util.find_spec("turboapi.turbonet") is not None:
+                    srv = getattr(self, "_turbonet_server", None)
+                    if srv is not None and hasattr(srv, "add_websocket_route"):
+                        srv.add_websocket_route(path, func)
+            except ImportError:
+                pass
             return func
 
         return decorator
@@ -444,10 +458,16 @@ class TurboAPI(Router):
             import turbonet
 
             server = turbonet.TurboServer(host, port)
+            self._turbonet_server = server
 
             # Register all routes
             for route in self.registry.get_routes():
                 server.add_route(route.method.value, route.path, route.handler)
+
+            # Register WebSocket routes registered via @app.websocket(...)
+            for ws_path, ws_handler in self._websocket_routes.items():
+                if hasattr(server, "add_websocket_route"):
+                    server.add_websocket_route(ws_path, ws_handler)
 
             print("\n[SERVER] Starting Zig server...")
             server.run()

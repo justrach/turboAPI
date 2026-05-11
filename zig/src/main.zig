@@ -8,6 +8,7 @@ const response = @import("response.zig");
 const server = @import("server.zig");
 pub const router = @import("turboapi-core").router;
 const db = @import("db.zig");
+pub const websocket = @import("websocket.zig");
 
 // ── Method table ────────────────────────────────────────────────────────────
 
@@ -42,6 +43,13 @@ var methods = [_]py.PyMethodDef{
     .{ .ml_name = "configure_rate_limiting", .ml_meth = @ptrCast(&server.configure_rate_limiting), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_server_configure_cors", .ml_meth = @ptrCast(&server.server_configure_cors), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_server_enable_response_cache", .ml_meth = @ptrCast(&server.server_enable_response_cache), .ml_flags = c.METH_NOARGS, .ml_doc = null },
+
+    // WebSocket functions
+    .{ .ml_name = "_server_add_websocket_route", .ml_meth = @ptrCast(&server.server_add_websocket_route), .ml_flags = c.METH_VARARGS, .ml_doc = null },
+    .{ .ml_name = "_ws_recv", .ml_meth = @ptrCast(&server.ws_recv), .ml_flags = c.METH_VARARGS, .ml_doc = null },
+    .{ .ml_name = "_ws_send_text", .ml_meth = @ptrCast(&server.ws_send_text), .ml_flags = c.METH_VARARGS, .ml_doc = null },
+    .{ .ml_name = "_ws_send_bytes", .ml_meth = @ptrCast(&server.ws_send_bytes), .ml_flags = c.METH_VARARGS, .ml_doc = null },
+    .{ .ml_name = "_ws_close", .ml_meth = @ptrCast(&server.ws_close), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     // DB functions
     .{ .ml_name = "_db_configure", .ml_meth = @ptrCast(&db.db_configure), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_db_add_route", .ml_meth = @ptrCast(&db.db_add_route), .ml_flags = c.METH_VARARGS, .ml_doc = null },
@@ -123,6 +131,46 @@ const bootstrap_code: [*:0]const u8 =
     \\        _m._db_configure(conn_string, pool_size)
     \\    def add_db_route(self, method, path, op, table, pk_column, pk_param, columns):
     \\        _m._db_add_route(method, path, op, table, pk_column or "", pk_param or "", columns or "")
+    \\    def add_websocket_route(self, path, handler):
+    \\        _m._server_add_websocket_route(path, handler)
+    \\
+    \\def _ws_invoke_handler(handler, conn_capsule, path):
+    \\    """Entry point Zig calls when a WS connection is upgraded.
+    \\    Builds a WebSocket Python object wrapping the Zig connection capsule
+    \\    and runs the user's async handler to completion."""
+    \\    import asyncio
+    \\    try:
+    \\        from turboapi.websockets import WebSocket, WebSocketDisconnect
+    \\    except ImportError as exc:
+    \\        # Fallback minimal shim if turboapi.websockets isn't importable.
+    \\        class WebSocketDisconnect(Exception): pass
+    \\        class WebSocket:
+    \\            def __init__(self, scope=None):
+    \\                self.scope = scope or {}
+    \\                self._zig_conn = None
+    \\                self._accepted = False
+    \\                self._closed = False
+    \\    ws = WebSocket(scope={"path": path, "type": "websocket"})
+    \\    ws._zig_conn = conn_capsule
+    \\    # Handshake already completed by Zig before this helper runs.
+    \\    ws._accepted = True
+    \\    ws.client_state = "connected"
+    \\    try:
+    \\        coro = handler(ws)
+    \\        if asyncio.iscoroutine(coro):
+    \\            asyncio.run(coro)
+    \\    except WebSocketDisconnect:
+    \\        pass
+    \\    except Exception:
+    \\        import traceback
+    \\        traceback.print_exc()
+    \\    finally:
+    \\        if not ws._closed:
+    \\            try:
+    \\                _m._ws_close(conn_capsule, 1000, "")
+    \\            except Exception:
+    \\                pass
+    \\_m._ws_invoke_handler = _ws_invoke_handler
     \\
     \\class RequestContext:
     \\    def __init__(self):

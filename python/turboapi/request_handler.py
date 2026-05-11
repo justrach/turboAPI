@@ -8,15 +8,37 @@ import inspect
 import json
 import typing
 import urllib.parse
-from urllib.parse import parse_qs
-
-from turboapi.exceptions import HTTPException
 from typing import Any, get_origin
+from urllib.parse import parse_qs
 
 from dhi import BaseModel as Model
 
+from turboapi.exceptions import HTTPException
+
 _NO_COERCION = object()
 
+
+def _returns_model(handler) -> bool | None:
+    """Decide at handler-creation time whether `result.model_dump()` will be needed.
+
+    Returns:
+        True  — annotation is a class with model_dump (Pydantic/dhi BaseModel).
+        False — annotation is a known leaf type (dict/list/str/int/...).
+        None  — unknown (no annotation, generic alias, Union, forward ref, etc.).
+                Caller falls back to per-response hasattr.
+    """
+    try:
+        rt = typing.get_type_hints(handler).get("return")
+    except Exception:
+        return None
+    if rt is None:
+        return None
+    if isinstance(rt, type):
+        if hasattr(rt, "model_dump"):
+            return True
+        if rt in (dict, list, tuple, set, frozenset, str, bytes, bytearray, int, float, bool, type(None)):
+            return False
+    return None
 
 class RequestParsingError(ValueError):
     """Raised when request data cannot be parsed into handler parameters."""
@@ -887,7 +909,7 @@ def create_enhanced_handler(original_handler, route_definition):
 
                 # 3. Parse headers
                 if "headers" in kwargs:
-                    headers_dict = kwargs.get("headers", {})
+                    headers_dict = kwargs.get("headers")
                     if headers_dict:
                         header_params = HeaderParser.parse_headers(headers_dict, sig)
                         parsed_params.update(header_params)
@@ -961,7 +983,7 @@ def create_enhanced_handler(original_handler, route_definition):
                             method=kwargs.get("method", "GET"),
                             path=kwargs.get("path", ""),
                             query_string=kwargs.get("query_string", ""),
-                            headers=kwargs.get("headers", {}) or {},
+                            headers=kwargs.get("headers") or {},
                             body=_raw_body,
                         )
                         for _pname in _request_param_names:
@@ -979,7 +1001,7 @@ def create_enhanced_handler(original_handler, route_definition):
 
                 # 5. Resolve dependencies
                 context = {
-                    "headers": kwargs.get("headers", {}),
+                    "headers": kwargs.get("headers") or {},
                     "query_string": kwargs.get("query_string", ""),
                     "body": kwargs.get("body", b""),
                 }
@@ -1070,7 +1092,7 @@ def create_enhanced_handler(original_handler, route_definition):
 
                 # 3. Parse headers (only if handler needs them)
                 if _has_header_params:
-                    headers_dict = kwargs.get("headers", {})
+                    headers_dict = kwargs.get("headers")
                     if headers_dict:
                         header_params = HeaderParser.parse_headers(headers_dict, sig)
                         parsed_params.update(header_params)
@@ -1145,7 +1167,7 @@ def create_enhanced_handler(original_handler, route_definition):
                             method=kwargs.get("method", "GET"),
                             path=kwargs.get("path", ""),
                             query_string=query_string,
-                            headers=kwargs.get("headers", {}) or {},
+                            headers=kwargs.get("headers") or {},
                             body=_raw_body,
                         )
                         for _pname in _request_param_names:
@@ -1161,7 +1183,7 @@ def create_enhanced_handler(original_handler, route_definition):
                 # 5. Resolve dependencies (only if handler uses Depends/Security)
                 if _has_dependencies:
                     context = {
-                        "headers": kwargs.get("headers", {}),
+                        "headers": kwargs.get("headers") or {},
                         "query_string": query_string,
                         "body": body_data,
                     }
@@ -1233,6 +1255,7 @@ def create_pos_handler(original_handler):
     import json as _json
 
     _dumps = _json.dumps
+    _returns_md = _returns_model(original_handler)
     from turboapi.responses import Response as _Response
 
     def pos_handler(*args):
@@ -1243,7 +1266,7 @@ def create_pos_handler(original_handler):
                     result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
                 )
                 return (result.status_code, result.media_type or "application/json", body)
-            if hasattr(result, "model_dump"):
+            if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
                 return (result[1], "application/json", _dumps(result[0]))
@@ -1261,6 +1284,7 @@ def create_async_pos_handler(original_handler):
     import json as _json
 
     _dumps = _json.dumps
+    _returns_md = _returns_model(original_handler)
     from turboapi.responses import Response as _Response
 
     async def pos_handler(*args):
@@ -1271,7 +1295,7 @@ def create_async_pos_handler(original_handler):
                     result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
                 )
                 return (result.status_code, result.media_type or "application/json", body)
-            if hasattr(result, "model_dump"):
+            if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
                 return (result[1], "application/json", _dumps(result[0]))
@@ -1311,6 +1335,7 @@ def create_fast_handler(original_handler, route_definition):
     _parse_simple_body = _create_simple_json_body_parser(sig) if _needs_body else None
 
     _dumps = _json.dumps
+    _returns_md = _returns_model(original_handler)
 
     from turboapi.responses import Response as _Response
 
@@ -1329,7 +1354,7 @@ def create_fast_handler(original_handler, route_definition):
                     return (result.status_code, ct, body)
                 if isinstance(result, tuple) and len(result) == 2:
                     return (result[1], "application/json", _dumps(result[0]))
-                if hasattr(result, "model_dump"):
+                if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                     result = result.model_dump()
                 return (200, "application/json", _dumps(result))
             except Exception as e:
@@ -1358,7 +1383,7 @@ def create_fast_handler(original_handler, route_definition):
                             call_kwargs[k] = v[0]
 
             if len(call_kwargs) < len(param_names):
-                headers = kwargs.get("headers", {})
+                headers = kwargs.get("headers")
                 if headers:
                     for k, v in HeaderParser.parse_headers(headers, sig).items():
                         if k in param_names and k not in call_kwargs:
@@ -1384,7 +1409,7 @@ def create_fast_handler(original_handler, route_definition):
                 )
                 return (result.status_code, ct, body)
 
-            if hasattr(result, "model_dump"):
+            if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
                 return (result[1], "application/json", _dumps(result[0]))
@@ -1421,6 +1446,7 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
     _parse_simple_body = _create_simple_json_body_parser(sig) if _needs_body else None
 
     _dumps = _json.dumps
+    _returns_md = _returns_model(original_handler)
 
     from turboapi.responses import Response as _Response
 
@@ -1442,7 +1468,7 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
                         call_kwargs[k] = v[0]
 
         if len(call_kwargs) < len(param_names):
-            headers = kwargs.get("headers", {})
+            headers = kwargs.get("headers")
             if headers:
                 for k, v in HeaderParser.parse_headers(headers, sig).items():
                     if k in param_names and k not in call_kwargs:
@@ -1492,7 +1518,7 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
                 )
                 return (result.status_code, ct, body)
 
-            if hasattr(result, "model_dump"):
+            if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
                 return (result[1], "application/json", _dumps(result[0]))
@@ -1517,6 +1543,7 @@ def create_fast_model_handler(original_handler, model_class, param_name):
 
     _loads = _json.loads
     _dumps = _json.dumps
+    _returns_md = _returns_model(original_handler)
 
     def fast_model_handler(**kwargs):
         try:
@@ -1530,7 +1557,7 @@ def create_fast_model_handler(original_handler, model_class, param_name):
             model = model_class(**data)
             result = original_handler(**{param_name: model})
 
-            if hasattr(result, "model_dump"):
+            if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
                 return (result[1], "application/json", _dumps(result[0]))

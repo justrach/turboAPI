@@ -1165,6 +1165,12 @@ class ZigIntegratedTurboAPI(TurboAPI):
 
         try:
             if NATIVE_CORE_AVAILABLE:
+                # Register WebSocket routes registered via @app.websocket(...).
+                if hasattr(self.zig_server, "add_websocket_route"):
+                    for ws_path, ws_handler in self._websocket_routes.items():
+                        self.zig_server.add_websocket_route(ws_path, ws_handler)
+                        print(f"   WebSocket route: {ws_path}")
+
                 # Start the actual Zig server
                 print("\n[SERVER] Starting Zig HTTP server with zero overhead...")
                 self.zig_server.run()
