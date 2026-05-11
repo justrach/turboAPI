@@ -13,6 +13,7 @@ const multipart_mod = @import("multipart.zig");
 const logger = @import("logger.zig");
 const runtime = @import("runtime.zig");
 const telemetry = @import("telemetry.zig");
+const ws = @import("websocket.zig");
 
 const allocator = std.heap.c_allocator;
 const posix = std.posix;
@@ -1145,6 +1146,582 @@ fn handleConnection(stream: std.Io.net.Stream, tstate: ?*anyopaque) void {
     }
 }
 
+
+// ── WebSocket runtime ──────────────────────────────────────────────────────
+//
+// Connection model: each accepted TCP connection runs in the same thread as
+// the HTTP request handler. When `handleOneRequest` detects a valid WebSocket
+// upgrade request, it dispatches into `runWebSocketConnection` which loops
+// reading + writing frames until close. The HTTP thread is "consumed" by the
+// WebSocket for the life of the connection — this is the simplest viable
+// model and matches what FastAPI/Starlette do.
+
+const ECHO_PATH = "/ws-echo";
+
+/// Per-connection state for a live WebSocket. Allocated on the stack of
+/// `runWebSocketConnection`. The Python FFI layer (Phase 4) will get an
+/// opaque pointer to this struct.
+pub const WsConn = struct {
+    stream: std.Io.net.Stream,
+    /// Read buffer for incoming frames. Sized for typical messages; large
+    /// payloads spill to the heap-backed `read_overflow`.
+    read_buf: [16 * 1024]u8 = undefined,
+    read_len: usize = 0,
+    /// Heap buffer used when a single frame's payload exceeds the inline
+    /// buffer. Freed at conn teardown.
+    read_overflow: ?[]u8 = null,
+    /// Reassembly buffer for fragmented messages. Allocated on first
+    /// continuation, freed when message completes or connection closes.
+    fragment_buf: std.ArrayListUnmanaged(u8) = .empty,
+    fragment_opcode: ws.Opcode = .continuation,
+    /// True once we've seen a client close frame and replied with our own.
+    closing: bool = false,
+
+    pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
+
+    fn deinit(self: *WsConn) void {
+        if (self.read_overflow) |o| allocator.free(o);
+        self.fragment_buf.deinit(allocator);
+    }
+
+    /// Read more bytes from the socket into read_buf, appending. Returns
+    /// false if the peer closed.
+    fn fillRead(self: *WsConn) bool {
+        if (self.read_len >= self.read_buf.len) return true; // buffer full — caller must drain
+        const n = posix.read(self.stream.socket.handle, self.read_buf[self.read_len..]) catch return false;
+        if (n == 0) return false;
+        self.read_len += n;
+        return true;
+    }
+
+    fn consumeRead(self: *WsConn, n: usize) void {
+        if (n >= self.read_len) {
+            self.read_len = 0;
+            return;
+        }
+        std.mem.copyForwards(u8, self.read_buf[0..], self.read_buf[n..self.read_len]);
+        self.read_len -= n;
+    }
+
+    /// Write a complete server-to-client frame to the socket.
+    pub fn writeFrame(self: *WsConn, fin: bool, opcode: ws.Opcode, payload: []const u8) !void {
+        // Common case: small payload, stack buffer.
+        if (payload.len <= 8192) {
+            var buf: [8192 + 10]u8 = undefined;
+            const n = try ws.writeServerFrame(&buf, fin, opcode, payload);
+            try streamWriteAll(self.stream, buf[0..n]);
+            return;
+        }
+        // Large payload: allocate exact size.
+        const total = payload.len + 10;
+        const buf = allocator.alloc(u8, total) catch return error.OutOfMemory;
+        defer allocator.free(buf);
+        const n = try ws.writeServerFrame(buf, fin, opcode, payload);
+        try streamWriteAll(self.stream, buf[0..n]);
+    }
+
+    /// Send a close frame with the given code and reason. Marks closing=true.
+    /// Caller should typically return shortly after.
+    pub fn sendClose(self: *WsConn, code: u16, reason: []const u8) void {
+        if (self.closing) return;
+        self.closing = true;
+        var payload_buf: [128]u8 = undefined;
+        const reason_clamped = if (reason.len > 123) reason[0..123] else reason;
+        const payload_len = ws.writeClosePayload(&payload_buf, code, reason_clamped) catch return;
+        self.writeFrame(true, .close, payload_buf[0..payload_len]) catch return;
+    }
+};
+
+/// Result of WS upgrade attempt.
+const WsUpgradeOutcome = enum {
+    /// Not a WebSocket request — caller should continue normal HTTP dispatch.
+    not_websocket,
+    /// Was a WS request and we handled it (whether successfully or with an
+    /// error response). Caller should NOT continue normal dispatch.
+    handled,
+};
+
+/// Case-insensitive header lookup.
+fn findHeader(headers: []const HeaderPair, name: []const u8) ?[]const u8 {
+    for (headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+    }
+    return null;
+}
+
+/// Case-insensitive substring search in a comma-separated header value.
+/// e.g. value = "keep-alive, Upgrade" + needle = "upgrade" → true.
+fn headerContainsToken(value: []const u8, token: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, value, ", \t");
+    while (it.next()) |tok| {
+        if (std.ascii.eqlIgnoreCase(tok, token)) return true;
+    }
+    return false;
+}
+
+/// Send a minimal HTTP error response on the WebSocket-upgrade path. Used for
+/// malformed upgrade requests (missing key, bad version, etc.).
+fn sendUpgradeError(stream: std.Io.net.Stream, status_code: u16, reason: []const u8) void {
+    var buf: [256]u8 = undefined;
+    const formatted = std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{ status_code, reason }) catch return;
+    streamWriteAll(stream, formatted) catch {};
+}
+
+/// If this looks like a WebSocket upgrade request and the path is registered,
+/// complete the handshake and run the connection. Returns whether we handled
+/// the request (caller should stop normal HTTP dispatch).
+fn tryWebSocketUpgrade(
+    stream: std.Io.net.Stream,
+    request_head: []const u8,
+    first_line_end: usize,
+    header_end_pos: usize,
+    method: []const u8,
+    path: []const u8,
+    tstate: ?*anyopaque,
+) WsUpgradeOutcome {
+    if (!std.mem.eql(u8, method, "GET")) return .not_websocket;
+
+    // Quick check: does the request mention "upgrade" anywhere in headers?
+    // Avoids parsing the full header list for normal GETs.
+    const upgrade_hint = std.mem.indexOfPosLinear(u8, request_head, first_line_end, "Upgrade:") != null or
+        std.mem.indexOfPosLinear(u8, request_head, first_line_end, "upgrade:") != null;
+    if (!upgrade_hint) return .not_websocket;
+
+    var headers = parseHeaders(request_head, first_line_end, header_end_pos);
+    defer headers.deinit(allocator);
+
+    const upgrade_h = findHeader(headers.items, "upgrade") orelse return .not_websocket;
+    if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade_h, " \t"), "websocket")) return .not_websocket;
+
+    // Past this point we're confident it's a WS upgrade attempt. Any further
+    // failures send 400/426 and consume the connection.
+
+    const conn_h = findHeader(headers.items, "connection") orelse {
+        sendUpgradeError(stream, 400, "Bad Request");
+        return .handled;
+    };
+    if (!headerContainsToken(conn_h, "upgrade")) {
+        sendUpgradeError(stream, 400, "Bad Request");
+        return .handled;
+    }
+
+    const version_h = findHeader(headers.items, "sec-websocket-version") orelse {
+        sendUpgradeError(stream, 400, "Bad Request");
+        return .handled;
+    };
+    if (!std.mem.eql(u8, std.mem.trim(u8, version_h, " \t"), "13")) {
+        // RFC §4.4: must respond with 426 and Sec-WebSocket-Version: 13.
+        var buf: [128]u8 = undefined;
+        const resp = std.fmt.bufPrint(&buf, "HTTP/1.1 426 Upgrade Required\r\nSec-WebSocket-Version: 13\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{}) catch return .handled;
+        streamWriteAll(stream, resp) catch {};
+        return .handled;
+    }
+
+    const key_h = findHeader(headers.items, "sec-websocket-key") orelse {
+        sendUpgradeError(stream, 400, "Bad Request");
+        return .handled;
+    };
+    const key = std.mem.trim(u8, key_h, " \t");
+
+    // Route check: is this path a registered WS endpoint? V1 hardcodes /ws-echo;
+    // Phase 4 will look up python_ws_routes here.
+    if (!isWebSocketPath(path)) {
+        sendUpgradeError(stream, 404, "Not Found");
+        return .handled;
+    }
+
+    // Handshake.
+    var accept_buf: [ws.ACCEPT_LEN]u8 = undefined;
+    _ = ws.computeAcceptKey(key, &accept_buf) catch {
+        sendUpgradeError(stream, 500, "Internal Server Error");
+        return .handled;
+    };
+    var resp_buf: [256]u8 = undefined;
+    const resp_len = ws.writeHandshakeResponse(&resp_buf, &accept_buf) catch {
+        sendUpgradeError(stream, 500, "Internal Server Error");
+        return .handled;
+    };
+    streamWriteAll(stream, resp_buf[0..resp_len]) catch return .handled;
+
+    // Run the connection.
+    runWebSocketConnection(stream, path, tstate) catch |err| {
+        logger.warn("[WS] connection ended with error: {}", .{err});
+    };
+    return .handled;
+}
+
+fn isWebSocketPath(path: []const u8) bool {
+    // V1: hardcoded echo route. Phase 4 replaces with a lookup in a Python-
+    // populated route map.
+    if (std.mem.eql(u8, path, ECHO_PATH)) return true;
+    if (getWebSocketRoutes().contains(path)) return true;
+    return false;
+}
+
+var ws_routes_map: ?std.StringHashMap(*c.PyObject) = null;
+
+fn getWebSocketRoutes() *std.StringHashMap(*c.PyObject) {
+    if (ws_routes_map == null) {
+        ws_routes_map = std.StringHashMap(*c.PyObject).init(allocator);
+    }
+    return &ws_routes_map.?;
+}
+
+/// Drive a live WebSocket connection. Reads frames, dispatches by opcode,
+/// auto-replies to ping with pong, echoes text/binary for /ws-echo, and
+/// completes the close handshake when requested.
+///
+/// Phase 4: extend this to call into Python via FFI for registered routes.
+/// Outcome of reading the next user-visible WS message. Control frames
+/// (ping/pong/close) are handled internally and never surface as a Message.
+const NextMessage = union(enum) {
+    text: []const u8, // borrow from conn.read_buf / fragment_buf
+    binary: []const u8,
+    closed,
+    protocol_error,
+};
+
+/// Read frames until we have a complete user message (text or binary), the
+/// peer closes, or a protocol error occurs. Pings are auto-replied with
+/// pongs; pongs are dropped; close frames trigger close handshake.
+///
+/// On success the returned slice points into the conn's read_buf (for
+/// single-frame messages) or fragment_buf (for reassembled messages). The
+/// caller MUST consume the message before the next call (the buffers are
+/// reused).
+fn wsReadNextMessage(conn: *WsConn) NextMessage {
+    while (!conn.closing) {
+        if (conn.read_len < 2) {
+            if (!conn.fillRead()) return .closed;
+            continue;
+        }
+
+        const frame = ws.parseServerFrame(conn.read_buf[0..conn.read_len], WsConn.MAX_MESSAGE) catch |err| switch (err) {
+            ws.ParseError.Incomplete => {
+                if (!conn.fillRead()) return .closed;
+                continue;
+            },
+            ws.ParseError.PayloadTooLarge => {
+                conn.sendClose(1009, "message too big");
+                return .protocol_error;
+            },
+            else => {
+                conn.sendClose(1002, "protocol error");
+                return .protocol_error;
+            },
+        };
+
+        switch (frame.opcode) {
+            .ping => {
+                conn.writeFrame(true, .pong, frame.payload) catch return .closed;
+                conn.consumeRead(frame.consumed);
+            },
+            .pong => {
+                conn.consumeRead(frame.consumed);
+            },
+            .close => {
+                conn.sendClose(1000, "");
+                conn.consumeRead(frame.consumed);
+                return .closed;
+            },
+            .text, .binary => {
+                if (!frame.fin) {
+                    conn.fragment_opcode = frame.opcode;
+                    conn.fragment_buf.appendSlice(allocator, frame.payload) catch {
+                        conn.sendClose(1009, "fragment too big");
+                        return .protocol_error;
+                    };
+                    conn.consumeRead(frame.consumed);
+                } else {
+                    const op = frame.opcode;
+                    const payload = frame.payload;
+                    const consumed = frame.consumed;
+                    // We need to return a stable slice. Copy into fragment_buf
+                    // so the slice survives the upcoming consumeRead().
+                    conn.fragment_buf.clearRetainingCapacity();
+                    conn.fragment_buf.appendSlice(allocator, payload) catch return .protocol_error;
+                    conn.consumeRead(consumed);
+                    return switch (op) {
+                        .text => .{ .text = conn.fragment_buf.items },
+                        .binary => .{ .binary = conn.fragment_buf.items },
+                        else => unreachable,
+                    };
+                }
+            },
+            .continuation => {
+                if (conn.fragment_buf.items.len == 0) {
+                    conn.sendClose(1002, "unexpected continuation");
+                    return .protocol_error;
+                }
+                conn.fragment_buf.appendSlice(allocator, frame.payload) catch {
+                    conn.sendClose(1009, "fragment too big");
+                    return .protocol_error;
+                };
+                const op = conn.fragment_opcode;
+                const finalize = frame.fin;
+                conn.consumeRead(frame.consumed);
+                if (finalize) {
+                    return switch (op) {
+                        .text => .{ .text = conn.fragment_buf.items },
+                        .binary => .{ .binary = conn.fragment_buf.items },
+                        else => .protocol_error,
+                    };
+                }
+            },
+            else => {
+                conn.sendClose(1002, "unsupported opcode");
+                return .protocol_error;
+            },
+        }
+    }
+    return .closed;
+}
+
+/// Drive a live WebSocket connection. Dispatches to either the in-Zig echo
+/// loop (for /ws-echo) or the Python handler invoke path.
+fn runWebSocketConnection(stream: std.Io.net.Stream, path: []const u8, tstate: ?*anyopaque) !void {
+    var conn = WsConn{ .stream = stream };
+    defer conn.deinit();
+
+    if (std.mem.eql(u8, path, ECHO_PATH)) {
+        runEchoLoop(&conn);
+        return;
+    }
+
+    const handler = getWebSocketRoutes().get(path) orelse {
+        conn.sendClose(1011, "no handler");
+        return;
+    };
+
+    runPythonHandler(&conn, handler, path, tstate);
+}
+
+fn runEchoLoop(conn: *WsConn) void {
+    while (!conn.closing) {
+        const msg = wsReadNextMessage(conn);
+        switch (msg) {
+            .text => |t| conn.writeFrame(true, .text, t) catch return,
+            .binary => |b| conn.writeFrame(true, .binary, b) catch return,
+            .closed, .protocol_error => return,
+        }
+    }
+}
+
+/// Invoke a Python WS handler. The handler signature is `async def f(ws)`.
+/// We construct a WebSocket Python object wrapping a PyCapsule that holds
+/// the *WsConn pointer, then call into the Python bootstrap helper
+/// `_ws_invoke_handler` which runs the coroutine.
+fn runPythonHandler(conn: *WsConn, handler: *c.PyObject, path: []const u8, tstate: ?*anyopaque) void {
+    // handleOneRequest runs without GIL by default; each Python-calling helper
+    // acquires it. Do the same here, then drop it again when the handler
+    // returns so subsequent FFI calls (which release+reacquire) can interleave
+    // properly during the connection's lifetime.
+    py.PyEval_AcquireThread(tstate);
+    defer py.PyEval_ReleaseThread(tstate);
+
+    // Make a capsule from the conn pointer. Python side passes it back into
+    // ws_recv/ws_send/ws_close.
+    const capsule_name: [*:0]const u8 = "turbonet.WsConn";
+    const capsule = c.PyCapsule_New(@ptrCast(conn), capsule_name, null) orelse {
+        c.PyErr_Print();
+        conn.sendClose(1011, "internal error");
+        return;
+    };
+    defer c.Py_DecRef(capsule);
+
+    // Find the bootstrap-installed helper on the turbonet module:
+    // `_ws_invoke_handler(handler, capsule, path)`.
+    const turbonet_mod = c.PyImport_ImportModule("turboapi.turbonet") orelse blk: {
+        c.PyErr_Clear();
+        break :blk c.PyImport_ImportModule("turbonet") orelse {
+            c.PyErr_Print();
+            conn.sendClose(1011, "internal error");
+            return;
+        };
+    };
+    defer c.Py_DecRef(turbonet_mod);
+    invokeHelper(turbonet_mod, handler, capsule, path);
+
+    // Handler returned (or raised). If it didn't close the connection itself,
+    // send a clean close now.
+    if (!conn.closing) conn.sendClose(1000, "");
+}
+
+fn invokeHelper(mod: *c.PyObject, handler: *c.PyObject, capsule: *c.PyObject, path: []const u8) void {
+    const helper = c.PyObject_GetAttrString(mod, "_ws_invoke_handler") orelse {
+        c.PyErr_Print();
+        return;
+    };
+    defer c.Py_DecRef(helper);
+
+    const py_path = py.newString(path) orelse {
+        c.PyErr_Print();
+        return;
+    };
+    defer c.Py_DecRef(py_path);
+
+    const args = c.PyTuple_Pack(3, handler, capsule, py_path) orelse {
+        c.PyErr_Print();
+        return;
+    };
+    defer c.Py_DecRef(args);
+
+    const result = c.PyObject_Call(helper, args, null);
+    if (result) |r| {
+        c.Py_DecRef(r);
+    } else {
+        c.PyErr_Print();
+    }
+}
+
+// ── WebSocket FFI ──────────────────────────────────────────────────────────
+//
+// Python-facing primitives, exposed via main.zig method table:
+//   _server_add_websocket_route(path, handler)
+//   _ws_recv(capsule) -> (type_str, data) | raises WebSocketDisconnect
+//   _ws_send_text(capsule, str)
+//   _ws_send_bytes(capsule, bytes)
+//   _ws_close(capsule, code, reason)
+//
+// Each FFI call extracts the WsConn pointer from the capsule, releases the
+// GIL around blocking I/O, then re-acquires before returning a Python value.
+
+const WS_CAPSULE_NAME: [*:0]const u8 = "turbonet.WsConn";
+
+inline fn capsuleToConn(capsule_obj: ?*c.PyObject) ?*WsConn {
+    if (capsule_obj == null) return null;
+    const raw = c.PyCapsule_GetPointer(capsule_obj, WS_CAPSULE_NAME) orelse return null;
+    return @ptrCast(@alignCast(raw));
+}
+
+pub fn server_add_websocket_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var path: [*c]const u8 = null;
+    var handler: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "sO", &path, &handler) == 0) return null;
+    const path_s = std.mem.span(path);
+    const path_owned = allocator.dupe(u8, path_s) catch {
+        py.setError("ws route alloc failed", .{});
+        return null;
+    };
+    c.Py_IncRef(handler.?);
+
+    var ws_routes = getWebSocketRoutes();
+    if (ws_routes.fetchPut(path_owned, handler.?) catch null) |old| {
+        // Replacing an existing route — free the old key + decref old handler.
+        allocator.free(path_owned);
+        c.Py_DecRef(old.value);
+        _ = ws_routes.put(old.key, handler.?) catch {};
+    }
+    return py.pyNone();
+}
+
+/// Block reading the next user-visible WS message. Returns a 2-tuple
+/// (type_str, data) where type_str is "text" or "bytes". Raises a Python
+/// RuntimeError on disconnect (Python side translates to WebSocketDisconnect).
+pub fn ws_recv(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var capsule_obj: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "O", &capsule_obj) == 0) return null;
+    const conn = capsuleToConn(capsule_obj) orelse {
+        py.setError("invalid ws capsule", .{});
+        return null;
+    };
+
+    const save = py.PyEval_SaveThread();
+    const msg = wsReadNextMessage(conn);
+    py.PyEval_RestoreThread(save);
+
+    switch (msg) {
+        .text => |t| {
+            const type_str = py.newString("text") orelse return null;
+            const data = py.newString(t) orelse {
+                c.Py_DecRef(type_str);
+                return null;
+            };
+            return c.PyTuple_Pack(2, type_str, data);
+        },
+        .binary => |b| {
+            const type_str = py.newString("bytes") orelse return null;
+            const data = py.newBytes(b) orelse {
+                c.Py_DecRef(type_str);
+                return null;
+            };
+            return c.PyTuple_Pack(2, type_str, data);
+        },
+        .closed => {
+            // Signal disconnect to Python — RuntimeError, translated by the
+            // Python helper into WebSocketDisconnect.
+            c.PyErr_SetString(c.PyExc_RuntimeError, "websocket disconnect");
+            return null;
+        },
+        .protocol_error => {
+            c.PyErr_SetString(c.PyExc_RuntimeError, "websocket protocol error");
+            return null;
+        },
+    }
+}
+
+pub fn ws_send_text(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var capsule_obj: ?*c.PyObject = null;
+    var text: [*c]const u8 = null;
+    var text_len: c.Py_ssize_t = 0;
+    if (c.PyArg_ParseTuple(args, "Os#", &capsule_obj, &text, &text_len) == 0) return null;
+    const conn = capsuleToConn(capsule_obj) orelse {
+        py.setError("invalid ws capsule", .{});
+        return null;
+    };
+
+    const slice = if (text_len > 0) text[0..@intCast(text_len)] else "";
+    const save = py.PyEval_SaveThread();
+    conn.writeFrame(true, .text, slice) catch {
+        py.PyEval_RestoreThread(save);
+        c.PyErr_SetString(c.PyExc_RuntimeError, "ws write failed");
+        return null;
+    };
+    py.PyEval_RestoreThread(save);
+    return py.pyNone();
+}
+
+pub fn ws_send_bytes(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var capsule_obj: ?*c.PyObject = null;
+    var data: [*c]const u8 = null;
+    var data_len: c.Py_ssize_t = 0;
+    if (c.PyArg_ParseTuple(args, "Oy#", &capsule_obj, &data, &data_len) == 0) return null;
+    const conn = capsuleToConn(capsule_obj) orelse {
+        py.setError("invalid ws capsule", .{});
+        return null;
+    };
+
+    const slice = if (data_len > 0) data[0..@intCast(data_len)] else "";
+    const save = py.PyEval_SaveThread();
+    conn.writeFrame(true, .binary, slice) catch {
+        py.PyEval_RestoreThread(save);
+        c.PyErr_SetString(c.PyExc_RuntimeError, "ws write failed");
+        return null;
+    };
+    py.PyEval_RestoreThread(save);
+    return py.pyNone();
+}
+
+pub fn ws_close(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var capsule_obj: ?*c.PyObject = null;
+    var code: c_int = 1000;
+    var reason: [*c]const u8 = null;
+    var reason_len: c.Py_ssize_t = 0;
+    if (c.PyArg_ParseTuple(args, "Oi|s#", &capsule_obj, &code, &reason, &reason_len) == 0) return null;
+    const conn = capsuleToConn(capsule_obj) orelse {
+        py.setError("invalid ws capsule", .{});
+        return null;
+    };
+
+    const reason_slice = if (reason_len > 0 and reason != null) reason[0..@intCast(reason_len)] else "";
+    const save = py.PyEval_SaveThread();
+    conn.sendClose(@intCast(code), reason_slice);
+    py.PyEval_RestoreThread(save);
+    return py.pyNone();
+}
+
+
+
 fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     // Phase 1: Read headers into a fixed buffer (headers are typically < 8KB)
     var header_buf: [8192]u8 = undefined;
@@ -1183,6 +1760,16 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     const q_idx = std.mem.indexOf(u8, raw_path, "?");
     const path = if (q_idx) |i| raw_path[0..i] else raw_path;
     const query_string = if (q_idx) |i| raw_path[i + 1 ..] else "";
+
+    // ── WebSocket upgrade short-circuit ─────────────────────────────────
+    // Catches GET requests with Upgrade: websocket BEFORE the normal router
+    // lookup. WS routes are stored in a separate map (getWebSocketRoutes())
+    // populated by the Python `@app.websocket(...)` decorator, plus the
+    // hardcoded /ws-echo demo route.
+    switch (tryWebSocketUpgrade(stream, request_head, first_line_end, he, method, path, tstate)) {
+        .handled => return,
+        .not_websocket => {},
+    }
 
     // Phase 3: Route match EARLY — before header parsing, so fast handlers
     // can skip the expensive parseHeaders + body read entirely.
