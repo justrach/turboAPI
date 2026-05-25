@@ -225,6 +225,18 @@ const HandlerEntry = struct {
     param_count: usize = 0,
     cached_body_ptr: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     cached_body_len: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    cached_ct_ptr: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    cached_ct_len: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+};
+
+const CachedResponse = struct {
+    body: []const u8,
+    content_type: []const u8,
+};
+
+const CachedEntry = struct {
+    body: []const u8,
+    content_type: []const u8,
 };
 
 const HeaderPair = struct {
@@ -291,7 +303,7 @@ const StaticRouteEntry = struct {
 var routes: ?std.StringHashMap(HandlerEntry) = null;
 var native_routes: ?std.StringHashMap(NativeHandlerEntry) = null;
 var static_routes: ?std.StringHashMap(StaticRouteEntry) = null;
-var response_cache: ?std.StringHashMap([]const u8) = null;
+var response_cache: ?std.StringHashMap(CachedResponse) = null;
 var response_cache_lock: std.Io.Mutex = .init;
 var response_cache_count: usize = 0;
 const MAX_CACHE_ENTRIES: usize = 10_000; // bounded to prevent OOM via unique paths
@@ -399,14 +411,14 @@ fn getStaticRoutes() *std.StringHashMap(StaticRouteEntry) {
     return &static_routes.?;
 }
 
-fn getResponseCache() *std.StringHashMap([]const u8) {
+fn getResponseCache() *std.StringHashMap(CachedResponse) {
     if (response_cache == null) {
-        response_cache = std.StringHashMap([]const u8).init(allocator);
+        response_cache = std.StringHashMap(CachedResponse).init(allocator);
     }
     return &response_cache.?;
 }
 
-fn getCachedResponse(key: []const u8) ?[]const u8 {
+fn getCachedResponse(key: []const u8) ?CachedResponse {
     response_cache_lock.lockUncancelable(runtime.io);
     defer response_cache_lock.unlock(runtime.io);
     if (response_cache == null) return null;
@@ -414,7 +426,7 @@ fn getCachedResponse(key: []const u8) ?[]const u8 {
 }
 
 /// Cache a pre-rendered response, respecting MAX_CACHE_ENTRIES to prevent OOM.
-fn cacheResponse(key: []const u8, rendered: []const u8) void {
+fn cacheResponse(key: []const u8, rendered: []const u8, content_type: []const u8) void {
     response_cache_lock.lockUncancelable(runtime.io);
     defer response_cache_lock.unlock(runtime.io);
 
@@ -423,34 +435,47 @@ fn cacheResponse(key: []const u8, rendered: []const u8) void {
         return;
     }
 
-    const key_dupe = allocator.dupe(u8, key) catch return;
+    const ct_dupe = allocator.dupe(u8, content_type) catch {
+        allocator.free(rendered);
+        return;
+    };
+    const key_dupe = allocator.dupe(u8, key) catch {
+        allocator.free(ct_dupe);
+        allocator.free(rendered);
+        return;
+    };
     const cache = getResponseCache();
     const gop = cache.getOrPut(key_dupe) catch {
         allocator.free(rendered);
         allocator.free(key_dupe);
+        allocator.free(ct_dupe);
         return;
     };
 
     if (gop.found_existing) {
         allocator.free(rendered);
         allocator.free(key_dupe);
+        allocator.free(ct_dupe);
         return;
     }
 
-    gop.value_ptr.* = rendered;
+    gop.value_ptr.* = .{ .body = rendered, .content_type = ct_dupe };
     response_cache_count += 1;
 }
 
-fn getCachedEntryBody(entry: *const HandlerEntry) ?[]const u8 {
+fn getCachedEntry(entry: *const HandlerEntry) ?CachedEntry {
     const ptr_val = entry.cached_body_ptr.load(.acquire);
     if (ptr_val == 0) return null;
 
     const len = entry.cached_body_len.load(.acquire);
     const ptr: [*]const u8 = @ptrFromInt(ptr_val);
-    return ptr[0..len];
+    const ct_ptr_val = entry.cached_ct_ptr.load(.acquire);
+    const ct_len = entry.cached_ct_len.load(.acquire);
+    const ct: []const u8 = if (ct_ptr_val != 0) @as([*]const u8, @ptrFromInt(ct_ptr_val))[0..ct_len] else "application/json";
+    return .{ .body = ptr[0..len], .content_type = ct };
 }
 
-fn cacheEntryBody(entry: *HandlerEntry, rendered: []const u8) void {
+fn cacheEntryBody(entry: *HandlerEntry, rendered: []const u8, content_type: []const u8) void {
     response_cache_lock.lockUncancelable(runtime.io);
     defer response_cache_lock.unlock(runtime.io);
 
@@ -464,14 +489,20 @@ fn cacheEntryBody(entry: *HandlerEntry, rendered: []const u8) void {
         return;
     }
 
+    const ct_dupe = allocator.dupe(u8, content_type) catch {
+        allocator.free(rendered);
+        return;
+    };
+    entry.cached_ct_len.store(ct_dupe.len, .release);
+    entry.cached_ct_ptr.store(@intFromPtr(ct_dupe.ptr), .release);
     entry.cached_body_len.store(rendered.len, .release);
     entry.cached_body_ptr.store(@intFromPtr(rendered.ptr), .release);
     response_cache_count += 1;
 }
 
-fn sendCachedJsonBody(stream: std.Io.net.Stream, body: []const u8) void {
+fn sendCachedBody(stream: std.Io.net.Stream, body: []const u8, content_type: []const u8) void {
     if (cors_headers.len > 0) {
-        sendResponse(stream, 200, "application/json", body);
+        sendResponse(stream, 200, content_type, body);
         return;
     }
 
@@ -480,9 +511,10 @@ fn sendCachedJsonBody(stream: std.Io.net.Stream, body: []const u8) void {
     const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body.len}) catch return;
 
     const h1 = "HTTP/1.1 200 OK\r\nServer: TurboAPI\r\nDate: ";
-    const h2 = "\r\nContent-Type: application/json\r\nContent-Length: ";
+    const h2a = "\r\nContent-Type: ";
+    const h2b = "\r\nContent-Length: ";
     const h3 = "\r\nConnection: keep-alive\r\n\r\n";
-    const total = h1.len + date_str.len + h2.len + len_str.len + h3.len + body.len;
+    const total = h1.len + date_str.len + h2a.len + content_type.len + h2b.len + len_str.len + h3.len + body.len;
 
     if (total <= 4096) {
         var resp_buf: [4096]u8 = undefined;
@@ -491,8 +523,12 @@ fn sendCachedJsonBody(stream: std.Io.net.Stream, body: []const u8) void {
         pos += h1.len;
         @memcpy(resp_buf[pos .. pos + date_str.len], date_str);
         pos += date_str.len;
-        @memcpy(resp_buf[pos .. pos + h2.len], h2);
-        pos += h2.len;
+        @memcpy(resp_buf[pos .. pos + h2a.len], h2a);
+        pos += h2a.len;
+        @memcpy(resp_buf[pos .. pos + content_type.len], content_type);
+        pos += content_type.len;
+        @memcpy(resp_buf[pos .. pos + h2b.len], h2b);
+        pos += h2b.len;
         @memcpy(resp_buf[pos .. pos + len_str.len], len_str);
         pos += len_str.len;
         @memcpy(resp_buf[pos .. pos + h3.len], h3);
@@ -503,7 +539,9 @@ fn sendCachedJsonBody(stream: std.Io.net.Stream, body: []const u8) void {
     } else {
         streamWriteAll(stream, h1) catch return;
         streamWriteAll(stream, date_str) catch return;
-        streamWriteAll(stream, h2) catch return;
+        streamWriteAll(stream, h2a) catch return;
+        streamWriteAll(stream, content_type) catch return;
+        streamWriteAll(stream, h2b) catch return;
         streamWriteAll(stream, len_str) catch return;
         streamWriteAll(stream, h3) catch return;
         if (body.len > 0) streamWriteAll(stream, body) catch return;
@@ -1338,8 +1376,8 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     switch (entry.handler_tag) {
         .simple_sync_noargs => {
             if (cache_noargs_responses) {
-                if (getCachedEntryBody(entry_ptr)) |cached| {
-                    sendCachedJsonBody(stream, cached);
+                if (getCachedEntry(entry_ptr)) |cached| {
+                    sendCachedBody(stream, cached.body, cached.content_type);
                     return;
                 }
                 callPythonNoArgsEntryCaching(tstate, entry_ptr, stream);
@@ -1358,7 +1396,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
                 else
                     std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch path;
                 if (getCachedResponse(cache_key)) |cached| {
-                    sendCachedJsonBody(stream, cached);
+                    sendCachedBody(stream, cached.body, cached.content_type);
                     return;
                 }
                 callPythonVectorcallCaching(tstate, entry, query_string, &match.params, stream, cache_key);
@@ -1371,8 +1409,8 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
             const eager = entry.handler_tag == .simple_async_eager;
             if (cache_noargs_responses) {
                 if (entry.param_count == 0) {
-                    if (getCachedEntryBody(entry_ptr)) |cached| {
-                        sendCachedJsonBody(stream, cached);
+                    if (getCachedEntry(entry_ptr)) |cached| {
+                        sendCachedBody(stream, cached.body, cached.content_type);
                         return;
                     }
                     callPythonAsyncNoArgs(tstate, entry, stream, entry_ptr, eager);
@@ -1383,7 +1421,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
                     else
                         std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch path;
                     if (getCachedResponse(cache_key)) |cached| {
-                        sendCachedJsonBody(stream, cached);
+                        sendCachedBody(stream, cached.body, cached.content_type);
                         return;
                     }
                     callPythonAsyncVectorcall(tstate, entry, query_string, &match.params, stream, cache_key, eager);
@@ -1659,7 +1697,7 @@ fn sendTupleResponseAndCache(stream: std.Io.net.Stream, result: *c.PyObject, cac
     sendResponse(stream, status_code, content_type, body_slice);
 
     const body_dupe = allocator.dupe(u8, body_slice) catch return;
-    cacheResponse(cache_key, body_dupe);
+    cacheResponse(cache_key, body_dupe, content_type);
 }
 
 fn sendTupleResponseAndCacheEntry(stream: std.Io.net.Stream, result: *c.PyObject, entry: *HandlerEntry) void {
@@ -1685,7 +1723,7 @@ fn sendTupleResponseAndCacheEntry(stream: std.Io.net.Stream, result: *c.PyObject
     sendResponse(stream, status_code, content_type, body_slice);
 
     const body_dupe = allocator.dupe(u8, body_slice) catch return;
-    cacheEntryBody(entry, body_dupe);
+    cacheEntryBody(entry, body_dupe, content_type);
 }
 
 // ── simple_sync_noargs: PyObject_CallNoArgs — no tuple/dict construction ─────
@@ -2002,9 +2040,9 @@ fn callPythonVectorcallCaching(
 
     sendResponse(stream, status_code, content_type, body_slice);
 
-    // Cache body only (sendResponse adds fresh Date headers on each hit)
+    // Cache body + content-type (sendResponse adds fresh Date headers on each hit)
     const body_dupe = allocator.dupe(u8, body_slice) catch return;
-    cacheResponse(cache_key, body_dupe);
+    cacheResponse(cache_key, body_dupe, content_type);
 }
 
 // ── Fast Python handler dispatch (simple_sync/body_sync) ─────────────────────
@@ -2670,9 +2708,9 @@ const CacheThreadCtx = struct {
 fn cacheThreadWorker(ctx: *const CacheThreadCtx) void {
     for (0..ctx.iterations) |_| {
         const rendered = allocator.dupe(u8, ctx.body) catch return;
-        cacheResponse(ctx.key, rendered);
+        cacheResponse(ctx.key, rendered, "application/json");
         const cached = getCachedResponse(ctx.key) orelse continue;
-        std.debug.assert(std.mem.eql(u8, cached, ctx.body));
+        std.debug.assert(std.mem.eql(u8, cached.body, ctx.body));
     }
 }
 

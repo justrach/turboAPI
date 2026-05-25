@@ -5,6 +5,7 @@ FastAPI-compatible decorators with revolutionary performance
 
 import inspect
 import re
+import typing
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -133,17 +134,23 @@ class Router:
             def wrapper(func: Callable) -> Callable:
                 # Analyze function signature
                 sig = inspect.signature(func)
+                # Resolve stringified annotations from PEP 563 (from __future__ import annotations)
+                try:
+                    type_hints = typing.get_type_hints(func)
+                except Exception:
+                    type_hints = {}
                 path_params = []
                 query_params = {}
                 request_model = None
 
                 for param_name, param in sig.parameters.items():
+                    annotation = type_hints.get(param_name, param.annotation)
                     if f"{{{param_name}}}" in path:
                         # Path parameter
                         path_param = PathParameter(
                             name=param_name,
-                            type=param.annotation
-                            if param.annotation != inspect.Parameter.empty
+                            type=annotation
+                            if annotation != inspect.Parameter.empty
                             else str,
                             default=param.default
                             if param.default != inspect.Parameter.empty
@@ -151,13 +158,13 @@ class Router:
                             required=param.default == inspect.Parameter.empty,
                         )
                         path_params.append(path_param)
-                    elif param.annotation != inspect.Parameter.empty:
+                    elif annotation != inspect.Parameter.empty:
                         # Check if it's a request model (class type)
-                        if inspect.isclass(param.annotation):
-                            request_model = param.annotation
+                        if inspect.isclass(annotation):
+                            request_model = annotation
                         else:
                             # Query parameter
-                            query_params[param_name] = param.annotation
+                            query_params[param_name] = annotation
 
                 # Create route definition
                 full_path = self.prefix + path

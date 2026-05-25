@@ -8,6 +8,7 @@ import dis
 import inspect
 import json
 import os
+import typing
 from typing import Any, get_origin
 
 try:
@@ -135,6 +136,11 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
     is_async = inspect.iscoroutinefunction(handler)
 
     sig = inspect.signature(handler)
+    # Resolve stringified annotations from PEP 563 (from __future__ import annotations)
+    try:
+        type_hints = typing.get_type_hints(handler)
+    except Exception:
+        type_hints = {}
     param_types = {}
     needs_body = False
     has_depends = False
@@ -177,7 +183,7 @@ def classify_handler(handler, route) -> tuple[str, dict[str, str], dict]:
 
     has_implicit_header_params = False
     for param_name, param in sig.parameters.items():
-        annotation = param.annotation
+        annotation = type_hints.get(param_name, param.annotation)
 
         if param_types.get(param_name) in ("form", "file"):
             needs_body = True
@@ -776,7 +782,9 @@ class ZigIntegratedTurboAPI(TurboAPI):
             # Run before_request
             for mw in middleware_instances:
                 try:
-                    mw.before_request(request)
+                    _before = getattr(mw, "before_request", None)
+                    if _before is not None:
+                        _before(request)
                 except Exception as e:
                     redirect_url = getattr(e, "url", None)
                     if redirect_url:
@@ -801,7 +809,10 @@ class ZigIntegratedTurboAPI(TurboAPI):
             except Exception as e:
                 final_resp = None
                 for mw in reversed(middleware_instances):
-                    err_resp = mw.on_error(request, e)
+                    _on_error = getattr(mw, "on_error", None)
+                    if _on_error is None:
+                        continue
+                    err_resp = _on_error(request, e)
                     if err_resp:
                         final_resp = err_resp
                         break
@@ -832,7 +843,9 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 headers={},
             )
             for mw in reversed(middleware_instances):
-                response = mw.after_request(request, response)
+                _after = getattr(mw, "after_request", None)
+                if _after is not None:
+                    response = _after(request, response)
 
             # Merge middleware-modified content and headers back into result
             result["status_code"] = response.status_code
