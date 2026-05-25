@@ -17,6 +17,40 @@ from turboapi.serializers import json_loads as _turbo_loads
 
 _NO_COERCION = object()
 
+def _collect_streaming_body_sync(result):
+    """If result is a StreamingResponse, collect its body synchronously."""
+    if not hasattr(result, "body_iterator"):
+        return None
+    import asyncio
+
+    async def _drain(iterator):
+        chunks = []
+        async for chunk in iterator:
+            if isinstance(chunk, str):
+                chunk = chunk.encode("utf-8")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    try:
+        return asyncio.run(_drain(result.body_iterator()))
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(_drain(result.body_iterator()))
+
+
+async def _collect_streaming_body_async(result):
+    """If result is a StreamingResponse, collect its body asynchronously."""
+    if not hasattr(result, "body_iterator"):
+        return None
+    chunks = []
+    async for chunk in result.body_iterator():
+        if isinstance(chunk, str):
+            chunk = chunk.encode("utf-8")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+
 
 class RequestParsingError(ValueError):
     """Raised when request data cannot be parsed into handler parameters."""
@@ -1243,6 +1277,9 @@ def create_pos_handler(original_handler):
         try:
             result = original_handler(*args)
             if isinstance(result, _Response):
+                streaming_body = _collect_streaming_body_sync(result)
+                if streaming_body is not None:
+                    return (result.status_code, result.media_type or "text/event-stream", streaming_body)
                 body = (
                     result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
                 )
@@ -1276,6 +1313,9 @@ def create_async_pos_handler(original_handler):
         try:
             result = await original_handler(*args)
             if isinstance(result, _Response):
+                streaming_body = _collect_streaming_body_sync(result)
+                if streaming_body is not None:
+                    return (result.status_code, result.media_type or "text/event-stream", streaming_body)
                 body = (
                     result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
                 )
@@ -1334,6 +1374,9 @@ def create_fast_handler(original_handler, route_definition):
             try:
                 result = original_handler()
                 if isinstance(result, _Response):
+                    streaming_body = _collect_streaming_body_sync(result)
+                    if streaming_body is not None:
+                        return (result.status_code, result.media_type or "text/event-stream", streaming_body)
                     ct = result.media_type or "application/json"
                     body = (
                         result.body
@@ -1399,6 +1442,9 @@ def create_fast_handler(original_handler, route_definition):
             result = original_handler(**call_kwargs)
 
             if isinstance(result, _Response):
+                streaming_body = _collect_streaming_body_sync(result)
+                if streaming_body is not None:
+                    return (result.status_code, result.media_type or "text/event-stream", streaming_body)
                 ct = result.media_type or "application/json"
                 body = (
                     result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
@@ -1519,6 +1565,9 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
             result = await original_handler(**call_kwargs)
 
             if isinstance(result, _Response):
+                streaming_body = _collect_streaming_body_sync(result)
+                if streaming_body is not None:
+                    return (result.status_code, result.media_type or "text/event-stream", streaming_body)
                 ct = result.media_type or "application/json"
                 body = (
                     result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")

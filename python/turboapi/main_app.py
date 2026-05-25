@@ -126,6 +126,55 @@ class TurboAPI(Router):
         super().include_router(router, prefix, tags)
         _log.info("Included router with prefix: %s", prefix)
 
+    def include_mcp(self, mcp_router, path="/mcp", transport="streamable-http"):
+        """Mount an MCPRouter at the given path.
+
+        Registers a POST handler that speaks the MCP JSON-RPC protocol
+        (initialize, tools/list, tools/call).
+        """
+
+        @self.post(path)
+        def _mcp_handler(request_body: dict = None, **kwargs):
+            body = request_body or {}
+            method = body.get("method", "")
+            params = body.get("params", {})
+            req_id = body.get("id")
+
+            if method == "initialize":
+                result = {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {"tools": {"listChanged": False}},
+                    "serverInfo": {
+                        "name": mcp_router.name,
+                        "version": getattr(mcp_router, "version", "1.0.0"),
+                    },
+                }
+            elif method == "tools/list":
+                result = {"tools": mcp_router.list_tools()}
+            elif method == "tools/call":
+                tool_name = params.get("name", "")
+                arguments = params.get("arguments", {})
+                result = mcp_router.call_tool(tool_name, arguments)
+            else:
+                result = {
+                    "error": {
+                        "code": -32601,
+                        "message": f"Unknown method: {method}",
+                    }
+                }
+
+            response = {"jsonrpc": "2.0", "result": result}
+            if req_id is not None:
+                response["id"] = req_id
+            return response
+
+        _log.info(
+            "Mounted MCP router '%s' at %s (%d tools)",
+            mcp_router.name,
+            path,
+            len(mcp_router.tools),
+        )
+
     def mount(self, path: str, app: Any, name: str | None = None) -> None:
         """Mount a sub-application or static files at a path.
 

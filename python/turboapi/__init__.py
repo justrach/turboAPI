@@ -98,6 +98,7 @@ __version__ = "1.0.29"
 __all__ = [
     # Core
     "TurboAPI",
+    "MCPRouter",
     "APIRouter",
     "Router",
     "TurboRequest",
