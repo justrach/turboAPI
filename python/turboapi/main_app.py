@@ -8,9 +8,11 @@ import inspect
 from collections.abc import Callable
 from typing import Any
 
+from .logger import get_logger
 from .routing import Router
-from .version_check import CHECK_MARK, ROCKET
+from .serializers import JSON_BACKEND
 
+_log = get_logger()
 
 def _parse_multipart(body: bytes, boundary: str) -> tuple[dict, list]:
     """Parse multipart/form-data body into (form_fields, file_fields)."""
@@ -87,7 +89,7 @@ class TurboAPI(Router):
         self._exception_handlers: dict[type, Callable] = {}
         self._openapi_schema: dict | None = None
 
-        print(f"{ROCKET} TurboAPI application created: {title} v{version}")
+        _log.info("Application created: %s v%s", title, version)
 
     @property
     def routes(self):
@@ -97,7 +99,7 @@ class TurboAPI(Router):
     def add_middleware(self, middleware_class, **kwargs):
         """Add middleware to the application."""
         self.middleware_stack.append((middleware_class, kwargs))
-        print(f"[CONFIG] Added middleware: {middleware_class.__name__}")
+        _log.info("Added middleware: %s", middleware_class.__name__)
 
     def on_event(self, event_type: str):
         """Register event handlers (startup/shutdown)."""
@@ -105,10 +107,10 @@ class TurboAPI(Router):
         def decorator(func: Callable):
             if event_type == "startup":
                 self.startup_handlers.append(func)
-                print(f"[EVENT] Registered startup handler: {func.__name__}")
+                _log.info("Registered startup handler: %s", func.__name__)
             elif event_type == "shutdown":
                 self.shutdown_handlers.append(func)
-                print(f"[EVENT] Registered shutdown handler: {func.__name__}")
+                _log.info("Registered shutdown handler: %s", func.__name__)
             return func
 
         return decorator
@@ -122,7 +124,7 @@ class TurboAPI(Router):
     ):
         """Include a router with all its routes."""
         super().include_router(router, prefix, tags)
-        print(f"[ROUTER] Included router with prefix: {prefix}")
+        _log.info("Included router with prefix: %s", prefix)
 
     def mount(self, path: str, app: Any, name: str | None = None) -> None:
         """Mount a sub-application or static files at a path.
@@ -141,7 +143,7 @@ class TurboAPI(Router):
         if hasattr(app, "get_file"):
             self._register_static_mount(path, app)
 
-        print(f"[MOUNT] Mounted {name or 'app'} at {path}")
+        _log.info("Mounted %s at %s", name or "app", path)
 
     _MAX_STATIC_DEPTH = 8
 
@@ -233,7 +235,7 @@ class TurboAPI(Router):
 
     async def _run_startup_handlers(self):
         """Run all startup event handlers."""
-        print("[START] Running startup handlers...")
+        _log.info("Running startup handlers...")
         for handler in self.startup_handlers:
             if asyncio.iscoroutinefunction(handler):
                 await handler()
@@ -242,7 +244,7 @@ class TurboAPI(Router):
 
     async def _run_shutdown_handlers(self):
         """Run all shutdown event handlers."""
-        print("[STOP] Running shutdown handlers...")
+        _log.info("Running shutdown handlers...")
         for handler in self.shutdown_handlers:
             if asyncio.iscoroutinefunction(handler):
                 await handler()
@@ -280,8 +282,8 @@ class TurboAPI(Router):
 
     def print_routes(self):
         """Print all registered routes in a nice format."""
-        print(f"\n[ROUTES] {self.title} - Registered Routes:")
-        print("=" * 50)
+        _log.info("Registered Routes for %s:", self.title)
+
 
         routes_by_method = {}
         for route in self.registry.get_routes():
@@ -292,14 +294,14 @@ class TurboAPI(Router):
 
         for method in ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]:
             if method in routes_by_method:
-                print(f"\n{method} Routes:")
+                _log.info("%s Routes:", method)
                 for route in routes_by_method[method]:
                     params = ", ".join([p.name for p in route.path_params])
                     param_str = f" ({params})" if params else ""
-                    print(f"  {route.path}{param_str} -> {route.handler.__name__}")
+                    _log.info("  %s -> %s", route.path + param_str, route.handler.__name__)
 
-        print(f"\nTotal routes: {len(self.registry.get_routes())}")
-        print(f"Middleware: {len(self.middleware_stack)} components")
+        _log.info("Total routes: %d", len(self.registry.get_routes()))
+        _log.info("Middleware: %d components", len(self.middleware_stack))
 
     async def handle_request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
         """Handle an incoming request (for testing/simulation)."""
@@ -362,39 +364,39 @@ class TurboAPI(Router):
 
         Use run() instead for better performance with Zig HTTP core.
         """
-        print("\n⚠️  WARNING: Using legacy loop sharding runtime")
-        print("   For 12x better performance, use app.run() (default)")
-        print(f"\n{ROCKET} Starting TurboAPI server...")
-        print(f"   Host: {host}:{port}")
-        print(f"   Workers: {workers}")
-        print(f"   Title: {self.title} v{self.version}")
+        _log.warning("Using legacy loop sharding runtime")
+        _log.warning("For 12x better performance, use app.run() (default)")
+        _log.info("Starting TurboAPI server...")
+        _log.info("Host: %s:%s", host, port)
+        _log.info("Workers: %s", workers)
+        _log.info("Title: %s v%s", self.title, self.version)
 
         # Print route information
         self.print_routes()
 
-        print("\n[CONFIG] Middleware Stack:")
+        _log.info("Middleware Stack:")
         for middleware_class, _middleware_kwargs in self.middleware_stack:
-            print(f"   - {middleware_class.__name__}")
+            _log.info("  - %s", middleware_class.__name__)
 
-        print("\n[PERF] Performance Features:")
-        print("   - 7.5x FastAPI middleware performance")
-        print("   - Python 3.13 free-threading support")
-        print("   - Zero-copy optimizations")
-        print("   - Zig-powered HTTP core")
+        _log.info("Performance Features:")
+        _log.info("  - 7.5x FastAPI middleware performance")
+        _log.info("  - Python 3.13 free-threading support")
+        _log.info("  - Zero-copy optimizations")
+        _log.info("  - Zig-powered HTTP core")
 
         # Run startup handlers
         if self.startup_handlers:
             asyncio.run(self._run_startup_handlers())
 
-        print(f"\n{CHECK_MARK} TurboAPI server ready!")
-        print(f"   Visit: http://{host}:{port}")
-        print(f"   Docs: http://{host}:{port}/docs (coming soon)")
+        _log.info("TurboAPI server ready!")
+        _log.info("Visit: http://%s:%s", host, port)
+        _log.info("Docs: http://%s:%s/docs", host, port)
 
         try:
             # This would start the actual HTTP server
             # For now, we'll simulate it
-            print("\n[SERVER] Server running (Phase 6 integration in progress)")
-            print("Press Ctrl+C to stop")
+            _log.info("Server running")
+            _log.info("Press Ctrl+C to stop")
 
             # Simulate server running
             import time
@@ -403,13 +405,13 @@ class TurboAPI(Router):
                 time.sleep(1)
 
         except KeyboardInterrupt:
-            print("\n[STOP] Shutting down TurboAPI server...")
+            _log.info("Shutting down TurboAPI server...")
 
             # Run shutdown handlers
             if self.shutdown_handlers:
                 asyncio.run(self._run_shutdown_handlers())
 
-            print("[BYE] Server stopped")
+            _log.info("Server stopped")
 
     def run(self, host: str = "127.0.0.1", port: int = 8000, **kwargs):
         """Run the TurboAPI application with Zig HTTP core.
@@ -417,27 +419,27 @@ class TurboAPI(Router):
         Performance: 24K+ RPS (12x faster than baseline!)
         Uses Zig thread pool with Python 3.14 free-threading.
         """
-        print("\n🚀 Starting TurboAPI with Zig HTTP core!")
-        print(f"   Host: {host}:{port}")
-        print(f"   Title: {self.title} v{self.version}")
-        print("   ⚡ Performance: 24K+ RPS (12x improvement!)")
+        _log.info("Starting TurboAPI with Zig HTTP core (JSON: %s)", JSON_BACKEND)
+        _log.info("Host: %s:%s", host, port)
+        _log.info("Title: %s v%s", self.title, self.version)
+        _log.info("Performance: 24K+ RPS")
 
         # Print route information
         self.print_routes()
 
-        print("\n[PERF] Phase D Features:")
-        print("   ✨ Zig 8-thread worker pool")
-        print("   ✨ Python 3.14 free-threading (no GIL)")
-        print("   ✨ Zero-copy response path")
-        print("   ✨ 7,168 concurrent task capacity")
-        print("   ✨ Zig-powered HTTP execution")
+        _log.info("Phase D Features:")
+        _log.info("  Zig 8-thread worker pool")
+        _log.info("  Python 3.14 free-threading (no GIL)")
+        _log.info("  Zero-copy response path")
+        _log.info("  7,168 concurrent task capacity")
+        _log.info("  Zig-powered HTTP execution")
 
         # Run startup handlers
         if self.startup_handlers:
             asyncio.run(self._run_startup_handlers())
 
-        print(f"\n{CHECK_MARK} TurboAPI server ready with Zig runtime!")
-        print(f"   Visit: http://{host}:{port}")
+        _log.info("TurboAPI server ready with Zig runtime")
+        _log.info("Visit: http://%s:%s", host, port)
 
         try:
             # Import and use the Zig server
@@ -449,11 +451,11 @@ class TurboAPI(Router):
             for route in self.registry.get_routes():
                 server.add_route(route.method.value, route.path, route.handler)
 
-            print("\n[SERVER] Starting Zig server...")
+            _log.info("Starting Zig server...")
             server.run()
 
         except KeyboardInterrupt:
-            print("\n[STOP] Shutting down TurboAPI server...")
+            _log.info("Shutting down TurboAPI server...")
 
             # Run shutdown handlers
             if self.shutdown_handlers:

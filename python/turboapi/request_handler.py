@@ -12,6 +12,9 @@ from typing import Any, get_origin
 
 from dhi import BaseModel as Model
 
+from turboapi.serializers import json_dumps as _turbo_dumps_bytes
+from turboapi.serializers import json_loads as _turbo_loads
+
 _NO_COERCION = object()
 
 
@@ -364,11 +367,11 @@ class RequestBodyParser:
 
         try:
             if type(body) is bytes:
-                json_data = json.loads(body)
+                json_data = _turbo_loads(body)
             else:
                 # Force a real copy for mutable or foreign buffer-like inputs.
                 body_copy = bytes(bytearray(body))
-                json_data = json.loads(body_copy)
+                json_data = _turbo_loads(body_copy)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise RequestParsingError(f"Invalid JSON body: {e}")
 
@@ -525,9 +528,9 @@ def _create_simple_json_body_parser(handler_signature: inspect.Signature):
     def parse_body(body: bytes) -> dict[str, Any]:
         try:
             if type(body) is bytes:
-                json_data = json.loads(body)
+                json_data = _turbo_loads(body)
             else:
-                json_data = json.loads(bytes(bytearray(body)))
+                json_data = _turbo_loads(bytes(bytearray(body)))
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise RequestParsingError(f"Invalid JSON body: {e}") from e
 
@@ -630,7 +633,7 @@ class ResponseHandler:
                 try:
                     import json
 
-                    body = json.loads(body.decode("utf-8"))
+                    body = _turbo_loads(body)
                 except json.JSONDecodeError:
                     # Not JSON, try as plain text
                     try:
@@ -749,7 +752,9 @@ class ResponseHandler:
         return ResponseHandler.format_response(content, status_code, content_type, extra_headers)
 
 
-_json_dumps = __import__("json").dumps
+def _json_dumps(obj):
+    result = _turbo_dumps_bytes(obj)
+    return result.decode("utf-8") if isinstance(result, bytes) else result
 
 
 def _format_zig_tuple(content, status_code, content_type=None):

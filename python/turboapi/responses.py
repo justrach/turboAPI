@@ -4,11 +4,13 @@ FastAPI-compatible response types: JSONResponse, HTMLResponse, PlainTextResponse
 StreamingResponse, FileResponse, RedirectResponse.
 """
 
-import json
 import mimetypes
 import os
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
+
+from .serializers import json_dumps as _turbo_dumps
+from .serializers import json_loads as _turbo_loads
 
 
 class Response:
@@ -47,8 +49,8 @@ class Response:
         # Decode body back to content
         if isinstance(self.body, bytes):
             try:
-                return json.loads(self.body.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _turbo_loads(self.body)
+            except Exception:
                 return self.body.decode("utf-8")
         return self._content
 
@@ -101,12 +103,10 @@ class JSONResponse(Response):
     def _render(self, content: Any) -> bytes:
         if content is None:
             return b"null"
-        return json.dumps(
-            content,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
+        result = _turbo_dumps(content)
+        if isinstance(result, bytes):
+            return result
+        return result.encode("utf-8")
 
 
 class HTMLResponse(Response):
