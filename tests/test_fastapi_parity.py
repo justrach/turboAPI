@@ -636,7 +636,7 @@ class TestOpenAPI:
                 return {
                     "title": "FirstParent",
                     "type": "object",
-                    "properties": {"child": {"$ref": "#/$defs/Nested"}},
+                    "properties": {"child": {"$ref": "#/components/schemas/Nested"}},
                     "$defs": {
                         "Nested": {
                             "title": "Nested",
@@ -652,7 +652,7 @@ class TestOpenAPI:
                 return {
                     "title": "SecondParent",
                     "type": "object",
-                    "properties": {"child": {"$ref": "#/$defs/Nested"}},
+                    "properties": {"child": {"$ref": "#/components/schemas/Nested"}},
                     "$defs": {
                         "Nested": {
                             "title": "Nested",

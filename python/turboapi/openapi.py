@@ -634,7 +634,9 @@ def _move_defs_to_components(
             )
             component_names[(defs_key, name)] = component_name
             reserved_names.add(component_name)
-            ref_rewrites[f"#/{defs_key}/{name}"] = f"#/components/schemas/{component_name}"
+            component_ref = f"#/components/schemas/{component_name}"
+            ref_rewrites[f"#/{defs_key}/{name}"] = component_ref
+            ref_rewrites[f"#/components/schemas/{name}"] = component_ref
 
     _rewrite_component_refs(schema, ref_rewrites)
     for defs_key, defs in defs_groups:
