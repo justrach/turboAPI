@@ -17,9 +17,11 @@ from .datastructures import (
     File,
     Form,
     Header,
-    Path as PathMarker,
     Query,
     UploadFile,
+)
+from .datastructures import (
+    Path as PathMarker,
 )
 from .security import Depends, SecurityBase, get_depends
 
@@ -55,6 +57,15 @@ _VALIDATION_ERROR_SCHEMAS = {
 }
 
 
+class _SchemaContext:
+    """Tracks component names generated for a single OpenAPI schema."""
+
+    def __init__(self, components: dict[str, Any]):
+        self.components = components
+        self.model_component_names: dict[type, str] = {}
+        self.component_models: dict[str, type] = {}
+
+
 def generate_openapi_schema(app) -> dict:
     """Generate OpenAPI 3.1.0 schema from app routes.
 
@@ -75,6 +86,7 @@ def generate_openapi_schema(app) -> dict:
         "components": {"schemas": copy.deepcopy(_VALIDATION_ERROR_SCHEMAS)},
     }
     components = schema["components"]["schemas"]
+    schema_context = _SchemaContext(components)
 
     routes = app.registry.get_routes()
     for route in routes:
@@ -83,7 +95,7 @@ def generate_openapi_schema(app) -> dict:
         handler = route.handler
 
         # Generate operation
-        operation = _generate_operation(handler, route, components)
+        operation = _generate_operation(handler, route, schema_context)
 
         # Add to paths
         openapi_path = _convert_path(path)
@@ -99,12 +111,12 @@ def _convert_path(path: str) -> str:
     return path
 
 
-def _generate_operation(handler, route, components: dict[str, Any]) -> dict:
+def _generate_operation(handler, route, schema_context: _SchemaContext) -> dict:
     """Generate OpenAPI operation object from handler."""
     response_schema = {}
     response_model = getattr(route, "response_model", None)
     if response_model is not None:
-        response_schema = _type_to_schema(response_model, components)
+        response_schema = _type_to_schema(response_model, schema_context)
 
     operation: dict[str, Any] = {
         "summary": _get_summary(handler),
@@ -136,7 +148,7 @@ def _generate_operation(handler, route, components: dict[str, Any]) -> dict:
             continue
 
         annotation, marker = _resolve_annotation_and_marker(param)
-        param_schema = _schema_for_param(annotation, marker, param, components)
+        param_schema = _schema_for_param(annotation, marker, param, schema_context)
         required = _is_required_param(param, marker)
 
         if param_name in path_params or isinstance(marker, PathMarker):
@@ -242,7 +254,7 @@ def _get_summary(handler) -> str:
     return name.replace("_", " ").title()
 
 
-def _type_to_schema(annotation, components: dict[str, Any] | None = None) -> dict:
+def _type_to_schema(annotation, schema_context: _SchemaContext | None = None) -> dict:
     """Convert Python type annotation to OpenAPI schema."""
     annotation, _metadata = _unwrap_annotated(annotation)
 
@@ -251,7 +263,7 @@ def _type_to_schema(annotation, components: dict[str, Any] | None = None) -> dic
     if annotation is type(None):
         return {"type": "null"}
     if _is_model_class(annotation):
-        return _register_model_schema(annotation, components)
+        return _register_model_schema(annotation, schema_context)
     if annotation is str:
         return {"type": "string"}
     if annotation is int:
@@ -272,18 +284,18 @@ def _type_to_schema(annotation, components: dict[str, Any] | None = None) -> dic
     origin = get_origin(annotation)
     if origin in (list, tuple, set, frozenset):
         args = get_args(annotation)
-        items_schema = _type_to_schema(args[0], components) if args else {}
+        items_schema = _type_to_schema(args[0], schema_context) if args else {}
         return {"type": "array", "items": items_schema}
     if origin is dict:
         args = get_args(annotation)
         schema = {"type": "object"}
         if len(args) == 2:
-            schema["additionalProperties"] = _type_to_schema(args[1], components)
+            schema["additionalProperties"] = _type_to_schema(args[1], schema_context)
         return schema
 
     if _is_union_type(annotation):
         args = get_args(annotation)
-        schemas = [_type_to_schema(arg, components) for arg in args]
+        schemas = [_type_to_schema(arg, schema_context) for arg in args]
         if len(schemas) == 1:
             return schemas[0]
         return {"anyOf": schemas}
@@ -341,12 +353,12 @@ def _effective_default(param: inspect.Parameter, marker: Any | None) -> Any:
 
 
 def _schema_for_param(
-    annotation, marker: Any | None, param: inspect.Parameter, components: dict[str, Any]
+    annotation, marker: Any | None, param: inspect.Parameter, schema_context: _SchemaContext
 ) -> dict:
     if _is_file_param(annotation, marker):
         schema = {"type": "string", "format": "binary"}
     else:
-        schema = _type_to_schema(annotation, components)
+        schema = _type_to_schema(annotation, schema_context)
 
     schema = dict(schema)
     _apply_marker_metadata(schema, marker)
@@ -458,16 +470,61 @@ def _is_model_class(annotation) -> bool:
         return False
 
 
-def _register_model_schema(model_class, components: dict[str, Any] | None) -> dict[str, str]:
-    name = getattr(model_class, "__name__", "Model")
-    if components is not None and name not in components:
-        components[name] = {}
-        model_schema = _model_to_schema(model_class, components)
-        components[name].update(model_schema)
+def _register_model_schema(model_class, schema_context: _SchemaContext | None) -> dict[str, str]:
+    if schema_context is None:
+        name = _component_base_name(model_class)
+        return {"$ref": f"#/components/schemas/{name}"}
+
+    name = _component_name_for_model(model_class, schema_context)
+    if name not in schema_context.components:
+        schema_context.components[name] = {}
+        model_schema = _model_to_schema(model_class, schema_context)
+        schema_context.components[name].update(model_schema)
     return {"$ref": f"#/components/schemas/{name}"}
 
 
-def _model_to_schema(model_class, components: dict[str, Any] | None) -> dict[str, Any]:
+def _component_name_for_model(model_class, schema_context: _SchemaContext) -> str:
+    existing_name = schema_context.model_component_names.get(model_class)
+    if existing_name is not None:
+        return existing_name
+
+    base_name = _component_base_name(model_class)
+    existing_model = schema_context.component_models.get(base_name)
+    if base_name not in schema_context.components or existing_model is model_class:
+        name = base_name
+    else:
+        name = _unique_component_name(model_class, base_name, schema_context)
+
+    schema_context.model_component_names[model_class] = name
+    schema_context.component_models[name] = model_class
+    return name
+
+
+def _component_base_name(model_class) -> str:
+    return _sanitize_component_name(getattr(model_class, "__name__", "Model"))
+
+
+def _unique_component_name(model_class, base_name: str, schema_context: _SchemaContext) -> str:
+    module = getattr(model_class, "__module__", "")
+    qualname = getattr(model_class, "__qualname__", base_name)
+    qualified_name = ".".join(part for part in (module, qualname) if part)
+    candidate = _sanitize_component_name(qualified_name)
+    if candidate == base_name:
+        candidate = f"{base_name}_2"
+
+    name = candidate
+    index = 2
+    while name in schema_context.components or name in schema_context.component_models:
+        name = f"{candidate}_{index}"
+        index += 1
+    return name
+
+
+def _sanitize_component_name(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9.\-_]+", "_", name).strip("._-") or "Model"
+
+
+def _model_to_schema(model_class, schema_context: _SchemaContext | None) -> dict[str, Any]:
     schema: dict[str, Any] | None = None
 
     if hasattr(model_class, "model_json_schema"):
@@ -486,22 +543,24 @@ def _model_to_schema(model_class, components: dict[str, Any] | None) -> dict[str
             schema = None
 
     if not isinstance(schema, dict):
-        schema = _schema_from_annotations(model_class, components)
+        schema = _schema_from_annotations(model_class, schema_context)
 
     schema = copy.deepcopy(schema)
-    _move_defs_to_components(schema, components)
+    _move_defs_to_components(schema, schema_context)
     _rewrite_component_refs(schema)
     return schema
 
 
-def _schema_from_annotations(model_class, components: dict[str, Any] | None) -> dict[str, Any]:
+def _schema_from_annotations(
+    model_class, schema_context: _SchemaContext | None
+) -> dict[str, Any]:
     properties = {}
     required = []
     annotations = getattr(model_class, "__annotations__", {})
     fields = getattr(model_class, "model_fields", getattr(model_class, "__fields__", {}))
 
     for field_name, annotation in annotations.items():
-        properties[field_name] = _type_to_schema(annotation, components)
+        properties[field_name] = _type_to_schema(annotation, schema_context)
         if _model_field_is_required(model_class, field_name, fields):
             required.append(field_name)
 
@@ -528,15 +587,17 @@ def _model_field_is_required(model_class, field_name: str, fields: Any) -> bool:
     return not hasattr(model_class, field_name)
 
 
-def _move_defs_to_components(schema: dict[str, Any], components: dict[str, Any] | None) -> None:
-    if components is None:
+def _move_defs_to_components(
+    schema: dict[str, Any], schema_context: _SchemaContext | None
+) -> None:
+    if schema_context is None:
         return
     for defs_key in ("$defs", "definitions"):
         defs = schema.pop(defs_key, None)
         if isinstance(defs, dict):
             for name, value in defs.items():
                 _rewrite_component_refs(value)
-                components.setdefault(name, value)
+                schema_context.components.setdefault(name, value)
 
 
 def _rewrite_component_refs(value: Any) -> None:

@@ -589,6 +589,46 @@ class TestOpenAPI:
         assert "SearchRequest" in schema["components"]["schemas"]
         assert "SearchResponse" in schema["components"]["schemas"]
 
+    def test_openapi_disambiguates_same_named_model_components(self):
+        from dhi import BaseModel
+
+        FirstItem = type("Item", (BaseModel,), {"__annotations__": {"name": str}})
+        SecondItem = type("Item", (BaseModel,), {"__annotations__": {"count": int}})
+
+        app = TurboAPI(title="OpenAPIModels")
+
+        @app.post("/first", response_model=FirstItem)
+        def create_first(item: FirstItem):
+            return item
+
+        @app.post("/second", response_model=SecondItem)
+        def create_second(item: SecondItem):
+            return item
+
+        schema = app.openapi()
+        first_request_ref = schema["paths"]["/first"]["post"]["requestBody"]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+        second_request_ref = schema["paths"]["/second"]["post"]["requestBody"]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+        first_response_ref = schema["paths"]["/first"]["post"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+        second_response_ref = schema["paths"]["/second"]["post"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+
+        assert first_request_ref == first_response_ref
+        assert second_request_ref == second_response_ref
+        assert first_request_ref != second_request_ref
+
+        first_component = first_request_ref.rsplit("/", 1)[-1]
+        second_component = second_request_ref.rsplit("/", 1)[-1]
+        components = schema["components"]["schemas"]
+        assert components[first_component]["properties"] == {"name": {"type": "string"}}
+        assert components[second_component]["properties"] == {"count": {"type": "integer"}}
+
     def test_app_openapi_method(self):
         app = TurboAPI(title="AppOpenAPI")
 
