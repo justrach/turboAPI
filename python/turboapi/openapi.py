@@ -322,13 +322,11 @@ def _resolve_annotation_and_marker(param: inspect.Parameter) -> tuple[Any, Any |
     annotation, metadata = _unwrap_annotated(param.annotation)
 
     for item in metadata:
-        # Runtime form/file parsing currently only honors default-value markers
+        # Runtime parameter parsing currently only honors default-value markers
         # (or a direct UploadFile annotation). Do not advertise Annotated
-        # Form/File metadata as form uploads until request handling supports it.
-        if isinstance(item, (Form, File)):
-            continue
+        # parameter marker metadata until request handling supports it.
         if isinstance(item, _PARAM_MARKER_TYPES):
-            return annotation, item
+            continue
 
     if isinstance(param.default, _PARAM_MARKER_TYPES):
         return annotation, param.default

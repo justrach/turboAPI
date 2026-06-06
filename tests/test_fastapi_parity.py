@@ -778,6 +778,25 @@ class TestOpenAPI:
             "required": ["username"],
         }
 
+    def test_openapi_does_not_document_unsupported_annotated_param_metadata(self):
+        app = TurboAPI(title="OpenAPIAnnotatedParams")
+
+        @app.get("/annotated-query")
+        def annotated_query(q: Annotated[int, Query(default=10, alias="item-query")]):
+            return {"q": q}
+
+        schema = app.openapi()
+        parameters = schema["paths"]["/annotated-query"]["get"]["parameters"]
+
+        assert parameters == [
+            {
+                "name": "q",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "integer"},
+            }
+        ]
+
     def test_app_openapi_method(self):
         app = TurboAPI(title="AppOpenAPI")
 
