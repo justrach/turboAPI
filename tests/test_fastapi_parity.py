@@ -629,6 +629,62 @@ class TestOpenAPI:
         assert components[first_component]["properties"] == {"name": {"type": "string"}}
         assert components[second_component]["properties"] == {"count": {"type": "integer"}}
 
+    def test_openapi_disambiguates_same_named_nested_model_definitions(self):
+        class FirstParent:
+            @classmethod
+            def model_json_schema(cls, ref_template=None):
+                return {
+                    "title": "FirstParent",
+                    "type": "object",
+                    "properties": {"child": {"$ref": "#/$defs/Nested"}},
+                    "$defs": {
+                        "Nested": {
+                            "title": "Nested",
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                        }
+                    },
+                }
+
+        class SecondParent:
+            @classmethod
+            def model_json_schema(cls, ref_template=None):
+                return {
+                    "title": "SecondParent",
+                    "type": "object",
+                    "properties": {"child": {"$ref": "#/$defs/Nested"}},
+                    "$defs": {
+                        "Nested": {
+                            "title": "Nested",
+                            "type": "object",
+                            "properties": {"count": {"type": "integer"}},
+                        }
+                    },
+                }
+
+        app = TurboAPI(title="OpenAPINestedModels")
+
+        @app.post("/first-nested", response_model=FirstParent)
+        def create_first_nested(item: FirstParent):
+            return item
+
+        @app.post("/second-nested", response_model=SecondParent)
+        def create_second_nested(item: SecondParent):
+            return item
+
+        schema = app.openapi()
+        components = schema["components"]["schemas"]
+        first_nested_ref = components["FirstParent"]["properties"]["child"]["$ref"]
+        second_nested_ref = components["SecondParent"]["properties"]["child"]["$ref"]
+
+        assert first_nested_ref != second_nested_ref
+        first_nested_component = first_nested_ref.rsplit("/", 1)[-1]
+        second_nested_component = second_nested_ref.rsplit("/", 1)[-1]
+        assert components[first_nested_component]["properties"] == {"name": {"type": "string"}}
+        assert components[second_nested_component]["properties"] == {
+            "count": {"type": "integer"}
+        }
+
     def test_app_openapi_method(self):
         app = TurboAPI(title="AppOpenAPI")
 

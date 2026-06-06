@@ -512,12 +512,33 @@ def _unique_component_name(model_class, base_name: str, schema_context: _SchemaC
     if candidate == base_name:
         candidate = f"{base_name}_2"
 
-    name = candidate
+    reserved_names = set(schema_context.components) | set(schema_context.component_models)
+    return _next_available_component_name(candidate, reserved_names)
+
+
+def _component_name_for_definition(
+    name: str, value: Any, schema_context: _SchemaContext, reserved_names: set[str]
+) -> str:
+    base_name = _sanitize_component_name(name)
+    if (
+        base_name in schema_context.components
+        and base_name not in schema_context.component_models
+        and schema_context.components[base_name] == value
+    ):
+        return base_name
+    return _next_available_component_name(base_name, reserved_names)
+
+
+def _next_available_component_name(base_name: str, reserved_names: set[str]) -> str:
+    if base_name not in reserved_names:
+        return base_name
+
     index = 2
-    while name in schema_context.components or name in schema_context.component_models:
-        name = f"{candidate}_{index}"
+    while True:
+        candidate = f"{base_name}_{index}"
+        if candidate not in reserved_names:
+            return candidate
         index += 1
-    return name
 
 
 def _sanitize_component_name(name: str) -> str:
@@ -592,27 +613,55 @@ def _move_defs_to_components(
 ) -> None:
     if schema_context is None:
         return
+
+    defs_groups = []
     for defs_key in ("$defs", "definitions"):
         defs = schema.pop(defs_key, None)
         if isinstance(defs, dict):
-            for name, value in defs.items():
-                _rewrite_component_refs(value)
-                schema_context.components.setdefault(name, value)
+            defs_groups.append((defs_key, defs))
+
+    if not defs_groups:
+        return
+
+    component_names: dict[tuple[str, str], str] = {}
+    ref_rewrites: dict[str, str] = {}
+    reserved_names = set(schema_context.components) | set(schema_context.component_models)
+
+    for defs_key, defs in defs_groups:
+        for name, value in defs.items():
+            component_name = _component_name_for_definition(
+                name, value, schema_context, reserved_names
+            )
+            component_names[(defs_key, name)] = component_name
+            reserved_names.add(component_name)
+            ref_rewrites[f"#/{defs_key}/{name}"] = f"#/components/schemas/{component_name}"
+
+    _rewrite_component_refs(schema, ref_rewrites)
+    for defs_key, defs in defs_groups:
+        for name, value in defs.items():
+            component_name = component_names[(defs_key, name)]
+            component_schema = copy.deepcopy(value)
+            _rewrite_component_refs(component_schema, ref_rewrites)
+            schema_context.components.setdefault(component_name, component_schema)
 
 
-def _rewrite_component_refs(value: Any) -> None:
+def _rewrite_component_refs(
+    value: Any, ref_rewrites: dict[str, str] | None = None
+) -> None:
     if isinstance(value, dict):
         ref = value.get("$ref")
         if isinstance(ref, str):
-            if ref.startswith("#/$defs/"):
+            if ref_rewrites and ref in ref_rewrites:
+                value["$ref"] = ref_rewrites[ref]
+            elif ref.startswith("#/$defs/"):
                 value["$ref"] = "#/components/schemas/" + ref.rsplit("/", 1)[-1]
             elif ref.startswith("#/definitions/"):
                 value["$ref"] = "#/components/schemas/" + ref.rsplit("/", 1)[-1]
         for item in value.values():
-            _rewrite_component_refs(item)
+            _rewrite_component_refs(item, ref_rewrites)
     elif isinstance(value, list):
         for item in value:
-            _rewrite_component_refs(item)
+            _rewrite_component_refs(item, ref_rewrites)
 
 
 def _is_jsonable(value: Any) -> bool:
