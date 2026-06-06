@@ -797,6 +797,37 @@ class TestOpenAPI:
             }
         ]
 
+    def test_openapi_does_not_document_unsupported_cookie_route_params(self):
+        app = TurboAPI(title="OpenAPICookieParams")
+
+        @app.get("/cookie-route")
+        def cookie_route(session_id: str = Cookie()):
+            return {"session_id": session_id}
+
+        schema = app.openapi()
+        operation = schema["paths"]["/cookie-route"]["get"]
+
+        assert "parameters" not in operation
+
+    def test_openapi_body_embed_model_matches_current_runtime_binding(self):
+        from dhi import BaseModel
+
+        class Item(BaseModel):
+            name: str
+
+        app = TurboAPI(title="OpenAPIBodyEmbed")
+
+        @app.post("/body-embed")
+        def body_embed(item: Item = Body(embed=True)):
+            return item
+
+        schema = app.openapi()
+        body_schema = schema["paths"]["/body-embed"]["post"]["requestBody"]["content"][
+            "application/json"
+        ]["schema"]
+
+        assert body_schema == {"$ref": "#/components/schemas/Item"}
+
     def test_app_openapi_method(self):
         app = TurboAPI(title="AppOpenAPI")
 

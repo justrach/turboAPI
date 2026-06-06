@@ -174,15 +174,9 @@ def _generate_operation(handler, route, schema_context: _SchemaContext) -> dict:
                 )
             )
         elif isinstance(marker, Cookie):
-            parameters.append(
-                _build_parameter(
-                    _parameter_alias(param_name, marker, location="cookie"),
-                    "cookie",
-                    required,
-                    param_schema,
-                    marker,
-                )
-            )
+            # Runtime request handling does not bind Cookie() route parameters yet.
+            # Avoid advertising cookie params until parsing support exists.
+            continue
         elif _is_form_or_file_param(annotation, marker):
             media_type = getattr(marker, "media_type", None) or "multipart/form-data"
             if _is_file_param(annotation, marker):
@@ -203,7 +197,9 @@ def _generate_operation(handler, route, schema_context: _SchemaContext) -> dict:
                     "schema": param_schema,
                     "required": required,
                     "media_type": marker.media_type,
-                    "direct": _is_model_class(annotation) and not marker.embed,
+                    # RequestBodyParser currently validates single model parameters
+                    # against the whole JSON body and does not inspect Body.embed.
+                    "direct": _is_model_class(annotation),
                 }
             )
         elif method in _BODY_METHODS and _is_model_class(annotation):
