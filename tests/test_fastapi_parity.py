@@ -7,6 +7,7 @@ WebSocket, exception handling, OpenAPI, TestClient, static files, lifespan, etc.
 import json
 import os
 import tempfile
+from typing import Annotated
 
 import pytest
 from turboapi import (
@@ -532,6 +533,61 @@ class TestOpenAPI:
         assert "post" in schema["paths"]["/items"]
         operation = schema["paths"]["/items"]["post"]
         assert "requestBody" in operation
+
+    def test_openapi_skips_dependencies_and_supports_forms_and_dhi_models(self):
+        from dhi import BaseModel
+
+        class SearchRequest(BaseModel):
+            query: str
+            limit: int = 10
+
+        class SearchResponse(BaseModel):
+            count: int
+
+        def get_session():
+            return {"session": True}
+
+        SessionDep = Annotated[dict, Depends(get_session)]
+        app = TurboAPI(title="OpenAPICompat")
+
+        @app.post("/login")
+        def login(username: str = Form(), password: str = Form()):
+            return {"username": username}
+
+        @app.post("/search", response_model=SearchResponse)
+        def search(
+            session: SessionDep,
+            request: SearchRequest,
+            include_archived: bool = Query(default=False),
+        ):
+            return SearchResponse(count=request.limit)
+
+        schema = app.openapi()
+        json.dumps(schema)
+
+        login_body = schema["paths"]["/login"]["post"]["requestBody"]
+        form_schema = login_body["content"]["application/x-www-form-urlencoded"]["schema"]
+        assert form_schema["properties"]["username"] == {"type": "string"}
+        assert form_schema["properties"]["password"] == {"type": "string"}
+        assert form_schema["required"] == ["username", "password"]
+
+        search_operation = schema["paths"]["/search"]["post"]
+        assert search_operation["requestBody"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/SearchRequest"
+        }
+        assert search_operation["parameters"] == [
+            {
+                "name": "include_archived",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "boolean", "default": False},
+            }
+        ]
+        assert search_operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/SearchResponse"
+        }
+        assert "SearchRequest" in schema["components"]["schemas"]
+        assert "SearchResponse" in schema["components"]["schemas"]
 
     def test_app_openapi_method(self):
         app = TurboAPI(title="AppOpenAPI")
