@@ -322,6 +322,11 @@ def _resolve_annotation_and_marker(param: inspect.Parameter) -> tuple[Any, Any |
     annotation, metadata = _unwrap_annotated(param.annotation)
 
     for item in metadata:
+        # Runtime form/file parsing currently only honors default-value markers
+        # (or a direct UploadFile annotation). Do not advertise Annotated
+        # Form/File metadata as form uploads until request handling supports it.
+        if isinstance(item, (Form, File)):
+            continue
         if isinstance(item, _PARAM_MARKER_TYPES):
             return annotation, item
 
@@ -516,16 +521,8 @@ def _unique_component_name(model_class, base_name: str, schema_context: _SchemaC
     return _next_available_component_name(candidate, reserved_names)
 
 
-def _component_name_for_definition(
-    name: str, value: Any, schema_context: _SchemaContext, reserved_names: set[str]
-) -> str:
+def _component_name_for_definition(name: str, reserved_names: set[str]) -> str:
     base_name = _sanitize_component_name(name)
-    if (
-        base_name in schema_context.components
-        and base_name not in schema_context.component_models
-        and schema_context.components[base_name] == value
-    ):
-        return base_name
     return _next_available_component_name(base_name, reserved_names)
 
 
@@ -629,9 +626,7 @@ def _move_defs_to_components(
 
     for defs_key, defs in defs_groups:
         for name, value in defs.items():
-            component_name = _component_name_for_definition(
-                name, value, schema_context, reserved_names
-            )
+            component_name = _component_name_for_definition(name, reserved_names)
             component_names[(defs_key, name)] = component_name
             reserved_names.add(component_name)
             component_ref = f"#/components/schemas/{component_name}"

@@ -685,6 +685,99 @@ class TestOpenAPI:
             "count": {"type": "integer"}
         }
 
+    def test_openapi_disambiguates_nested_definitions_after_ref_rewriting(self):
+        class FirstParent:
+            @classmethod
+            def model_json_schema(cls, ref_template=None):
+                return {
+                    "title": "FirstParent",
+                    "type": "object",
+                    "properties": {"child": {"$ref": "#/components/schemas/Child"}},
+                    "$defs": {
+                        "Child": {
+                            "title": "Child",
+                            "type": "object",
+                            "properties": {
+                                "inner": {"$ref": "#/components/schemas/Inner"}
+                            },
+                        },
+                        "Inner": {
+                            "title": "Inner",
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                        },
+                    },
+                }
+
+        class SecondParent:
+            @classmethod
+            def model_json_schema(cls, ref_template=None):
+                return {
+                    "title": "SecondParent",
+                    "type": "object",
+                    "properties": {"child": {"$ref": "#/components/schemas/Child"}},
+                    "$defs": {
+                        "Child": {
+                            "title": "Child",
+                            "type": "object",
+                            "properties": {
+                                "inner": {"$ref": "#/components/schemas/Inner"}
+                            },
+                        },
+                        "Inner": {
+                            "title": "Inner",
+                            "type": "object",
+                            "properties": {"count": {"type": "integer"}},
+                        },
+                    },
+                }
+
+        app = TurboAPI(title="OpenAPINestedRefRewrite")
+
+        @app.post("/first-child", response_model=FirstParent)
+        def create_first_child(item: FirstParent):
+            return item
+
+        @app.post("/second-child", response_model=SecondParent)
+        def create_second_child(item: SecondParent):
+            return item
+
+        schema = app.openapi()
+        components = schema["components"]["schemas"]
+        first_child_ref = components["FirstParent"]["properties"]["child"]["$ref"]
+        second_child_ref = components["SecondParent"]["properties"]["child"]["$ref"]
+
+        assert first_child_ref != second_child_ref
+        first_child_component = first_child_ref.rsplit("/", 1)[-1]
+        second_child_component = second_child_ref.rsplit("/", 1)[-1]
+        first_inner_ref = components[first_child_component]["properties"]["inner"]["$ref"]
+        second_inner_ref = components[second_child_component]["properties"]["inner"]["$ref"]
+
+        assert first_inner_ref != second_inner_ref
+        first_inner_component = first_inner_ref.rsplit("/", 1)[-1]
+        second_inner_component = second_inner_ref.rsplit("/", 1)[-1]
+        assert components[first_inner_component]["properties"] == {"name": {"type": "string"}}
+        assert components[second_inner_component]["properties"] == {
+            "count": {"type": "integer"}
+        }
+
+    def test_openapi_does_not_document_unsupported_annotated_form_metadata(self):
+        app = TurboAPI(title="OpenAPIAnnotatedForm")
+
+        @app.post("/annotated-form")
+        def annotated_form(username: Annotated[str, Form()]):
+            return {"username": username}
+
+        schema = app.openapi()
+        content = schema["paths"]["/annotated-form"]["post"]["requestBody"]["content"]
+
+        assert "application/x-www-form-urlencoded" not in content
+        assert content["application/json"]["schema"] == {
+            "type": "object",
+            "properties": {"username": {"type": "string"}},
+            "required": ["username"],
+        }
+
     def test_app_openapi_method(self):
         app = TurboAPI(title="AppOpenAPI")
 
