@@ -558,7 +558,7 @@ class TestOpenAPI:
         def search(
             session: SessionDep,
             request: SearchRequest,
-            include_archived: bool = Query(default=False),
+            include_archived: bool = Query(default=False, alias="archived"),
         ):
             return SearchResponse(count=request.limit)
 
@@ -579,8 +579,8 @@ class TestOpenAPI:
             {
                 "name": "include_archived",
                 "in": "query",
-                "required": False,
-                "schema": {"type": "boolean", "default": False},
+                "required": True,
+                "schema": {"type": "boolean"},
             }
         ]
         assert search_operation["responses"]["200"]["content"]["application/json"]["schema"] == {
@@ -798,16 +798,28 @@ class TestOpenAPI:
         ]
 
     def test_openapi_does_not_document_unsupported_cookie_route_params(self):
+        from dhi import BaseModel
+
+        class Session(BaseModel):
+            id: str
+
         app = TurboAPI(title="OpenAPICookieParams")
 
         @app.get("/cookie-route")
         def cookie_route(session_id: str = Cookie()):
             return {"session_id": session_id}
 
-        schema = app.openapi()
-        operation = schema["paths"]["/cookie-route"]["get"]
+        @app.get("/cookie-model-route")
+        def cookie_model_route(session: Session = Cookie()):
+            return session
 
-        assert "parameters" not in operation
+        schema = app.openapi()
+        cookie_operation = schema["paths"]["/cookie-route"]["get"]
+        cookie_model_operation = schema["paths"]["/cookie-model-route"]["get"]
+
+        assert "parameters" not in cookie_operation
+        assert "parameters" not in cookie_model_operation
+        assert "Session" not in schema["components"]["schemas"]
 
     def test_openapi_body_embed_model_matches_current_runtime_binding(self):
         from dhi import BaseModel

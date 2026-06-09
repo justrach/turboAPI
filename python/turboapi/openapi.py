@@ -164,18 +164,31 @@ def _generate_operation(handler, route, schema_context: _SchemaContext) -> dict:
             )
             continue
 
-        param_schema = _schema_for_param(annotation, marker, param, schema_context)
+        if isinstance(marker, Cookie):
+            # Runtime request handling does not bind Cookie() route parameters yet.
+            # Avoid advertising cookie params or registering component schemas for
+            # them until parsing support exists.
+            continue
+
+        if isinstance(marker, Query):
+            # Runtime query parsing binds by Python parameter name and does not
+            # consume Query.alias, Query.default, or validation metadata.
+            param_schema = _schema_for_param(
+                annotation, None, param, schema_context, include_default=False
+            )
+        else:
+            param_schema = _schema_for_param(annotation, marker, param, schema_context)
 
         if param_name in path_params or isinstance(marker, PathMarker):
             parameters.append(_build_parameter(param_name, "path", True, param_schema, marker))
         elif isinstance(marker, Query):
             parameters.append(
                 _build_parameter(
-                    _parameter_alias(param_name, marker),
+                    param_name,
                     "query",
-                    required,
+                    True,
                     param_schema,
-                    marker,
+                    None,
                 )
             )
         elif isinstance(marker, Header):
@@ -188,10 +201,6 @@ def _generate_operation(handler, route, schema_context: _SchemaContext) -> dict:
                     marker,
                 )
             )
-        elif isinstance(marker, Cookie):
-            # Runtime request handling does not bind Cookie() route parameters yet.
-            # Avoid advertising cookie params until parsing support exists.
-            continue
         elif _is_form_or_file_param(annotation, marker):
             media_type = getattr(marker, "media_type", None) or "multipart/form-data"
             if _is_file_param(annotation, marker):
@@ -368,7 +377,12 @@ def _effective_default(param: inspect.Parameter, marker: Any | None) -> Any:
 
 
 def _schema_for_param(
-    annotation, marker: Any | None, param: inspect.Parameter, schema_context: _SchemaContext
+    annotation,
+    marker: Any | None,
+    param: inspect.Parameter,
+    schema_context: _SchemaContext,
+    *,
+    include_default: bool = True,
 ) -> dict:
     if _is_file_param(annotation, marker):
         schema = {"type": "string", "format": "binary"}
@@ -378,9 +392,14 @@ def _schema_for_param(
     schema = dict(schema)
     _apply_marker_metadata(schema, marker)
 
-    default = _effective_default(param, marker)
-    if default is not inspect.Parameter.empty and default is not ... and _is_jsonable(default):
-        schema["default"] = default
+    if include_default:
+        default = _effective_default(param, marker)
+        if (
+            default is not inspect.Parameter.empty
+            and default is not ...
+            and _is_jsonable(default)
+        ):
+            schema["default"] = default
 
     return schema
 
