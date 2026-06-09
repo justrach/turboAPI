@@ -149,6 +149,7 @@ def _generate_operation(handler, route, schema_context: _SchemaContext) -> dict:
 
         annotation, marker = _resolve_annotation_and_marker(param)
         required = _is_required_param(param, marker)
+        body_required = _is_required_body_param(param, marker)
 
         if method in _BODY_METHODS and _is_unsupported_annotated_model_body(
             param.annotation, marker
@@ -175,6 +176,14 @@ def _generate_operation(handler, route, schema_context: _SchemaContext) -> dict:
             # consume Query.alias, Query.default, or validation metadata.
             param_schema = _schema_for_param(
                 annotation, None, param, schema_context, include_default=False
+            )
+        elif isinstance(marker, Form):
+            # Runtime form parsing passes field values through as raw strings.
+            param_schema = _schema_for_param(str, marker, param, schema_context)
+        elif isinstance(marker, Body):
+            # Runtime body parsing does not unwrap Body.default values.
+            param_schema = _schema_for_param(
+                annotation, marker, param, schema_context, include_default=False
             )
         else:
             param_schema = _schema_for_param(annotation, marker, param, schema_context)
@@ -219,7 +228,7 @@ def _generate_operation(handler, route, schema_context: _SchemaContext) -> dict:
                 {
                     "name": _parameter_alias(param_name, marker),
                     "schema": param_schema,
-                    "required": required,
+                    "required": body_required,
                     "media_type": marker.media_type,
                     # RequestBodyParser currently validates single model parameters
                     # against the whole JSON body and does not inspect Body.embed.
@@ -364,6 +373,15 @@ def _is_dependency_parameter(param: inspect.Parameter) -> bool:
 def _is_required_param(param: inspect.Parameter, marker: Any | None) -> bool:
     default = _effective_default(param, marker)
     return default is inspect.Parameter.empty or default is ...
+
+
+def _is_required_body_param(param: inspect.Parameter, marker: Any | None) -> bool:
+    if isinstance(marker, Body):
+        # Runtime body parsing does not unwrap Body.default; missing values
+        # become the marker object, not the marker's default value.
+        return True
+
+    return _is_required_param(param, marker)
 
 
 def _effective_default(param: inspect.Parameter, marker: Any | None) -> Any:

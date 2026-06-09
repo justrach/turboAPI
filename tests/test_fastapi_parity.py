@@ -840,6 +840,45 @@ class TestOpenAPI:
 
         assert body_schema == {"$ref": "#/components/schemas/Item"}
 
+    def test_openapi_documents_form_fields_as_runtime_raw_strings(self):
+        app = TurboAPI(title="OpenAPIFormRawStrings")
+
+        @app.post("/form-raw-strings")
+        def form_raw_strings(age: int = Form(), active: bool = Form()):
+            return {"age": age, "active": active}
+
+        schema = app.openapi()
+        body_schema = schema["paths"]["/form-raw-strings"]["post"]["requestBody"]["content"][
+            "application/x-www-form-urlencoded"
+        ]["schema"]
+
+        assert body_schema == {
+            "type": "object",
+            "properties": {
+                "age": {"type": "string"},
+                "active": {"type": "string"},
+            },
+            "required": ["age", "active"],
+        }
+
+    def test_openapi_does_not_document_unsupported_body_marker_defaults(self):
+        app = TurboAPI(title="OpenAPIBodyMarkerDefaults")
+
+        @app.post("/body-marker-defaults")
+        def body_marker_defaults(count: int = Body(default=10)):
+            return {"count": count}
+
+        schema = app.openapi()
+        request_body = schema["paths"]["/body-marker-defaults"]["post"]["requestBody"]
+        body_schema = request_body["content"]["application/json"]["schema"]
+
+        assert request_body["required"] is True
+        assert body_schema == {
+            "type": "object",
+            "properties": {"count": {"type": "integer"}},
+            "required": ["count"],
+        }
+
     def test_openapi_does_not_document_unsupported_annotated_model_body(self):
         from dhi import BaseModel
 
