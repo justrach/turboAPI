@@ -148,8 +148,23 @@ def _generate_operation(handler, route, schema_context: _SchemaContext) -> dict:
             continue
 
         annotation, marker = _resolve_annotation_and_marker(param)
-        param_schema = _schema_for_param(annotation, marker, param, schema_context)
         required = _is_required_param(param, marker)
+
+        if method in _BODY_METHODS and _is_unsupported_annotated_model_body(
+            param.annotation, marker
+        ):
+            body_entries.append(
+                {
+                    "name": param_name,
+                    "schema": {},
+                    "required": required,
+                    "media_type": "application/json",
+                    "direct": False,
+                }
+            )
+            continue
+
+        param_schema = _schema_for_param(annotation, marker, param, schema_context)
 
         if param_name in path_params or isinstance(marker, PathMarker):
             parameters.append(_build_parameter(param_name, "path", True, param_schema, marker))
@@ -315,19 +330,20 @@ def _unwrap_annotated(annotation) -> tuple[Any, tuple[Any, ...]]:
 
 
 def _resolve_annotation_and_marker(param: inspect.Parameter) -> tuple[Any, Any | None]:
-    annotation, metadata = _unwrap_annotated(param.annotation)
-
-    for item in metadata:
-        # Runtime parameter parsing currently only honors default-value markers
-        # (or a direct UploadFile annotation). Do not advertise Annotated
-        # parameter marker metadata until request handling supports it.
-        if isinstance(item, _PARAM_MARKER_TYPES):
-            continue
+    annotation, _metadata = _unwrap_annotated(param.annotation)
 
     if isinstance(param.default, _PARAM_MARKER_TYPES):
         return annotation, param.default
 
     return annotation, None
+
+
+def _is_unsupported_annotated_model_body(annotation: Any, marker: Any | None) -> bool:
+    if marker is not None:
+        return False
+
+    annotation, metadata = _unwrap_annotated(annotation)
+    return _is_model_class(annotation) and any(isinstance(item, Body) for item in metadata)
 
 
 def _is_dependency_parameter(param: inspect.Parameter) -> bool:

@@ -828,6 +828,38 @@ class TestOpenAPI:
 
         assert body_schema == {"$ref": "#/components/schemas/Item"}
 
+    def test_openapi_does_not_document_unsupported_annotated_model_body(self):
+        from dhi import BaseModel
+
+        class Item(BaseModel):
+            name: str
+
+        app = TurboAPI(title="OpenAPIAnnotatedModelBody")
+
+        @app.post("/annotated-model-body")
+        def annotated_model_body(item: Annotated[Item, Body()]):
+            return item
+
+        @app.post("/annotated-model-body-embed")
+        def annotated_model_body_embed(item: Annotated[Item, Body(embed=True)]):
+            return item
+
+        schema = app.openapi()
+
+        for path in ("/annotated-model-body", "/annotated-model-body-embed"):
+            body_schema = schema["paths"][path]["post"]["requestBody"]["content"][
+                "application/json"
+            ]["schema"]
+
+            assert body_schema != {"$ref": "#/components/schemas/Item"}
+            assert body_schema == {
+                "type": "object",
+                "properties": {"item": {}},
+                "required": ["item"],
+            }
+
+        assert "Item" not in schema["components"]["schemas"]
+
     def test_app_openapi_method(self):
         app = TurboAPI(title="AppOpenAPI")
 
