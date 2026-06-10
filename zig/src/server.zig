@@ -2140,6 +2140,12 @@ fn ffiError() FfiResponse {
 // Unpack and send — no dict key lookups, no hash computation.
 
 fn sendTupleResponse(stream: std.Io.net.Stream, result: *c.PyObject) void {
+    // 5-tuple → streaming (status, content_type, b"", iterator, headers_dict)
+    // 3-tuple → fixed-body (status, content_type, body)
+    if (c.PyTuple_Size(result) == 5) {
+        sendStreamingResponse(stream, result);
+        return;
+    }
     const sc_obj = py.PyTuple_GetItem(result, 0) orelse {
         sendResponse(stream, 500, "application/json", "{\"error\":\"bad tuple[0]\"}");
         return;
@@ -2174,6 +2180,11 @@ fn sendTupleResponse(stream: std.Io.net.Stream, result: *c.PyObject) void {
 }
 
 fn sendTupleResponseAndCache(stream: std.Io.net.Stream, result: *c.PyObject, cache_key: []const u8) void {
+    if (c.PyTuple_Size(result) == 5) {
+        // Streaming responses are not cacheable — fall through to the streaming path.
+        sendStreamingResponse(stream, result);
+        return;
+    }
     const sc_obj = py.PyTuple_GetItem(result, 0) orelse return;
     const ct_obj = py.PyTuple_GetItem(result, 1) orelse return;
     const body_obj = py.PyTuple_GetItem(result, 2) orelse return;
@@ -2200,6 +2211,10 @@ fn sendTupleResponseAndCache(stream: std.Io.net.Stream, result: *c.PyObject, cac
 }
 
 fn sendTupleResponseAndCacheEntry(stream: std.Io.net.Stream, result: *c.PyObject, entry: *HandlerEntry) void {
+    if (c.PyTuple_Size(result) == 5) {
+        sendStreamingResponse(stream, result);
+        return;
+    }
     const sc_obj = py.PyTuple_GetItem(result, 0) orelse return;
     const ct_obj = py.PyTuple_GetItem(result, 1) orelse return;
     const body_obj = py.PyTuple_GetItem(result, 2) orelse return;
@@ -2225,7 +2240,114 @@ fn sendTupleResponseAndCacheEntry(stream: std.Io.net.Stream, result: *c.PyObject
     cacheEntryBody(entry, body_dupe);
 }
 
-// ── simple_sync_noargs: PyObject_CallNoArgs — no tuple/dict construction ─────
+// ── sendStreamingResponse: chunked transfer encoding for StreamingResponse / SSE ──
+//
+// Triggered by sendTupleResponse when Python returns a 5-tuple:
+//   (status_code, content_type, b"", iterator, headers_dict)
+//
+// Writes the response head with `Transfer-Encoding: chunked`, then loops
+// pulling bytes chunks from the Python iterator (PyIter_Next), writing each
+// as `<hex-len>\r\n<bytes>\r\n`, and terminates with `0\r\n\r\n`.
+//
+// The iterator is whatever StreamingResponse.body_iter() returned — for
+// async-generator content it's an _AsyncToSyncChunkIterator that drives
+// the worker's event loop one chunk at a time, so SSE and other live
+// streams flush in real time without blocking the worker on the full
+// stream.
+
+fn sendStreamingResponse(stream: std.Io.net.Stream, result: *c.PyObject) void {
+    const sc_obj = py.PyTuple_GetItem(result, 0) orelse return;
+    const ct_obj = py.PyTuple_GetItem(result, 1) orelse return;
+    // tuple[2] is b"" — ignored, present only so the 5-tuple stays aligned
+    // with the 3-tuple ABI for indices 0..2.
+    const iter_obj = py.PyTuple_GetItem(result, 3) orelse return;
+    const headers_obj = py.PyTuple_GetItem(result, 4) orelse return;
+
+    const status_code: u16 = @intCast(c.PyLong_AsLong(sc_obj));
+    const ct_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(ct_obj) orelse "application/octet-stream";
+    const content_type = std.mem.span(ct_cstr);
+    const date_str = currentHttpDate();
+
+    // Build the response head into a single buffer, then write it all at once.
+    // 4KB covers the standard headers + a typical SSE/cache-control set.
+    var head_buf: [4096]u8 = undefined;
+    var head_len: usize = 0;
+    {
+        const initial = std.fmt.bufPrint(
+            head_buf[head_len..],
+            "HTTP/1.1 {d} {s}\r\nServer: TurboAPI\r\nDate: {s}\r\nContent-Type: {s}\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n",
+            .{ status_code, statusText(status_code), date_str, content_type },
+        ) catch return;
+        head_len += initial.len;
+    }
+    if (cors_headers.len > 0 and head_len + cors_headers.len <= head_buf.len) {
+        @memcpy(head_buf[head_len..][0..cors_headers.len], cors_headers);
+        head_len += cors_headers.len;
+    }
+
+    // Append custom headers from the Python dict, skipping any that conflict
+    // with the chunked-transfer setup we just wrote.
+    if (c.PyDict_Check(headers_obj) != 0) {
+        var pos: c.Py_ssize_t = 0;
+        var key: ?*c.PyObject = null;
+        var val: ?*c.PyObject = null;
+        while (c.PyDict_Next(headers_obj, &pos, &key, &val) != 0) {
+            const k_obj = key orelse continue;
+            const v_obj = val orelse continue;
+            if (c.PyUnicode_Check(k_obj) == 0 or c.PyUnicode_Check(v_obj) == 0) continue;
+            const k_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(k_obj) orelse continue;
+            const v_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(v_obj) orelse continue;
+            const k_str = std.mem.span(k_cstr);
+            const v_str = std.mem.span(v_cstr);
+            // Don't let user-set headers conflict with our framing.
+            if (std.ascii.eqlIgnoreCase(k_str, "content-length") or
+                std.ascii.eqlIgnoreCase(k_str, "content-type") or
+                std.ascii.eqlIgnoreCase(k_str, "transfer-encoding") or
+                std.ascii.eqlIgnoreCase(k_str, "connection")) continue;
+            const line = std.fmt.bufPrint(
+                head_buf[head_len..],
+                "{s}: {s}\r\n",
+                .{ k_str, v_str },
+            ) catch continue;
+            head_len += line.len;
+        }
+    }
+    if (head_len + 2 > head_buf.len) return;
+    @memcpy(head_buf[head_len..][0..2], "\r\n");
+    head_len += 2;
+
+    streamWriteAll(stream, head_buf[0..head_len]) catch return;
+
+    // Stream chunks. Each yielded bytes object becomes one chunked frame.
+    var chunk_size_buf: [24]u8 = undefined;
+    while (true) {
+        const chunk_obj = c.PyIter_Next(iter_obj) orelse {
+            // NULL → either StopIteration (clean end) or an exception.
+            if (c.PyErr_Occurred() != null) c.PyErr_Clear();
+            break;
+        };
+        defer c.Py_DecRef(chunk_obj);
+
+        var chunk_size: c.Py_ssize_t = 0;
+        var chunk_buf: [*c]u8 = undefined;
+        if (c.PyBytes_AsStringAndSize(chunk_obj, @ptrCast(&chunk_buf), &chunk_size) != 0) {
+            // Non-bytes yielded — skip; user code should have str-encoded already.
+            if (c.PyErr_Occurred() != null) c.PyErr_Clear();
+            continue;
+        }
+        // RFC 7230: a zero-length chunk is the terminator. Skip empty yields.
+        if (chunk_size == 0) continue;
+
+        const chunk_size_usize: usize = @intCast(chunk_size);
+        const size_line = std.fmt.bufPrint(&chunk_size_buf, "{x}\r\n", .{chunk_size_usize}) catch break;
+        streamWriteAll(stream, size_line) catch break;
+        streamWriteAll(stream, chunk_buf[0..chunk_size_usize]) catch break;
+        streamWriteAll(stream, "\r\n") catch break;
+    }
+
+    // Terminating zero-length chunk + trailing CRLF.
+    streamWriteAll(stream, "0\r\n\r\n") catch return;
+}
 
 fn callPythonNoArgs(tstate: ?*anyopaque, entry: HandlerEntry, stream: std.Io.net.Stream) void {
     py.PyEval_AcquireThread(tstate);

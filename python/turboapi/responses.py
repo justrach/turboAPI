@@ -170,7 +170,7 @@ class StreamingResponse(Response):
         self._cookies: list[str] = []
 
     async def body_iterator(self) -> AsyncIterator[bytes]:
-        """Iterate over the response body chunks."""
+        """Iterate over the response body chunks (async)."""
         if hasattr(self._content_iterator, "__aiter__"):
             async for chunk in self._content_iterator:
                 if isinstance(chunk, str):
@@ -183,6 +183,60 @@ class StreamingResponse(Response):
                     yield chunk.encode("utf-8")
                 else:
                     yield chunk
+
+    def body_iter(self):
+        """Return a sync iterator of bytes chunks suitable for the Zig
+        chunked-transfer write path.
+
+        Sync sources are wrapped directly. Async sources are driven one
+        chunk at a time via the worker thread's event loop — each call
+        to next() runs the loop until the source yields one chunk. That
+        gives real-time streaming for SSE / token streams without
+        introducing a separate event loop or background thread.
+        """
+        src = self._content_iterator
+        if hasattr(src, "__aiter__"):
+            return _AsyncToSyncChunkIterator(src)
+        return _sync_chunk_iter(src)
+
+
+def _sync_chunk_iter(src):
+    """Encode str chunks → bytes; pass bytes through."""
+    for chunk in src:
+        if isinstance(chunk, str):
+            yield chunk.encode("utf-8")
+        else:
+            yield chunk
+
+
+class _AsyncToSyncChunkIterator:
+    """Drive an async iterator one chunk at a time on the worker's loop.
+
+    Reuses the per-thread event loop from `turboapi.async_pool` so we
+    don't spawn a fresh loop per chunk. StopAsyncIteration → StopIteration.
+    """
+
+    __slots__ = ("_aiter", "_loop_runner")
+
+    def __init__(self, async_source):
+        self._aiter = async_source.__aiter__()
+        self._loop_runner = None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        # Lazy-import to avoid a circular import at module load.
+        if self._loop_runner is None:
+            from turboapi.async_pool import ensure_event_loop
+            self._loop_runner = ensure_event_loop().run_until_complete
+        try:
+            chunk = self._loop_runner(self._aiter.__anext__())
+        except StopAsyncIteration:
+            raise StopIteration from None
+        if isinstance(chunk, str):
+            return chunk.encode("utf-8")
+        return chunk
 
 
 class FileResponse(Response):
