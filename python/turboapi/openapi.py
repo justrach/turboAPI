@@ -90,6 +90,8 @@ def generate_openapi_schema(app) -> dict:
 
     routes = app.registry.get_routes()
     for route in routes:
+        if not getattr(route, "include_in_schema", True):
+            continue
         path = route.path
         method = route.method.value.lower()
         handler = route.handler

@@ -50,6 +50,7 @@ class RouteDefinition:
     summary: str | None = None
     description: str | None = None
     dependencies: list = None
+    include_in_schema: bool = True
 
 
 class RouteRegistry:
@@ -128,6 +129,7 @@ class Router:
             tags: list[str] = None,
             summary: str | None = None,
             description: str | None = None,
+            include_in_schema: bool = True,
             **kwargs,
         ):
             def wrapper(func: Callable) -> Callable:
@@ -197,6 +199,7 @@ class Router:
                     tags=(tags or []) + self.tags,
                     summary=summary,
                     description=description,
+                    include_in_schema=include_in_schema,
                 )
 
                 # Register the route
@@ -254,6 +257,7 @@ class Router:
                 summary=route.summary,
                 description=route.description,
                 dependencies=merged_deps if merged_deps else None,
+                include_in_schema=getattr(route, "include_in_schema", True),
             )
             self.registry.register_route(new_route)
 

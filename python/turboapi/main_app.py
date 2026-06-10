@@ -86,6 +86,7 @@ class TurboAPI(Router):
         self._websocket_routes: dict[str, Callable] = {}
         self._exception_handlers: dict[type, Callable] = {}
         self._openapi_schema: dict | None = None
+        self._register_docs_routes()
 
         print(f"{ROCKET} TurboAPI application created: {title} v{version}")
 
@@ -244,6 +245,33 @@ class TurboAPI(Router):
 
             self._openapi_schema = generate_openapi_schema(self)
         return self._openapi_schema
+
+    def _register_docs_routes(self) -> None:
+        """Serve /openapi.json, /docs and /redoc out of the box (FastAPI parity)."""
+        if not self.openapi_url:
+            return
+
+        from .responses import HTMLResponse
+
+        @self.get(self.openapi_url, include_in_schema=False)
+        def openapi_json():
+            return self.openapi()
+
+        if self.docs_url:
+
+            @self.get(self.docs_url, include_in_schema=False)
+            def swagger_ui_html():
+                from .openapi import get_swagger_ui_html
+
+                return HTMLResponse(get_swagger_ui_html(self.title, self.openapi_url))
+
+        if self.redoc_url:
+
+            @self.get(self.redoc_url, include_in_schema=False)
+            def redoc_html():
+                from .openapi import get_redoc_html
+
+                return HTMLResponse(get_redoc_html(self.title, self.openapi_url))
 
     async def _run_startup_handlers(self):
         """Run all startup event handlers."""
