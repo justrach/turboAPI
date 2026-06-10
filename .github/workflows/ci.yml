@@ -38,8 +38,7 @@ jobs:
 
       - name: Run tests (TurboAPI + TurboPG)
         run: |
-          DESELECT="--deselect tests/test_fastapi_parity.py::TestWebSocket::test_websocket_send_receive"
-          DESELECT="$DESELECT --deselect tests/test_fastapi_parity.py::TestWebSocket::test_websocket_send_json"
+          DESELECT=""
           if [ "$RUNNER_OS" = "macOS" ]; then
             DESELECT="$DESELECT --deselect tests/test_query_and_headers.py::test_query_parameters_comprehensive"
           fi

@@ -4,12 +4,12 @@ Tests cover: routing, params, responses, security, middleware, background tasks,
 WebSocket, exception handling, OpenAPI, TestClient, static files, lifespan, etc.
 """
 
+import asyncio
 import json
 import os
 import tempfile
 from typing import Annotated
 
-import pytest
 from turboapi import (
     APIKeyCookie,
     APIKeyHeader,
@@ -944,25 +944,29 @@ class TestWebSocket:
         assert exc.code == 1001
         assert exc.reason == "Going away"
 
-    @pytest.mark.asyncio
-    async def test_websocket_send_receive(self):
-        ws = WebSocket()
-        await ws.accept()
-        assert ws.client_state == "connected"
+    def test_websocket_send_receive(self):
+        async def _run():
+            ws = WebSocket()
+            await ws.accept()
+            assert ws.client_state == "connected"
 
-        await ws._receive_queue.put({"type": "text", "data": "hello"})
-        msg = await ws.receive_text()
-        assert msg == "hello"
+            await ws._receive_queue.put({"type": "text", "data": "hello"})
+            msg = await ws.receive_text()
+            assert msg == "hello"
 
-    @pytest.mark.asyncio
-    async def test_websocket_send_json(self):
-        ws = WebSocket()
-        await ws.accept()
-        await ws.send_json({"key": "value"})
+        asyncio.run(_run())
 
-        sent = await ws._send_queue.get()
-        assert sent["type"] == "text"
-        assert json.loads(sent["data"]) == {"key": "value"}
+    def test_websocket_send_json(self):
+        async def _run():
+            ws = WebSocket()
+            await ws.accept()
+            await ws.send_json({"key": "value"})
+
+            sent = await ws._send_queue.get()
+            assert sent["type"] == "text"
+            assert json.loads(sent["data"]) == {"key": "value"}
+
+        asyncio.run(_run())
 
 
 # ============================================================
