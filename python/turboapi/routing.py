@@ -133,31 +133,56 @@ class Router:
             def wrapper(func: Callable) -> Callable:
                 # Analyze function signature
                 sig = inspect.signature(func)
+
+                # Resolve PEP 563 stringified annotations (``from __future__ import
+                # annotations``) so ``inspect.isclass(...)`` and identity checks on
+                # the annotation don't silently skip path/query binding.
+                try:
+                    import typing as _typing
+
+                    resolved_hints = _typing.get_type_hints(func)
+                except Exception:
+                    resolved_hints = {}
+
+                _str_aliases = {
+                    "int": int,
+                    "float": float,
+                    "bool": bool,
+                    "str": str,
+                    "bytes": bytes,
+                }
+
+                def _resolved_ann(p_name, p):
+                    ann = resolved_hints.get(p_name, p.annotation)
+                    if isinstance(ann, str):
+                        ann = _str_aliases.get(ann, ann)
+                    return ann
+
                 path_params = []
                 query_params = {}
                 request_model = None
 
                 for param_name, param in sig.parameters.items():
+                    raw_ann = param.annotation
+                    ann = _resolved_ann(param_name, param)
                     if f"{{{param_name}}}" in path:
                         # Path parameter
                         path_param = PathParameter(
                             name=param_name,
-                            type=param.annotation
-                            if param.annotation != inspect.Parameter.empty
-                            else str,
+                            type=ann if raw_ann != inspect.Parameter.empty else str,
                             default=param.default
                             if param.default != inspect.Parameter.empty
                             else None,
                             required=param.default == inspect.Parameter.empty,
                         )
                         path_params.append(path_param)
-                    elif param.annotation != inspect.Parameter.empty:
+                    elif raw_ann != inspect.Parameter.empty:
                         # Check if it's a request model (class type)
-                        if inspect.isclass(param.annotation):
-                            request_model = param.annotation
+                        if inspect.isclass(ann):
+                            request_model = ann
                         else:
                             # Query parameter
-                            query_params[param_name] = param.annotation
+                            query_params[param_name] = ann
 
                 # Create route definition
                 full_path = self.prefix + path
