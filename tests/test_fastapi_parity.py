@@ -7,6 +7,7 @@ WebSocket, exception handling, OpenAPI, TestClient, static files, lifespan, etc.
 import json
 import os
 import tempfile
+from typing import Annotated
 
 import pytest
 from turboapi import (
@@ -532,6 +533,383 @@ class TestOpenAPI:
         assert "post" in schema["paths"]["/items"]
         operation = schema["paths"]["/items"]["post"]
         assert "requestBody" in operation
+
+    def test_openapi_skips_dependencies_and_supports_forms_and_dhi_models(self):
+        from dhi import BaseModel
+
+        class SearchRequest(BaseModel):
+            query: str
+            limit: int = 10
+
+        class SearchResponse(BaseModel):
+            count: int
+
+        def get_session():
+            return {"session": True}
+
+        SessionDep = Annotated[dict, Depends(get_session)]
+        app = TurboAPI(title="OpenAPICompat")
+
+        @app.post("/login")
+        def login(username: str = Form(), password: str = Form()):
+            return {"username": username}
+
+        @app.post("/search", response_model=SearchResponse)
+        def search(
+            session: SessionDep,
+            request: SearchRequest,
+            include_archived: bool = Query(default=False, alias="archived"),
+        ):
+            return SearchResponse(count=request.limit)
+
+        schema = app.openapi()
+        json.dumps(schema)
+
+        login_body = schema["paths"]["/login"]["post"]["requestBody"]
+        form_schema = login_body["content"]["application/x-www-form-urlencoded"]["schema"]
+        assert form_schema["properties"]["username"] == {"type": "string"}
+        assert form_schema["properties"]["password"] == {"type": "string"}
+        assert form_schema["required"] == ["username", "password"]
+
+        search_operation = schema["paths"]["/search"]["post"]
+        assert search_operation["requestBody"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/SearchRequest"
+        }
+        assert search_operation["parameters"] == [
+            {
+                "name": "include_archived",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "boolean"},
+            }
+        ]
+        assert search_operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/SearchResponse"
+        }
+        assert "SearchRequest" in schema["components"]["schemas"]
+        assert "SearchResponse" in schema["components"]["schemas"]
+
+    def test_openapi_disambiguates_same_named_model_components(self):
+        from dhi import BaseModel
+
+        FirstItem = type("Item", (BaseModel,), {"__annotations__": {"name": str}})
+        SecondItem = type("Item", (BaseModel,), {"__annotations__": {"count": int}})
+
+        app = TurboAPI(title="OpenAPIModels")
+
+        @app.post("/first", response_model=FirstItem)
+        def create_first(item: FirstItem):
+            return item
+
+        @app.post("/second", response_model=SecondItem)
+        def create_second(item: SecondItem):
+            return item
+
+        schema = app.openapi()
+        first_request_ref = schema["paths"]["/first"]["post"]["requestBody"]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+        second_request_ref = schema["paths"]["/second"]["post"]["requestBody"]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+        first_response_ref = schema["paths"]["/first"]["post"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+        second_response_ref = schema["paths"]["/second"]["post"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+
+        assert first_request_ref == first_response_ref
+        assert second_request_ref == second_response_ref
+        assert first_request_ref != second_request_ref
+
+        first_component = first_request_ref.rsplit("/", 1)[-1]
+        second_component = second_request_ref.rsplit("/", 1)[-1]
+        components = schema["components"]["schemas"]
+        assert components[first_component]["properties"] == {"name": {"type": "string"}}
+        assert components[second_component]["properties"] == {"count": {"type": "integer"}}
+
+    def test_openapi_disambiguates_same_named_nested_model_definitions(self):
+        class FirstParent:
+            @classmethod
+            def model_json_schema(cls, ref_template=None):
+                return {
+                    "title": "FirstParent",
+                    "type": "object",
+                    "properties": {"child": {"$ref": "#/components/schemas/Nested"}},
+                    "$defs": {
+                        "Nested": {
+                            "title": "Nested",
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                        }
+                    },
+                }
+
+        class SecondParent:
+            @classmethod
+            def model_json_schema(cls, ref_template=None):
+                return {
+                    "title": "SecondParent",
+                    "type": "object",
+                    "properties": {"child": {"$ref": "#/components/schemas/Nested"}},
+                    "$defs": {
+                        "Nested": {
+                            "title": "Nested",
+                            "type": "object",
+                            "properties": {"count": {"type": "integer"}},
+                        }
+                    },
+                }
+
+        app = TurboAPI(title="OpenAPINestedModels")
+
+        @app.post("/first-nested", response_model=FirstParent)
+        def create_first_nested(item: FirstParent):
+            return item
+
+        @app.post("/second-nested", response_model=SecondParent)
+        def create_second_nested(item: SecondParent):
+            return item
+
+        schema = app.openapi()
+        components = schema["components"]["schemas"]
+        first_nested_ref = components["FirstParent"]["properties"]["child"]["$ref"]
+        second_nested_ref = components["SecondParent"]["properties"]["child"]["$ref"]
+
+        assert first_nested_ref != second_nested_ref
+        first_nested_component = first_nested_ref.rsplit("/", 1)[-1]
+        second_nested_component = second_nested_ref.rsplit("/", 1)[-1]
+        assert components[first_nested_component]["properties"] == {"name": {"type": "string"}}
+        assert components[second_nested_component]["properties"] == {
+            "count": {"type": "integer"}
+        }
+
+    def test_openapi_disambiguates_nested_definitions_after_ref_rewriting(self):
+        class FirstParent:
+            @classmethod
+            def model_json_schema(cls, ref_template=None):
+                return {
+                    "title": "FirstParent",
+                    "type": "object",
+                    "properties": {"child": {"$ref": "#/components/schemas/Child"}},
+                    "$defs": {
+                        "Child": {
+                            "title": "Child",
+                            "type": "object",
+                            "properties": {
+                                "inner": {"$ref": "#/components/schemas/Inner"}
+                            },
+                        },
+                        "Inner": {
+                            "title": "Inner",
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                        },
+                    },
+                }
+
+        class SecondParent:
+            @classmethod
+            def model_json_schema(cls, ref_template=None):
+                return {
+                    "title": "SecondParent",
+                    "type": "object",
+                    "properties": {"child": {"$ref": "#/components/schemas/Child"}},
+                    "$defs": {
+                        "Child": {
+                            "title": "Child",
+                            "type": "object",
+                            "properties": {
+                                "inner": {"$ref": "#/components/schemas/Inner"}
+                            },
+                        },
+                        "Inner": {
+                            "title": "Inner",
+                            "type": "object",
+                            "properties": {"count": {"type": "integer"}},
+                        },
+                    },
+                }
+
+        app = TurboAPI(title="OpenAPINestedRefRewrite")
+
+        @app.post("/first-child", response_model=FirstParent)
+        def create_first_child(item: FirstParent):
+            return item
+
+        @app.post("/second-child", response_model=SecondParent)
+        def create_second_child(item: SecondParent):
+            return item
+
+        schema = app.openapi()
+        components = schema["components"]["schemas"]
+        first_child_ref = components["FirstParent"]["properties"]["child"]["$ref"]
+        second_child_ref = components["SecondParent"]["properties"]["child"]["$ref"]
+
+        assert first_child_ref != second_child_ref
+        first_child_component = first_child_ref.rsplit("/", 1)[-1]
+        second_child_component = second_child_ref.rsplit("/", 1)[-1]
+        first_inner_ref = components[first_child_component]["properties"]["inner"]["$ref"]
+        second_inner_ref = components[second_child_component]["properties"]["inner"]["$ref"]
+
+        assert first_inner_ref != second_inner_ref
+        first_inner_component = first_inner_ref.rsplit("/", 1)[-1]
+        second_inner_component = second_inner_ref.rsplit("/", 1)[-1]
+        assert components[first_inner_component]["properties"] == {"name": {"type": "string"}}
+        assert components[second_inner_component]["properties"] == {
+            "count": {"type": "integer"}
+        }
+
+    def test_openapi_does_not_document_unsupported_annotated_form_metadata(self):
+        app = TurboAPI(title="OpenAPIAnnotatedForm")
+
+        @app.post("/annotated-form")
+        def annotated_form(username: Annotated[str, Form()]):
+            return {"username": username}
+
+        schema = app.openapi()
+        content = schema["paths"]["/annotated-form"]["post"]["requestBody"]["content"]
+
+        assert "application/x-www-form-urlencoded" not in content
+        assert content["application/json"]["schema"] == {
+            "type": "object",
+            "properties": {"username": {"type": "string"}},
+            "required": ["username"],
+        }
+
+    def test_openapi_does_not_document_unsupported_annotated_param_metadata(self):
+        app = TurboAPI(title="OpenAPIAnnotatedParams")
+
+        @app.get("/annotated-query")
+        def annotated_query(q: Annotated[int, Query(default=10, alias="item-query")]):
+            return {"q": q}
+
+        schema = app.openapi()
+        parameters = schema["paths"]["/annotated-query"]["get"]["parameters"]
+
+        assert parameters == [
+            {
+                "name": "q",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "integer"},
+            }
+        ]
+
+    def test_openapi_does_not_document_unsupported_cookie_route_params(self):
+        from dhi import BaseModel
+
+        class Session(BaseModel):
+            id: str
+
+        app = TurboAPI(title="OpenAPICookieParams")
+
+        @app.get("/cookie-route")
+        def cookie_route(session_id: str = Cookie()):
+            return {"session_id": session_id}
+
+        @app.get("/cookie-model-route")
+        def cookie_model_route(session: Session = Cookie()):
+            return session
+
+        schema = app.openapi()
+        cookie_operation = schema["paths"]["/cookie-route"]["get"]
+        cookie_model_operation = schema["paths"]["/cookie-model-route"]["get"]
+
+        assert "parameters" not in cookie_operation
+        assert "parameters" not in cookie_model_operation
+        assert "Session" not in schema["components"]["schemas"]
+
+    def test_openapi_body_embed_model_matches_current_runtime_binding(self):
+        from dhi import BaseModel
+
+        class Item(BaseModel):
+            name: str
+
+        app = TurboAPI(title="OpenAPIBodyEmbed")
+
+        @app.post("/body-embed")
+        def body_embed(item: Item = Body(embed=True)):
+            return item
+
+        schema = app.openapi()
+        body_schema = schema["paths"]["/body-embed"]["post"]["requestBody"]["content"][
+            "application/json"
+        ]["schema"]
+
+        assert body_schema == {"$ref": "#/components/schemas/Item"}
+
+    def test_openapi_documents_form_fields_as_runtime_raw_strings(self):
+        app = TurboAPI(title="OpenAPIFormRawStrings")
+
+        @app.post("/form-raw-strings")
+        def form_raw_strings(age: int = Form(), active: bool = Form()):
+            return {"age": age, "active": active}
+
+        schema = app.openapi()
+        body_schema = schema["paths"]["/form-raw-strings"]["post"]["requestBody"]["content"][
+            "application/x-www-form-urlencoded"
+        ]["schema"]
+
+        assert body_schema == {
+            "type": "object",
+            "properties": {
+                "age": {"type": "string"},
+                "active": {"type": "string"},
+            },
+            "required": ["age", "active"],
+        }
+
+    def test_openapi_does_not_document_unsupported_body_marker_defaults(self):
+        app = TurboAPI(title="OpenAPIBodyMarkerDefaults")
+
+        @app.post("/body-marker-defaults")
+        def body_marker_defaults(count: int = Body(default=10)):
+            return {"count": count}
+
+        schema = app.openapi()
+        request_body = schema["paths"]["/body-marker-defaults"]["post"]["requestBody"]
+        body_schema = request_body["content"]["application/json"]["schema"]
+
+        assert request_body["required"] is True
+        assert body_schema == {
+            "type": "object",
+            "properties": {"count": {"type": "integer"}},
+            "required": ["count"],
+        }
+
+    def test_openapi_does_not_document_unsupported_annotated_model_body(self):
+        from dhi import BaseModel
+
+        class Item(BaseModel):
+            name: str
+
+        app = TurboAPI(title="OpenAPIAnnotatedModelBody")
+
+        @app.post("/annotated-model-body")
+        def annotated_model_body(item: Annotated[Item, Body()]):
+            return item
+
+        @app.post("/annotated-model-body-embed")
+        def annotated_model_body_embed(item: Annotated[Item, Body(embed=True)]):
+            return item
+
+        schema = app.openapi()
+
+        for path in ("/annotated-model-body", "/annotated-model-body-embed"):
+            body_schema = schema["paths"][path]["post"]["requestBody"]["content"][
+                "application/json"
+            ]["schema"]
+
+            assert body_schema != {"$ref": "#/components/schemas/Item"}
+            assert body_schema == {
+                "type": "object",
+                "properties": {"item": {}},
+                "required": ["item"],
+            }
+
+        assert "Item" not in schema["components"]["schemas"]
 
     def test_app_openapi_method(self):
         app = TurboAPI(title="AppOpenAPI")
