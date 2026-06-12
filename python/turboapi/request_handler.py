@@ -53,25 +53,40 @@ class RequestParsingError(ValueError):
         self.errors = errors
 
 
-def _validation_error_details(exc, param_name: str) -> list | None:
+_JSON_SAFE = (str, int, float, bool, type(None), list, dict)
+
+
+def _validation_error_details(exc, param_name: str, embed: bool = False) -> list | None:
     """Extract FastAPI-style error details from a validation exception.
 
     Supports both Pydantic (``exc.errors()`` returning dicts) and dhi
     (``exc.errors`` list of objects with ``field``/``message``). Returns None
     for anything else so callers fall back to the legacy string detail.
     Only ever invoked after validation has already failed (error path).
+
+    ``embed`` mirrors FastAPI's loc convention: a single body model maps to
+    ["body", <field>], while embedded/multi-param bodies include the
+    parameter name: ["body", <param>, <field>].
     """
+    prefix = ["body", param_name] if embed else ["body"]
     try:
         errors_attr = getattr(exc, "errors", None)
         if callable(errors_attr):  # pydantic.ValidationError
             details = []
             for err in errors_attr():
-                loc = ["body", param_name, *(str(p) for p in err.get("loc", ()))]
-                details.append({
-                    "loc": loc,
-                    "msg": err.get("msg", "Invalid value"),
+                detail = {
                     "type": err.get("type", "value_error"),
-                })
+                    "loc": [*prefix, *(str(p) for p in err.get("loc", ()))],
+                    "msg": err.get("msg", "Invalid value"),
+                }
+                # Match FastAPI's payload where safely JSON-serializable
+                if isinstance(err.get("input"), _JSON_SAFE):
+                    detail["input"] = err["input"]
+                if isinstance(err.get("ctx"), dict) and all(
+                    isinstance(v, _JSON_SAFE) for v in err["ctx"].values()
+                ):
+                    detail["ctx"] = err["ctx"]
+                details.append(detail)
             return details or None
         if isinstance(errors_attr, (list, tuple)):  # dhi.ValidationErrors
             details = []
@@ -81,9 +96,9 @@ def _validation_error_details(exc, param_name: str) -> list | None:
                 if field is None and msg is None:
                     return None
                 details.append({
-                    "loc": ["body", param_name] + ([str(field)] if field else []),
-                    "msg": str(msg) if msg is not None else "Invalid value",
                     "type": "value_error",
+                    "loc": prefix + ([str(field)] if field else []),
+                    "msg": str(msg) if msg is not None else "Invalid value",
                 })
             return details or None
     except Exception:
@@ -548,7 +563,7 @@ class RequestBodyParser:
                 except Exception as e:
                     raise RequestParsingError(
                         f"Validation error for {param_name}: {e}",
-                        errors=_validation_error_details(e, param_name),
+                        errors=_validation_error_details(e, param_name, embed=True),
                     )
 
             # Check for Pydantic-like model (model_validate but not Satya)
@@ -558,7 +573,7 @@ class RequestBodyParser:
                 except Exception as e:
                     raise RequestParsingError(
                         f"Validation error for {param_name}: {e}",
-                        errors=_validation_error_details(e, param_name),
+                        errors=_validation_error_details(e, param_name, embed=True),
                     )
             # Check if parameter name exists in JSON data
             elif param_name in json_data:
