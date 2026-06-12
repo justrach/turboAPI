@@ -41,7 +41,66 @@ def _returns_model(handler) -> bool | None:
     return None
 
 class RequestParsingError(ValueError):
-    """Raised when request data cannot be parsed into handler parameters."""
+    """Raised when request data cannot be parsed into handler parameters.
+
+    ``errors`` optionally carries FastAPI-style structured validation details
+    (``[{"loc": [...], "msg": ..., "type": ...}, ...]``). It is only populated
+    on the error path, so successful requests pay zero extra cost.
+    """
+
+    def __init__(self, message: str, errors: list | None = None):
+        super().__init__(message)
+        self.errors = errors
+
+
+def _validation_error_details(exc, param_name: str) -> list | None:
+    """Extract FastAPI-style error details from a validation exception.
+
+    Supports both Pydantic (``exc.errors()`` returning dicts) and dhi
+    (``exc.errors`` list of objects with ``field``/``message``). Returns None
+    for anything else so callers fall back to the legacy string detail.
+    Only ever invoked after validation has already failed (error path).
+    """
+    try:
+        errors_attr = getattr(exc, "errors", None)
+        if callable(errors_attr):  # pydantic.ValidationError
+            details = []
+            for err in errors_attr():
+                loc = ["body", param_name, *(str(p) for p in err.get("loc", ()))]
+                details.append({
+                    "loc": loc,
+                    "msg": err.get("msg", "Invalid value"),
+                    "type": err.get("type", "value_error"),
+                })
+            return details or None
+        if isinstance(errors_attr, (list, tuple)):  # dhi.ValidationErrors
+            details = []
+            for err in errors_attr:
+                field = getattr(err, "field", None)
+                msg = getattr(err, "message", None)
+                if field is None and msg is None:
+                    return None
+                details.append({
+                    "loc": ["body", param_name] + ([str(field)] if field else []),
+                    "msg": str(msg) if msg is not None else "Invalid value",
+                    "type": "value_error",
+                })
+            return details or None
+    except Exception:
+        return None
+    return None
+
+
+def _parsing_error_response(e: RequestParsingError) -> tuple[int, dict]:
+    """(status_code, payload) for a RequestParsingError.
+
+    Structured validation failures use FastAPI-compatible 422 responses
+    (matching the Zig-native dhi validator); everything else keeps the
+    legacy 400 shape.
+    """
+    if getattr(e, "errors", None):
+        return 422, {"detail": e.errors}
+    return 400, {"error": "Bad Request", "detail": str(e)}
 
 
 class DependencyResolver:
@@ -427,7 +486,10 @@ class RequestBodyParser:
                     parsed_params[param_name] = validated_model
                     return parsed_params
                 except Exception as e:
-                    raise RequestParsingError(f"Validation error for {param_name}: {e}")
+                    raise RequestParsingError(
+                        f"Validation error for {param_name}: {e}",
+                        errors=_validation_error_details(e, param_name),
+                    )
 
             # If annotated as dict or list, pass entire body
             elif param.annotation in (dict, list) or param.annotation == inspect.Parameter.empty:
@@ -448,7 +510,10 @@ class RequestBodyParser:
                     parsed_params[param_name] = validated_model
                     return parsed_params
                 except Exception as e:
-                    raise RequestParsingError(f"Validation error for {param_name}: {e}")
+                    raise RequestParsingError(
+                        f"Validation error for {param_name}: {e}",
+                        errors=_validation_error_details(e, param_name),
+                    )
 
             # Unknown class annotation with single param — try direct construction
             if inspect.isclass(param.annotation):
@@ -481,14 +546,20 @@ class RequestBodyParser:
                     validated_model = param.annotation.model_validate(json_data)
                     parsed_params[param_name] = validated_model
                 except Exception as e:
-                    raise RequestParsingError(f"Validation error for {param_name}: {e}")
+                    raise RequestParsingError(
+                        f"Validation error for {param_name}: {e}",
+                        errors=_validation_error_details(e, param_name),
+                    )
 
             # Check for Pydantic-like model (model_validate but not Satya)
             elif inspect.isclass(param.annotation) and hasattr(param.annotation, "model_validate"):
                 try:
                     parsed_params[param_name] = param.annotation.model_validate(json_data)
                 except Exception as e:
-                    raise RequestParsingError(f"Validation error for {param_name}: {e}")
+                    raise RequestParsingError(
+                        f"Validation error for {param_name}: {e}",
+                        errors=_validation_error_details(e, param_name),
+                    )
             # Check if parameter name exists in JSON data
             elif param_name in json_data:
                 value = json_data[param_name]
@@ -1040,9 +1111,8 @@ def create_enhanced_handler(original_handler, route_definition):
                 )
 
             except RequestParsingError as e:
-                return ResponseHandler.format_json_response(
-                    {"error": "Bad Request", "detail": str(e)}, 400
-                )
+                status, payload = _parsing_error_response(e)
+                return ResponseHandler.format_json_response(payload, status)
             except Exception as e:
                 from turboapi.security import HTTPException
 
@@ -1223,9 +1293,8 @@ def create_enhanced_handler(original_handler, route_definition):
                 )
 
             except RequestParsingError as e:
-                return ResponseHandler.format_json_response(
-                    {"error": "Bad Request", "detail": str(e)}, 400
-                )
+                status, payload = _parsing_error_response(e)
+                return ResponseHandler.format_json_response(payload, status)
             except Exception as e:
                 from turboapi.security import HTTPException
 
@@ -1415,7 +1484,8 @@ def create_fast_handler(original_handler, route_definition):
                 return (result[1], "application/json", _dumps(result[0]))
             return (200, "application/json", _dumps(result))
         except RequestParsingError as e:
-            return (400, "application/json", _dumps({"error": "Bad Request", "detail": str(e)}))
+            status, payload = _parsing_error_response(e)
+            return (status, "application/json", _dumps(payload))
         except Exception as e:
             if isinstance(e, HTTPException):
                 return (e.status_code, "application/json", _dumps({"detail": e.detail}))
@@ -1494,11 +1564,8 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
             try:
                 return _run_eager(original_handler(**build_call_kwargs(kwargs)))
             except RequestParsingError as e:
-                return (
-                    400,
-                    "application/json",
-                    _dumps({"error": "Bad Request", "detail": str(e)}),
-                )
+                status, payload = _parsing_error_response(e)
+                return (status, "application/json", _dumps(payload))
             except Exception as e:
                 if isinstance(e, HTTPException):
                     return (e.status_code, "application/json", _dumps({"detail": e.detail}))
@@ -1524,7 +1591,8 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
                 return (result[1], "application/json", _dumps(result[0]))
             return (200, "application/json", _dumps(result))
         except RequestParsingError as e:
-            return (400, "application/json", _dumps({"error": "Bad Request", "detail": str(e)}))
+            status, payload = _parsing_error_response(e)
+            return (status, "application/json", _dumps(payload))
         except Exception as e:
             if isinstance(e, HTTPException):
                 return (e.status_code, "application/json", _dumps({"detail": e.detail}))
