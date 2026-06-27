@@ -33,6 +33,7 @@ def generate_openapi_schema(app) -> dict:
         "components": {"schemas": {}},
     }
     components = schema["components"]["schemas"]
+    _add_validation_error_schemas(components)
 
     routes = app.registry.get_routes()
     for route in routes:
@@ -221,6 +222,39 @@ def _get_summary(handler) -> str:
     """Generate summary from handler name."""
     name = handler.__name__
     return name.replace("_", " ").title()
+
+
+def _add_validation_error_schemas(components: dict[str, Any]) -> None:
+    """Register the default 422 response component schemas."""
+    components.setdefault(
+        "ValidationError",
+        {
+            "type": "object",
+            "title": "ValidationError",
+            "properties": {
+                "loc": {
+                    "type": "array",
+                    "items": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+                },
+                "msg": {"type": "string"},
+                "type": {"type": "string"},
+            },
+            "required": ["loc", "msg", "type"],
+        },
+    )
+    components.setdefault(
+        "HTTPValidationError",
+        {
+            "type": "object",
+            "title": "HTTPValidationError",
+            "properties": {
+                "detail": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/ValidationError"},
+                }
+            },
+        },
+    )
 
 
 _MARKER_TYPES = (Form, File, Query, Header, Cookie, Path, Body)

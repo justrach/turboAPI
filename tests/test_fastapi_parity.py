@@ -55,6 +55,28 @@ from turboapi.openapi import generate_openapi_schema
 from turboapi.staticfiles import StaticFiles
 from turboapi.testclient import TestClient
 
+
+def assert_no_dangling_component_refs(schema):
+    components = schema.get("components", {}).get("schemas", {})
+    missing = set()
+
+    def visit(value):
+        if isinstance(value, dict):
+            ref = value.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+                name = ref.rsplit("/", 1)[-1]
+                if name not in components:
+                    missing.add(name)
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(schema)
+    assert not missing
+
+
 # ============================================================
 # Test: Core Routing
 # ============================================================
@@ -576,6 +598,7 @@ class TestOpenAPI:
 
         schema = app.openapi()
         json.dumps(schema)
+        assert_no_dangling_component_refs(schema)
 
         login_body = schema["paths"]["/login"]["post"]["requestBody"]
         assert "application/x-www-form-urlencoded" in login_body["content"]
@@ -597,6 +620,8 @@ class TestOpenAPI:
         }
         assert "SearchRequest" in schema["components"]["schemas"]
         assert "SearchResponse" in schema["components"]["schemas"]
+        assert "HTTPValidationError" in schema["components"]["schemas"]
+        assert "ValidationError" in schema["components"]["schemas"]
 
     def test_openapi_sandbox_gateway_docs_patterns(self):
         from dhi import BaseModel
@@ -655,6 +680,7 @@ class TestOpenAPI:
 
         schema = app.openapi()
         json.dumps(schema)
+        assert_no_dangling_component_refs(schema)
 
         create_op = schema["paths"]["/sandboxes"]["post"]
         assert [param["name"] for param in create_op.get("parameters", [])] == []
