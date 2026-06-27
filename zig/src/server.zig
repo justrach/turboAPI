@@ -1152,13 +1152,15 @@ fn runIoUringAcceptLoop(tcp_server: *std.Io.net.Server) !void {
 /// existing per-connection thread-pool code can consume it unchanged.
 fn iouringOnAccept(ctx: *anyopaque, fd: posix.fd_t) void {
     const conn_pool: *ConnectionPool = @ptrCast(@alignCast(ctx));
-    const stream = std.Io.net.Stream{ .socket = .{
-        .handle = fd,
-        // peer address isn't reported by ACCEPT_MULTISHOT when we pass a
-        // null sockaddr; the existing handlers don't read it, so leave it
-        // zero rather than paying for getpeername(2) on the hot path.
-        .address = .{ .ip4 = std.Io.net.Ip4Address.unspecified(0) },
-    } };
+    const stream = std.Io.net.Stream{
+        .socket = .{
+            .handle = fd,
+            // peer address isn't reported by ACCEPT_MULTISHOT when we pass a
+            // null sockaddr; the existing handlers don't read it, so leave it
+            // zero rather than paying for getpeername(2) on the hot path.
+            .address = .{ .ip4 = std.Io.net.Ip4Address.unspecified(0) },
+        },
+    };
     conn_pool.queue.push(stream);
 }
 
@@ -1184,6 +1186,76 @@ fn parseHeaders(request_data: []const u8, first_line_end: usize, header_end_pos:
     }
 
     return headers;
+}
+
+const FramingError = enum {
+    none,
+    invalid_content_length,
+    conflicting_content_length,
+    unsupported_transfer_encoding,
+    transfer_encoding_with_content_length,
+};
+
+const FramingResult = struct {
+    content_length: usize = 0,
+    has_content_length: bool = false,
+    has_transfer_encoding: bool = false,
+    err: FramingError = .none,
+};
+
+fn parseFramingHeaders(request_data: []const u8, first_line_end: usize, header_end_pos: usize) FramingResult {
+    var result = FramingResult{};
+    var seen_content_length: ?usize = null;
+
+    var pos = first_line_end + 2;
+    while (pos < header_end_pos) {
+        const line_end = std.mem.indexOfPos(u8, request_data, pos, "\r\n") orelse header_end_pos;
+        const line = request_data[pos..line_end];
+        pos = line_end + 2;
+
+        if (line.len == 0) break;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+
+        if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
+            result.has_transfer_encoding = true;
+        } else if (std.ascii.eqlIgnoreCase(name, "content-length")) {
+            if (value.len == 0) {
+                result.err = .invalid_content_length;
+                return result;
+            }
+            for (value) |ch| {
+                if (ch < '0' or ch > '9') {
+                    result.err = .invalid_content_length;
+                    return result;
+                }
+            }
+            const parsed = std.fmt.parseInt(usize, value, 10) catch {
+                result.err = .invalid_content_length;
+                return result;
+            };
+            if (seen_content_length) |previous| {
+                if (previous != parsed) {
+                    result.err = .conflicting_content_length;
+                    return result;
+                }
+            } else {
+                seen_content_length = parsed;
+            }
+        }
+    }
+
+    if (seen_content_length) |cl| {
+        result.has_content_length = true;
+        result.content_length = cl;
+    }
+    if (result.has_transfer_encoding and result.has_content_length) {
+        result.err = .transfer_encoding_with_content_length;
+    } else if (result.has_transfer_encoding) {
+        result.err = .unsupported_transfer_encoding;
+    }
+    return result;
 }
 
 /// SIMD-accelerated search for the HTTP header-end sentinel "\r\n\r\n".
@@ -1272,11 +1344,46 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     const path = if (q_idx) |i| raw_path[0..i] else raw_path;
     const query_string = if (q_idx) |i| raw_path[i + 1 ..] else "";
 
+    const framing = parseFramingHeaders(request_head, first_line_end, he);
+    switch (framing.err) {
+        .none => {},
+        .invalid_content_length, .conflicting_content_length => {
+            sendResponseClose(stream, 400, "application/json", "{\"error\": \"Invalid Content-Length\"}");
+            return error.InvalidRequest;
+        },
+        .transfer_encoding_with_content_length => {
+            sendResponseClose(stream, 400, "application/json", "{\"error\": \"Conflicting Transfer-Encoding and Content-Length\"}");
+            return error.InvalidRequest;
+        },
+        .unsupported_transfer_encoding => {
+            sendResponseClose(stream, 501, "application/json", "{\"error\": \"Transfer-Encoding not supported\"}");
+            return error.InvalidRequest;
+        },
+    }
+
+    const max_body: usize = 16 * 1024 * 1024;
+    if (framing.content_length > max_body) {
+        sendResponseClose(stream, 413, "application/json", "{\"error\": \"Payload Too Large\"}");
+        return error.InvalidRequest;
+    }
+    if (!framing.has_content_length and total_read > he + 4) {
+        sendResponseClose(stream, 400, "application/json", "{\"error\": \"Unexpected bytes after headers\"}");
+        return error.InvalidRequest;
+    }
+    if (framing.has_content_length and total_read > he + 4 + framing.content_length) {
+        sendResponseClose(stream, 400, "application/json", "{\"error\": \"Unexpected bytes after request body\"}");
+        return error.InvalidRequest;
+    }
+
     // Phase 3: Route match EARLY — before header parsing, so fast handlers
     // can skip the expensive parseHeaders + body read entirely.
     const rt = getRouter();
     var match = rt.findRoute(method, path) orelse {
         logger.debug("[ZIG] 404 for {s} {s}", .{ method, path });
+        if (framing.content_length > 0) {
+            sendResponseClose(stream, 404, "application/json", "{\"error\": \"Not Found\"}");
+            return error.InvalidRequest;
+        }
         sendResponse(stream, 404, "application/json", "{\"error\": \"Not Found\"}");
         return;
     };
@@ -1286,6 +1393,10 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
 
     // CORS preflight — immediate 204, no Python
     if (cors_enabled and std.mem.eql(u8, method, "OPTIONS")) {
+        if (framing.content_length > 0) {
+            sendResponseClose(stream, 400, "application/json", "{\"error\": \"Unexpected request body\"}");
+            return error.InvalidRequest;
+        }
         sendResponse(stream, 204, "", "");
         return;
     }
@@ -1293,6 +1404,10 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     // Static routes — single writeAll of pre-rendered bytes
     const sr = getStaticRoutes();
     if (sr.get(match.handler_key)) |static_entry| {
+        if (framing.content_length > 0) {
+            sendResponseClose(stream, 400, "application/json", "{\"error\": \"Unexpected request body\"}");
+            return error.InvalidRequest;
+        }
         streamWriteAll(stream, static_entry.response_bytes) catch return;
         return;
     }
@@ -1300,6 +1415,10 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     // Native FFI routes — no GIL, no Python
     const nr = getNativeRoutes();
     if (nr.get(match.handler_key)) |native_entry| {
+        if (framing.content_length > 0) {
+            sendResponseClose(stream, 400, "application/json", "{\"error\": \"Unexpected request body\"}");
+            return error.InvalidRequest;
+        }
         // Native handlers need headers — parse them
         var headers = parseHeaders(request_head, first_line_end, he);
         defer headers.deinit(allocator);
@@ -1323,14 +1442,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     if (dbr.get(match.handler_key)) |*db_entry| {
         if (db_entry.op == .insert) {
             // INSERT needs body — parse headers + read body
-            var db_headers = parseHeaders(request_head, first_line_end, he);
-            defer db_headers.deinit(allocator);
-            var db_cl: usize = 0;
-            for (db_headers.items) |h| {
-                if (std.ascii.eqlIgnoreCase(h.name, "content-length")) {
-                    db_cl = std.fmt.parseInt(usize, h.value, 10) catch 0;
-                }
-            }
+            const db_cl: usize = framing.content_length;
             const db_body_start = he + 4;
             const db_already = request_head[db_body_start..total_read];
             var db_body: []const u8 = "";
@@ -1358,6 +1470,10 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
             db.handleDbRoute(stream, db_entry, db_body, &match.params, query_string, &sendResponse);
         } else {
             // GET/DELETE — no body needed
+            if (framing.content_length > 0) {
+                sendResponseClose(stream, 400, "application/json", "{\"error\": \"Unexpected request body\"}");
+                return error.InvalidRequest;
+            }
             db.handleDbRoute(stream, db_entry, "", &match.params, query_string, &sendResponse);
         }
         return;
@@ -1373,6 +1489,15 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     const entry = entry_ptr.*;
 
     // ── Ultra-fast path: simple handlers that don't need headers or body ──
+    switch (entry.handler_tag) {
+        .simple_sync_noargs, .simple_sync, .simple_async, .simple_async_eager => {
+            if (framing.content_length > 0) {
+                sendResponseClose(stream, 400, "application/json", "{\"error\": \"Unexpected request body\"}");
+                return error.InvalidRequest;
+            }
+        },
+        else => {},
+    }
     switch (entry.handler_tag) {
         .simple_sync_noargs => {
             if (cache_noargs_responses) {
@@ -1444,33 +1569,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     const body_start = he + 4;
     const already_read_body = request_head[body_start..total_read];
 
-    // Reject Transfer-Encoding (chunked not implemented — accepting silently causes request smuggling)
-    var has_te = false;
-    var has_cl = false;
-    var content_length: usize = 0;
-    for (headers.items) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, "transfer-encoding")) has_te = true;
-        if (std.ascii.eqlIgnoreCase(h.name, "content-length")) {
-            has_cl = true;
-            content_length = std.fmt.parseInt(usize, h.value, 10) catch 0;
-        }
-    }
-    if (has_te) {
-        if (has_cl) {
-            // TE + CL = smuggling attack (RFC 7230 §3.3.3)
-            sendResponse(stream, 400, "application/json", "{\"error\": \"Conflicting Transfer-Encoding and Content-Length\"}");
-        } else {
-            // TE alone = unsupported encoding
-            sendResponse(stream, 501, "application/json", "{\"error\": \"Transfer-Encoding not supported\"}");
-        }
-        return;
-    }
-
-    const max_body: usize = 16 * 1024 * 1024;
-    if (content_length > max_body) {
-        sendResponse(stream, 413, "application/json", "{\"error\": \"Payload Too Large\"}");
-        return;
-    }
+    const content_length: usize = framing.content_length;
 
     var body: []const u8 = "";
     var body_owned: ?[]u8 = null;
@@ -2634,6 +2733,18 @@ fn statusText(status: u16) []const u8 {
 /// Zero-alloc response writer.  Header + body are concatenated into a stack
 /// buffer for a single write syscall (most API responses are <4KB).
 /// Falls back to two writes only for large responses.
+pub fn sendResponseClose(stream: std.Io.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
+    const date_str = currentHttpDate();
+    var header_buf: [512]u8 = undefined;
+    const header = std.fmt.bufPrint(
+        &header_buf,
+        "HTTP/1.1 {d} {s}\r\nServer: TurboAPI\r\nDate: {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
+        .{ status, statusText(status), date_str, content_type, body.len },
+    ) catch return;
+    streamWriteAll(stream, header) catch return;
+    if (body.len > 0) streamWriteAll(stream, body) catch return;
+}
+
 pub fn sendResponse(stream: std.Io.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
     // TFB requires Server + Date headers
     const date_str = currentHttpDate();
@@ -2738,6 +2849,52 @@ test "response cache is safe under concurrent access" {
     try std.testing.expectEqual(@as(usize, 2), response_cache_count);
     try std.testing.expectEqualStrings("{\"item_id\":1}", getCachedResponse("GET /items/1").?);
     try std.testing.expectEqualStrings("{\"item_id\":2}", getCachedResponse("GET /items/2").?);
+}
+
+test "HTTP framing parser validates Content-Length and Transfer-Encoding" {
+    const base = "GET / HTTP/1.1\r\nHost: example\r\n";
+
+    const valid = base ++ "Content-Length: 5\r\n\r\nhello";
+    const valid_result = parseFramingHeaders(valid, 14, valid.len - 9);
+    try std.testing.expectEqual(FramingError.none, valid_result.err);
+    try std.testing.expect(valid_result.has_content_length);
+    try std.testing.expectEqual(@as(usize, 5), valid_result.content_length);
+
+    const invalid_alpha = base ++ "Content-Length: abc\r\n\r\n";
+    try std.testing.expectEqual(
+        FramingError.invalid_content_length,
+        parseFramingHeaders(invalid_alpha, 14, invalid_alpha.len - 4).err,
+    );
+
+    const invalid_negative = base ++ "Content-Length: -1\r\n\r\n";
+    try std.testing.expectEqual(
+        FramingError.invalid_content_length,
+        parseFramingHeaders(invalid_negative, 14, invalid_negative.len - 4).err,
+    );
+
+    const duplicate_same = base ++ "Content-Length: 5\r\nContent-Length: 5\r\n\r\nhello";
+    try std.testing.expectEqual(
+        FramingError.none,
+        parseFramingHeaders(duplicate_same, 14, duplicate_same.len - 9).err,
+    );
+
+    const duplicate_conflict = base ++ "Content-Length: 5\r\nContent-Length: 6\r\n\r\nhello";
+    try std.testing.expectEqual(
+        FramingError.conflicting_content_length,
+        parseFramingHeaders(duplicate_conflict, 14, duplicate_conflict.len - 9).err,
+    );
+
+    const te_only = base ++ "Transfer-Encoding: chunked\r\n\r\n";
+    try std.testing.expectEqual(
+        FramingError.unsupported_transfer_encoding,
+        parseFramingHeaders(te_only, 14, te_only.len - 4).err,
+    );
+
+    const te_cl = base ++ "Transfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\nhello";
+    try std.testing.expectEqual(
+        FramingError.transfer_encoding_with_content_length,
+        parseFramingHeaders(te_cl, 14, te_cl.len - 9).err,
+    );
 }
 
 // ── Fuzz tests ───────────────────────────────────────────────────────────────

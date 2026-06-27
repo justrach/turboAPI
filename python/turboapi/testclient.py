@@ -408,9 +408,10 @@ class TestClient:
                     content=_json_encode(error_body),
                     headers=getattr(e, "headers", None) or {},
                 )
+            detail = str(e) if getattr(self.app, "debug", False) else "Internal Server Error"
             return TestResponse(
                 status_code=500,
-                content=_json_encode({"detail": str(e)}),
+                content=_json_encode({"detail": detail}),
             )
 
         # Run background tasks if any

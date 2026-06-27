@@ -184,7 +184,7 @@ def test_fast_async_handler_eager_returns_tuple_from_body():
 
 
 def test_fast_handler_exception_returns_500_tuple():
-    """Uncaught exception inside handler returns (500, ...) tuple."""
+    """Uncaught exception inside handler returns redacted (500, ...) tuple."""
 
     def handler():
         raise RuntimeError("boom")
@@ -197,7 +197,12 @@ def test_fast_handler_exception_returns_500_tuple():
     import json
 
     data = json.loads(result[2])
-    assert "boom" in data["error"]
+    assert data == {"error": "Internal Server Error"}
+
+    debug_h = create_fast_handler(handler, route, debug=True)
+    debug_result = debug_h(path_params={})
+    debug_data = json.loads(debug_result[2])
+    assert debug_data == {"error": "Internal Server Error", "detail": "boom"}
 
 
 # ── Tuple ABI: create_fast_model_handler returns 3-tuples ────────────────────
