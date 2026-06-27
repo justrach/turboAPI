@@ -71,12 +71,14 @@ class TurboAPI(Router):
         redoc_url: str | None = "/redoc",
         openapi_url: str | None = "/openapi.json",
         lifespan: Callable | None = None,
+        debug: bool = False,
         **kwargs,
     ):
         super().__init__()
         self.title = title
         self.version = version
         self.description = description
+        self.debug = debug
         self.middleware_stack = []
         self.startup_handlers = []
         self.shutdown_handlers = []
@@ -406,7 +408,10 @@ class TurboAPI(Router):
             }
 
         except Exception as e:
-            return {"error": "Internal Server Error", "status_code": 500, "detail": str(e)}
+            response = {"error": "Internal Server Error", "status_code": 500}
+            if self.debug:
+                response["detail"] = str(e)
+            return response
 
     def run_legacy(self, host: str = "127.0.0.1", port: int = 8000, workers: int = 1, **kwargs):
         """Run the TurboAPI application with legacy loop sharding (DEPRECATED).
@@ -707,7 +712,8 @@ class TurboAPI(Router):
             else:
                 result = route.handler(**call_args)
         except Exception as e:
-            resp_body = _json.dumps({"detail": str(e)}).encode("utf-8")
+            detail = str(e) if self.debug else "Internal Server Error"
+            resp_body = _json.dumps({"detail": detail}).encode("utf-8")
             await send(
                 {
                     "type": "http.response.start",

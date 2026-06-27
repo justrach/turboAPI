@@ -17,6 +17,24 @@ from turboapi.serializers import json_loads as _turbo_loads
 
 _NO_COERCION = object()
 
+
+def _internal_error_body(exc: Exception, *, debug: bool = False, include_traceback: bool = False) -> dict:
+    """Return the response body for unexpected 500 errors.
+
+    Production defaults intentionally avoid echoing exception strings or tracebacks,
+    which can contain secrets. Debug mode keeps the previous developer-friendly
+    details.
+    """
+    body = {"error": "Internal Server Error"}
+    if debug:
+        body["detail"] = str(exc)
+        if include_traceback:
+            import traceback
+
+            body["traceback"] = traceback.format_exc()
+    return body
+
+
 def _collect_streaming_body_sync(result):
     """If result is a StreamingResponse, collect its body synchronously."""
     if not hasattr(result, "body_iterator"):
@@ -665,11 +683,11 @@ class ResponseHandler:
             if isinstance(body, bytes):
                 # Try to decode as JSON for JSONResponse
                 try:
-                    import json
-
                     body = _turbo_loads(body)
-                except json.JSONDecodeError:
-                    # Not JSON, try as plain text
+                except Exception:
+                    # Not JSON, try as plain text. The active JSON backend may
+                    # raise json.JSONDecodeError, msgspec.DecodeError, or a
+                    # backend-specific exception type.
                     try:
                         body = body.decode("utf-8")
                     except UnicodeDecodeError:
@@ -677,11 +695,6 @@ class ResponseHandler:
                         if extra_headers:
                             return body, result.status_code, content_type, extra_headers
                         return body, result.status_code, content_type
-                except UnicodeDecodeError:
-                    # Binary data - return with content_type
-                    if extra_headers:
-                        return body, result.status_code, content_type, extra_headers
-                    return body, result.status_code, content_type
             if extra_headers:
                 return body, result.status_code, content_type, extra_headers
             return body, result.status_code, content_type
@@ -804,7 +817,7 @@ def _format_zig_tuple(content, status_code, content_type=None):
         return (status_code, "application/json", _json_dumps({"error": str(content)}))
 
 
-def create_enhanced_handler(original_handler, route_definition):
+def create_enhanced_handler(original_handler, route_definition, *, debug: bool = False):
     """
     Create an enhanced handler with automatic body parsing and response normalization.
 
@@ -1064,14 +1077,8 @@ def create_enhanced_handler(original_handler, route_definition):
 
                 if isinstance(e, HTTPException):
                     return ResponseHandler.format_json_response({"detail": e.detail}, e.status_code)
-                import traceback
-
                 return ResponseHandler.format_json_response(
-                    {
-                        "error": "Internal Server Error",
-                        "detail": str(e),
-                        "traceback": traceback.format_exc(),
-                    },
+                    _internal_error_body(e, debug=debug, include_traceback=True),
                     500,
                 )
 
@@ -1247,21 +1254,15 @@ def create_enhanced_handler(original_handler, route_definition):
 
                 if isinstance(e, HTTPException):
                     return ResponseHandler.format_json_response({"detail": e.detail}, e.status_code)
-                import traceback
-
                 return ResponseHandler.format_json_response(
-                    {
-                        "error": "Internal Server Error",
-                        "detail": str(e),
-                        "traceback": traceback.format_exc(),
-                    },
+                    _internal_error_body(e, debug=debug, include_traceback=True),
                     500,
                 )
 
         return enhanced_handler
 
 
-def create_pos_handler(original_handler):
+def create_pos_handler(original_handler, *, debug: bool = False):
     """Minimal positional wrapper for PyObject_Vectorcall dispatch.
 
     Zig assembles args from path/query params and calls this positionally —
@@ -1297,12 +1298,12 @@ def create_pos_handler(original_handler):
                     return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
                 pass
-            return (500, "application/json", _dumps({"error": str(e)}))
+            return (500, "application/json", _dumps(_internal_error_body(e, debug=debug)))
 
     return pos_handler
 
 
-def create_async_pos_handler(original_handler):
+def create_async_pos_handler(original_handler, *, debug: bool = False):
     """Minimal positional wrapper for async PyObject_Vectorcall dispatch."""
     import json as _json
 
@@ -1333,12 +1334,12 @@ def create_async_pos_handler(original_handler):
                     return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
                 pass
-            return (500, "application/json", _dumps({"error": str(e)}))
+            return (500, "application/json", _dumps(_internal_error_body(e, debug=debug)))
 
     return pos_handler
 
 
-def create_fast_handler(original_handler, route_definition):
+def create_fast_handler(original_handler, route_definition, *, debug: bool = False):
     """Create a minimal-overhead handler for simple sync routes.
 
     Returns a 3-tuple (status_code, content_type, body_str) so Zig can unpack
@@ -1397,7 +1398,7 @@ def create_fast_handler(original_handler, route_definition):
                         return (e.status_code, "application/json", _dumps({"detail": e.detail}))
                 except ImportError:
                     pass
-                return (500, "application/json", _dumps({"error": str(e)}))
+                return (500, "application/json", _dumps(_internal_error_body(e, debug=debug)))
 
         return fast_handler_noargs
 
@@ -1466,12 +1467,12 @@ def create_fast_handler(original_handler, route_definition):
                     return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
                 pass
-            return (500, "application/json", _dumps({"error": str(e)}))
+            return (500, "application/json", _dumps(_internal_error_body(e, debug=debug)))
 
     return fast_handler
 
 
-def create_fast_async_handler(original_handler, route_definition, eager: bool = False):
+def create_fast_async_handler(original_handler, route_definition, eager: bool = False, *, debug: bool = False):
     """Create a minimal-overhead tuple handler for async routes that need kwargs."""
     import json as _json
 
@@ -1555,7 +1556,7 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
                         return (e.status_code, "application/json", _dumps({"detail": e.detail}))
                 except ImportError:
                     pass
-                return (500, "application/json", _dumps({"error": str(e)}))
+                return (500, "application/json", _dumps(_internal_error_body(e, debug=debug)))
 
         return fast_handler_eager
 
@@ -1589,12 +1590,12 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
                     return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
                 pass
-            return (500, "application/json", _dumps({"error": str(e)}))
+            return (500, "application/json", _dumps(_internal_error_body(e, debug=debug)))
 
     return fast_handler
 
 
-def create_fast_model_handler(original_handler, model_class, param_name):
+def create_fast_model_handler(original_handler, model_class, param_name, *, debug: bool = False):
     """Create a minimal handler for model_sync routes.
 
     Zig has already validated the JSON body against the schema.
@@ -1630,6 +1631,6 @@ def create_fast_model_handler(original_handler, model_class, param_name):
                     return (e.status_code, "application/json", _dumps({"detail": e.detail}))
             except ImportError:
                 pass
-            return (500, "application/json", _dumps({"error": str(e)}))
+            return (500, "application/json", _dumps(_internal_error_body(e, debug=debug)))
 
     return fast_model_handler
