@@ -7,6 +7,7 @@ WebSocket, exception handling, OpenAPI, TestClient, static files, lifespan, etc.
 import json
 import os
 import tempfile
+from typing import Annotated
 
 import pytest
 from turboapi import (
@@ -544,6 +545,154 @@ class TestOpenAPI:
         assert schema["info"]["title"] == "AppOpenAPI"
         # Cached
         assert app.openapi() is schema
+
+    def test_openapi_form_depends_models_and_explicit_query(self):
+        from dhi import BaseModel
+
+        class SearchRequest(BaseModel):
+            query: str
+            limit: int = 10
+
+        class SearchResponse(BaseModel):
+            count: int
+
+        def get_session():
+            return {"session": True}
+
+        SessionDep = Annotated[dict, Depends(get_session)]
+        app = TurboAPI(title="OpenAPI Repro")
+
+        @app.post("/login")
+        def login(username: str = Form(), password: str = Form()):
+            return {"username": username}
+
+        @app.post("/search", response_model=SearchResponse)
+        def search(
+            session: SessionDep,
+            request: SearchRequest,
+            include_archived: bool = Query(default=False),
+        ):
+            return SearchResponse(count=request.limit)
+
+        schema = app.openapi()
+        json.dumps(schema)
+
+        login_body = schema["paths"]["/login"]["post"]["requestBody"]
+        assert "application/x-www-form-urlencoded" in login_body["content"]
+        login_props = login_body["content"]["application/x-www-form-urlencoded"][
+            "schema"
+        ]["properties"]
+        assert set(login_props) == {"username", "password"}
+        assert all("default" not in prop for prop in login_props.values())
+
+        search_op = schema["paths"]["/search"]["post"]
+        assert [param["name"] for param in search_op["parameters"]] == ["include_archived"]
+        assert search_op["parameters"][0]["in"] == "query"
+        assert search_op["parameters"][0]["schema"]["default"] is False
+        assert search_op["requestBody"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/SearchRequest"
+        }
+        assert search_op["responses"]["200"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/SearchResponse"
+        }
+        assert "SearchRequest" in schema["components"]["schemas"]
+        assert "SearchResponse" in schema["components"]["schemas"]
+
+    def test_openapi_sandbox_gateway_docs_patterns(self):
+        from dhi import BaseModel
+
+        class CreateSandboxRequest(BaseModel):
+            templateID: str = "py312"
+            cpuCount: int = 1
+            memoryMB: int = 512
+            metadata: dict = {}
+
+        class Sandbox(BaseModel):
+            sandboxID: str
+            templateID: str = "py312"
+
+        def tenant_key(x_api_key: str = Header(alias="X-API-Key")):
+            return x_api_key
+
+        TenantKey = Annotated[str, Depends(tenant_key)]
+        app = TurboAPI(title="CubeSandbox Gateway")
+
+        @app.get("/healthz")
+        def healthz():
+            return "ok"
+
+        @app.get("/sandboxes", response_model=list[Sandbox])
+        def list_sandboxes(tenant: TenantKey, limit: int = Query(default=100)):
+            return []
+
+        @app.post("/sandboxes", response_model=Sandbox)
+        def create_sandbox(tenant: TenantKey, request: CreateSandboxRequest):
+            return Sandbox(sandboxID="sbx_123", templateID=request.templateID)
+
+        @app.get("/sandboxes/{sandbox_id}/host/{port}/files")
+        def read_file(
+            tenant: TenantKey,
+            sandbox_id: str,
+            port: int,
+            path: str = Query(),
+            username: str = Query(default="user"),
+        ):
+            return {"sandboxID": sandbox_id, "port": port, "path": path}
+
+        @app.post("/sandboxes/{sandbox_id}/host/{port}/files")
+        def upload_file(
+            tenant: TenantKey,
+            sandbox_id: str,
+            port: int,
+            path: str = Query(),
+            file: UploadFile = File(),
+        ):
+            return {"sandboxID": sandbox_id, "port": port, "path": path}
+
+        @app.get("/admin/capacity")
+        def admin_capacity(admin_token: str = Header(alias="X-Admin-Token")):
+            return {"fleet": {}}
+
+        schema = app.openapi()
+        json.dumps(schema)
+
+        create_op = schema["paths"]["/sandboxes"]["post"]
+        assert [param["name"] for param in create_op.get("parameters", [])] == []
+        assert create_op["requestBody"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/CreateSandboxRequest"
+        }
+        assert create_op["responses"]["200"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/Sandbox"
+        }
+
+        list_params = schema["paths"]["/sandboxes"]["get"]["parameters"]
+        assert [param["name"] for param in list_params] == ["limit"]
+        assert list_params[0]["schema"]["default"] == 100
+
+        files_get = schema["paths"]["/sandboxes/{sandbox_id}/host/{port}/files"]["get"]
+        files_get_params = {(param["name"], param["in"]) for param in files_get["parameters"]}
+        assert files_get_params == {
+            ("sandbox_id", "path"),
+            ("port", "path"),
+            ("path", "query"),
+            ("username", "query"),
+        }
+
+        files_post = schema["paths"]["/sandboxes/{sandbox_id}/host/{port}/files"]["post"]
+        assert "multipart/form-data" in files_post["requestBody"]["content"]
+        assert files_post["requestBody"]["content"]["multipart/form-data"]["schema"][
+            "properties"
+        ]["file"] == {"type": "string", "format": "binary"}
+        assert any(
+            param["name"] == "path" and param["in"] == "query"
+            for param in files_post["parameters"]
+        )
+
+        admin_params = schema["paths"]["/admin/capacity"]["get"]["parameters"]
+        assert admin_params[0]["name"] == "X-Admin-Token"
+        assert admin_params[0]["in"] == "header"
+        assert "CreateSandboxRequest" in schema["components"]["schemas"]
+        assert "Sandbox" in schema["components"]["schemas"]
 
 
 # ============================================================

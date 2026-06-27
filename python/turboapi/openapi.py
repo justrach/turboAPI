@@ -5,7 +5,12 @@ interactive API documentation at /docs (Swagger UI) and /redoc (ReDoc).
 """
 
 import inspect
-from typing import Any, Union, get_args, get_origin
+import json
+import types
+from typing import Annotated, Any, Union, get_args, get_origin
+
+from .datastructures import Body, Cookie, File, Form, Header, Path, Query, UploadFile
+from .security import get_depends
 
 
 def generate_openapi_schema(app) -> dict:
@@ -27,6 +32,7 @@ def generate_openapi_schema(app) -> dict:
         "paths": {},
         "components": {"schemas": {}},
     }
+    components = schema["components"]["schemas"]
 
     routes = app.registry.get_routes()
     for route in routes:
@@ -35,7 +41,7 @@ def generate_openapi_schema(app) -> dict:
         handler = route.handler
 
         # Generate operation
-        operation = _generate_operation(handler, route)
+        operation = _generate_operation(handler, route, components)
 
         # Add to paths
         openapi_path = _convert_path(path)
@@ -51,7 +57,7 @@ def _convert_path(path: str) -> str:
     return path
 
 
-def _generate_operation(handler, route) -> dict:
+def _generate_operation(handler, route, components: dict[str, Any]) -> dict:
     """Generate OpenAPI operation object from handler."""
     operation: dict[str, Any] = {
         "summary": _get_summary(handler),
@@ -72,62 +78,132 @@ def _generate_operation(handler, route) -> dict:
         },
     }
 
-    # Extract parameters from signature
+    response_model = getattr(route, "response_model", None)
+    if response_model is not None:
+        operation["responses"]["200"]["content"]["application/json"]["schema"] = (
+            _type_to_schema(response_model, components)
+        )
+
     sig = inspect.signature(handler)
     parameters = []
-    request_body_props = {}
+    json_body_items: list[dict[str, Any]] = []
+    form_body_items: list[dict[str, Any]] = []
+    multipart_body_items: list[dict[str, Any]] = []
 
     import re
 
     path_params = set(re.findall(r"\{([^}]+)\}", route.path))
+    body_methods = {"POST", "PUT", "PATCH"}
+    method = route.method.value.upper()
 
     for param_name, param in sig.parameters.items():
-        annotation = param.annotation
-        param_schema = _type_to_schema(annotation)
+        if get_depends(param) is not None:
+            continue
 
-        if param_name in path_params:
+        annotation, metadata = _unwrap_annotated(param.annotation)
+        marker = _get_marker(param, metadata)
+
+        if param_name in path_params or isinstance(marker, Path):
             parameters.append(
-                {
-                    "name": param_name,
-                    "in": "path",
-                    "required": True,
-                    "schema": param_schema,
-                }
+                _build_parameter(
+                    _param_name(param_name, marker),
+                    "path",
+                    annotation,
+                    components,
+                    param,
+                    marker,
+                    required=True,
+                )
             )
-        elif route.method.value.upper() in ("POST", "PUT", "PATCH"):
-            # Body parameter
-            request_body_props[param_name] = param_schema
-            if param.default is not inspect.Parameter.empty:
-                request_body_props[param_name]["default"] = param.default
+        elif isinstance(marker, Query):
+            parameters.append(
+                _build_parameter(
+                    _param_name(param_name, marker),
+                    "query",
+                    annotation,
+                    components,
+                    param,
+                    marker,
+                )
+            )
+        elif isinstance(marker, Header):
+            name = marker.alias or (
+                param_name.replace("_", "-")
+                if getattr(marker, "convert_underscores", True)
+                else param_name
+            )
+            parameters.append(
+                _build_parameter(name, "header", annotation, components, param, marker)
+            )
+        elif isinstance(marker, Cookie):
+            parameters.append(
+                _build_parameter(
+                    _param_name(param_name, marker),
+                    "cookie",
+                    annotation,
+                    components,
+                    param,
+                    marker,
+                )
+            )
+        elif isinstance(marker, Form):
+            form_body_items.append(
+                _build_body_item(
+                    _param_name(param_name, marker),
+                    annotation,
+                    components,
+                    param,
+                    marker,
+                )
+            )
+        elif isinstance(marker, File) or annotation is UploadFile:
+            multipart_body_items.append(
+                _build_body_item(
+                    _param_name(param_name, marker),
+                    annotation,
+                    components,
+                    param,
+                    marker,
+                    schema={"type": "string", "format": "binary"},
+                )
+            )
+        elif isinstance(marker, Body) or method in body_methods:
+            json_body_items.append(
+                _build_body_item(
+                    _param_name(param_name, marker),
+                    annotation,
+                    components,
+                    param,
+                    marker,
+                )
+            )
         else:
-            # Query parameter
-            query_param = {
-                "name": param_name,
-                "in": "query",
-                "schema": param_schema,
-            }
-            if param.default is inspect.Parameter.empty:
-                query_param["required"] = True
-            else:
-                query_param["required"] = False
-                if param.default is not None:
-                    query_param["schema"]["default"] = param.default
-            parameters.append(query_param)
+            parameters.append(
+                _build_parameter(param_name, "query", annotation, components, param, marker)
+            )
 
     if parameters:
         operation["parameters"] = parameters
 
-    if request_body_props:
+    content = {}
+    if json_body_items:
+        content["application/json"] = {
+            "schema": _build_json_body_schema(json_body_items, components)
+        }
+    if form_body_items:
+        content["application/x-www-form-urlencoded"] = {
+            "schema": _build_object_body_schema(form_body_items)
+        }
+    if multipart_body_items:
+        content["multipart/form-data"] = {
+            "schema": _build_object_body_schema(multipart_body_items)
+        }
+
+    if content:
+        body_groups = (json_body_items, form_body_items, multipart_body_items)
         operation["requestBody"] = {
-            "required": True,
-            "content": {
-                "application/json": {
-                    "schema": {
-                        "type": "object",
-                        "properties": request_body_props,
-                    }
-                }
-            },
+            "required": any(item["required"] for items in body_groups for item in items),
+            "content": content,
         }
 
     # Add tags
@@ -147,8 +223,171 @@ def _get_summary(handler) -> str:
     return name.replace("_", " ").title()
 
 
-def _type_to_schema(annotation) -> dict:
+_MARKER_TYPES = (Form, File, Query, Header, Cookie, Path, Body)
+
+
+def _unwrap_annotated(annotation):
+    """Return the base annotation and Annotated metadata."""
+    if get_origin(annotation) is Annotated:
+        args = get_args(annotation)
+        return args[0], list(args[1:])
+    return annotation, []
+
+
+def _get_marker(param: inspect.Parameter, metadata: list[Any]):
+    if isinstance(param.default, _MARKER_TYPES):
+        return param.default
+    for item in metadata:
+        if isinstance(item, _MARKER_TYPES):
+            return item
+    return None
+
+
+def _param_name(name: str, marker) -> str:
+    return getattr(marker, "alias", None) or name
+
+
+def _is_json_safe(value: Any) -> bool:
+    try:
+        json.dumps(value)
+    except TypeError:
+        return False
+    return True
+
+
+def _json_safe_schema(value: Any):
+    if isinstance(value, dict):
+        return {
+            key: _json_safe_schema(item)
+            for key, item in value.items()
+            if isinstance(item, (dict, list)) or _is_json_safe(item)
+        }
+    if isinstance(value, list):
+        return [
+            _json_safe_schema(item)
+            for item in value
+            if isinstance(item, (dict, list)) or _is_json_safe(item)
+        ]
+    return value if _is_json_safe(value) else None
+
+
+def _is_model_type(annotation) -> bool:
+    return inspect.isclass(annotation) and (
+        hasattr(annotation, "model_json_schema")
+        or hasattr(annotation, "schema")
+        or hasattr(annotation, "model_fields")
+        or hasattr(annotation, "__fields__")
+    )
+
+
+def _register_model_schema(annotation, components: dict[str, Any]) -> str:
+    name = annotation.__name__
+    if name in components:
+        return name
+
+    if hasattr(annotation, "model_json_schema"):
+        schema = annotation.model_json_schema()
+    elif hasattr(annotation, "schema"):
+        schema = annotation.schema()
+    else:
+        schema = {"title": name, "type": "object"}
+
+    components[name] = _json_safe_schema(schema)
+    return name
+
+
+def _schema_default(param: inspect.Parameter, marker):
+    if marker is not None:
+        default = getattr(marker, "default", ...)
+    else:
+        default = param.default
+
+    if default is inspect.Parameter.empty or default is ...:
+        return None, False
+    if _is_json_safe(default):
+        return default, True
+    return None, False
+
+
+def _is_required(param: inspect.Parameter, marker, *, force_required: bool = False) -> bool:
+    if force_required:
+        return True
+    if marker is not None:
+        return getattr(marker, "default", ...) is ...
+    return param.default is inspect.Parameter.empty
+
+
+def _build_parameter(
+    name: str,
+    location: str,
+    annotation,
+    components: dict[str, Any],
+    param: inspect.Parameter,
+    marker,
+    *,
+    required: bool | None = None,
+) -> dict[str, Any]:
+    schema = _type_to_schema(annotation, components)
+    default, has_default = _schema_default(param, marker)
+    if has_default:
+        schema = dict(schema)
+        schema["default"] = default
+
+    return {
+        "name": name,
+        "in": location,
+        "required": _is_required(param, marker, force_required=required is True)
+        if required is not None
+        else _is_required(param, marker),
+        "schema": schema,
+    }
+
+
+def _build_body_item(
+    name: str,
+    annotation,
+    components: dict[str, Any],
+    param: inspect.Parameter,
+    marker,
+    *,
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    item_schema = dict(schema or _type_to_schema(annotation, components))
+    default, has_default = _schema_default(param, marker)
+    if has_default:
+        item_schema["default"] = default
+    return {
+        "name": name,
+        "annotation": annotation,
+        "schema": item_schema,
+        "required": _is_required(param, marker),
+    }
+
+
+def _build_object_body_schema(items: list[dict[str, Any]]) -> dict[str, Any]:
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {item["name"]: item["schema"] for item in items},
+    }
+    required = [item["name"] for item in items if item["required"]]
+    if required:
+        schema["required"] = required
+    return schema
+
+
+def _build_json_body_schema(
+    items: list[dict[str, Any]], components: dict[str, Any]
+) -> dict[str, Any]:
+    if len(items) == 1 and _is_model_type(items[0]["annotation"]):
+        return _type_to_schema(items[0]["annotation"], components)
+    return _build_object_body_schema(items)
+
+
+def _type_to_schema(annotation, components: dict[str, Any] | None = None) -> dict:
     """Convert Python type annotation to OpenAPI schema."""
+    annotation, _ = _unwrap_annotated(annotation)
+    components = components if components is not None else {}
+
     if annotation is inspect.Parameter.empty or annotation is Any:
         return {}
     if annotation is str:
@@ -163,24 +402,24 @@ def _type_to_schema(annotation) -> dict:
         return {"type": "array", "items": {}}
     if annotation is dict:
         return {"type": "object"}
-    if annotation is bytes:
+    if annotation is bytes or annotation is UploadFile:
         return {"type": "string", "format": "binary"}
 
     # Handle typing generics
     origin = get_origin(annotation)
     if origin is list:
         args = get_args(annotation)
-        items_schema = _type_to_schema(args[0]) if args else {}
+        items_schema = _type_to_schema(args[0], components) if args else {}
         return {"type": "array", "items": items_schema}
     if origin is dict:
         return {"type": "object"}
 
-    # Handle Optional[X] / Union[X, None] — get_origin returns Union, not type(None)
-    if origin is Union:
+    # Handle Optional[X] / Union[X, None].
+    if origin in (Union, types.UnionType):
         args = get_args(annotation)
         non_none = [a for a in args if a is not type(None)]
         if len(non_none) == 1:
-            inner = _type_to_schema(non_none[0])
+            inner = dict(_type_to_schema(non_none[0], components))
             inner["nullable"] = True
             return inner
         return {"nullable": True}
@@ -188,10 +427,11 @@ def _type_to_schema(annotation) -> dict:
     if annotation is type(None):
         return {"nullable": True}
 
-    # Try to get schema from Satya/Pydantic models
+    # Try to get schema from DHI/Satya/Pydantic-style models.
     try:
-        if hasattr(annotation, "__fields__") or hasattr(annotation, "model_fields"):
-            return {"$ref": f"#/components/schemas/{annotation.__name__}"}
+        if _is_model_type(annotation):
+            name = _register_model_schema(annotation, components)
+            return {"$ref": f"#/components/schemas/{name}"}
     except (TypeError, AttributeError):
         pass
 
