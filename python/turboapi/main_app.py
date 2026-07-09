@@ -486,6 +486,140 @@ class TurboAPI(Router):
         This exists so the app is usable via uvicorn/granian before turbonet is built.
         """
         import json as _json
+        from http.cookies import SimpleCookie
+        from urllib.parse import parse_qs
+
+        from .datastructures import Cookie as _Cookie
+        from .datastructures import File as _File
+        from .datastructures import Form as _Form
+        from .datastructures import Header as _Header
+        from .datastructures import Query as _Query
+        from .datastructures import UploadFile as _UF
+        from .exceptions import HTTPException as _HTTPException
+        from .responses import JSONResponse as _JSONResponse
+        from .responses import Response as _Response
+        from .responses import StreamingResponse as _StreamingResponse
+        from .security import get_depends as _get_depends
+
+        async def _send_response(response: _Response) -> None:
+            headers_out: list[list[bytes]] = []
+            if getattr(response, "media_type", None):
+                headers_out.append([b"content-type", str(response.media_type).encode("latin-1")])
+            headers_out.append([b"server", b"TurboAPI"])
+            for key, value in getattr(response, "headers", {}).items():
+                if isinstance(value, list):
+                    for item in value:
+                        headers_out.append([str(key).encode("latin-1"), str(item).encode("latin-1")])
+                else:
+                    headers_out.append([str(key).encode("latin-1"), str(value).encode("latin-1")])
+
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": getattr(response, "status_code", 200),
+                    "headers": headers_out,
+                }
+            )
+            if isinstance(response, _StreamingResponse):
+                async for chunk in response.body_iterator():
+                    await send({"type": "http.response.body", "body": chunk, "more_body": True})
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+            else:
+                await send({"type": "http.response.body", "body": getattr(response, "body", b"")})
+
+        async def _send_json(status: int, payload: Any, headers: dict[str, str] | None = None) -> None:
+            await _send_response(_JSONResponse(payload, status_code=status, headers=headers))
+
+        def _annotation(param: inspect.Parameter):
+            ann = param.annotation
+            metadata = getattr(ann, "__metadata__", None)
+            if metadata is not None and hasattr(ann, "__origin__"):
+                return ann.__origin__
+            return ann
+
+        def _coerce(value, ann):
+            if ann is inspect.Parameter.empty or value is None:
+                return value
+            if getattr(ann, "__origin__", None) is not None and type(None) in getattr(ann, "__args__", ()):
+                non_none = [a for a in ann.__args__ if a is not type(None)]
+                ann = non_none[0] if non_none else ann
+            try:
+                if ann is bool:
+                    if isinstance(value, str):
+                        return value.lower() in {"1", "true", "yes", "on"}
+                    return bool(value)
+                if ann in (str, int, float):
+                    return ann(value)
+            except Exception:
+                return value
+            return value
+
+        def _is_body_marker(default) -> bool:
+            from .datastructures import Body as _Body
+            return isinstance(default, (_Form, _File, _Body))
+
+        def _cookie_map(cookie_header: str) -> dict[str, str]:
+            parsed = SimpleCookie()
+            parsed.load(cookie_header or "")
+            return {key: morsel.value for key, morsel in parsed.items()}
+
+        async def _call_maybe_async(func, **kwargs):
+            result = func(**kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
+        async def _resolve_dependency(dep, context: dict[str, Any]):
+            dependency = dep.dependency
+            if dependency is None:
+                return None
+            dep_sig = inspect.signature(dependency)
+            dep_args: dict[str, Any] = {}
+            for name, param in dep_sig.parameters.items():
+                depends = _get_depends(param)
+                if depends is not None:
+                    dep_args[name] = await _resolve_dependency(depends, context)
+                    continue
+                default = param.default
+                ann = _annotation(param)
+                if isinstance(default, _Header):
+                    key = default.alias or (name.replace("_", "-") if default.convert_underscores else name)
+                    val = context["headers"].get(key.lower())
+                    if val is None and default.default is not ...:
+                        val = default.default
+                    if val is not None:
+                        dep_args[name] = _coerce(val, ann)
+                elif isinstance(default, _Cookie):
+                    key = default.alias or name
+                    val = context["cookies"].get(key)
+                    if val is None and default.default is not ...:
+                        val = default.default
+                    if val is not None:
+                        dep_args[name] = _coerce(val, ann)
+                elif name in context["query"]:
+                    dep_args[name] = _coerce(context["query"][name][0], ann)
+                elif name in context["headers"]:
+                    dep_args[name] = _coerce(context["headers"][name], ann)
+                elif param.default is not inspect.Parameter.empty:
+                    dep_args[name] = param.default
+            return await _call_maybe_async(dependency, **dep_args)
+
+        async def _send_result(result: Any) -> None:
+            if isinstance(result, _Response):
+                await _send_response(result)
+                return
+            if hasattr(result, "model_dump"):
+                result = result.model_dump()
+            elif hasattr(result, "dict"):
+                result = result.dict()
+            if isinstance(result, dict):
+                await _send_response(_JSONResponse(result))
+            elif isinstance(result, str):
+                await _send_response(_Response(result, media_type="text/plain"))
+            elif isinstance(result, bytes):
+                await _send_response(_Response(result, media_type="application/octet-stream"))
+            else:
+                await _send_response(_JSONResponse(result))
 
         if scope["type"] == "lifespan":
             lifespan_cm = None
@@ -523,7 +657,6 @@ class TurboAPI(Router):
         path = scope["path"]
         query_string = scope.get("query_string", b"").decode("utf-8", errors="replace")
 
-        # Read request body
         body = b""
         while True:
             message = await receive()
@@ -531,70 +664,87 @@ class TurboAPI(Router):
             if not message.get("more_body", False):
                 break
 
-        # Build headers dict
         headers = {}
         for hdr_name, hdr_val in scope.get("headers", []):
-            headers[hdr_name.decode("latin-1")] = hdr_val.decode("latin-1")
+            headers[hdr_name.decode("latin-1").lower()] = hdr_val.decode("latin-1")
+        cookies = _cookie_map(headers.get("cookie", ""))
+        qs = parse_qs(query_string, keep_blank_values=True)
+        context = {"headers": headers, "cookies": cookies, "query": qs}
 
-        # Route the request
+        if method == "GET" and self.openapi_url and path == self.openapi_url:
+            await _send_response(_JSONResponse(self.openapi()))
+            return
+        if method == "GET" and self.docs_url and path == self.docs_url:
+            from .openapi import get_swagger_ui_html
+            await _send_response(_Response(get_swagger_ui_html(self.title, self.openapi_url or "/openapi.json"), media_type="text/html"))
+            return
+        if method == "GET" and self.redoc_url and path == self.redoc_url:
+            from .openapi import get_redoc_html
+            await _send_response(_Response(get_redoc_html(self.title, self.openapi_url or "/openapi.json"), media_type="text/html"))
+            return
+
         match_result = self.registry.match_route(method, path)
-
         if not match_result:
-            resp_body = _json.dumps({"detail": "Not Found"}).encode("utf-8")
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 404,
-                    "headers": [[b"content-type", b"application/json"]],
-                }
-            )
-            await send({"type": "http.response.body", "body": resp_body})
+            await _send_json(404, {"detail": "Not Found"})
             return
 
         route, path_params = match_result
-
-        # Prepare call args
         sig = inspect.signature(route.handler)
-        call_args = {}
+        call_args: dict[str, Any] = {}
 
         for param_name, param_value in path_params.items():
             if param_name in sig.parameters:
                 param_def = next((p for p in route.path_params if p.name == param_name), None)
-                if param_def and param_def.type is not str:
-                    try:
-                        param_value = param_def.type(param_value)
-                    except (ValueError, TypeError):
-                        resp_body = _json.dumps({"detail": f"Invalid {param_name}"}).encode("utf-8")
-                        await send(
-                            {
-                                "type": "http.response.start",
-                                "status": 422,
-                                "headers": [[b"content-type", b"application/json"]],
-                            }
-                        )
-                        await send({"type": "http.response.body", "body": resp_body})
-                        return
-                call_args[param_name] = param_value
+                ann = param_def.type if param_def else _annotation(sig.parameters[param_name])
+                try:
+                    call_args[param_name] = _coerce(param_value, ann)
+                except (ValueError, TypeError):
+                    await _send_json(422, {"detail": f"Invalid {param_name}"})
+                    return
 
-        # Parse query params
-        if query_string:
-            from urllib.parse import parse_qs
+        for param_name, param in sig.parameters.items():
+            if param_name in call_args:
+                continue
+            depends = _get_depends(param)
+            if depends is not None:
+                try:
+                    call_args[param_name] = await _resolve_dependency(depends, context)
+                except _HTTPException as e:
+                    await _send_json(e.status_code, {"detail": e.detail}, headers=e.headers)
+                    return
+                except Exception as e:
+                    await _send_json(500, {"detail": str(e)})
+                    return
+                continue
+            default = param.default
+            ann = _annotation(param)
+            if isinstance(default, _Query):
+                key = default.alias or param_name
+                if key in qs:
+                    call_args[param_name] = _coerce(qs[key][0], ann)
+                elif default.default is not ...:
+                    call_args[param_name] = default.default
+            elif isinstance(default, _Header):
+                key = default.alias or (param_name.replace("_", "-") if default.convert_underscores else param_name)
+                val = headers.get(key.lower())
+                if val is None and default.default is not ...:
+                    val = default.default
+                if val is not None:
+                    call_args[param_name] = _coerce(val, ann)
+            elif isinstance(default, _Cookie):
+                key = default.alias or param_name
+                val = cookies.get(key)
+                if val is None and default.default is not ...:
+                    val = default.default
+                if val is not None:
+                    call_args[param_name] = _coerce(val, ann)
+            elif not _is_body_marker(default) and param_name in qs:
+                call_args[param_name] = _coerce(qs[param_name][0], ann)
 
-            qs = parse_qs(query_string, keep_blank_values=True)
-            for param_name, param in sig.parameters.items():
-                if param_name not in call_args and param_name in qs:
-                    call_args[param_name] = qs[param_name][0]
-
-        # Parse body for model params
         if body:
             content_type_val = headers.get("content-type", "")
             if "multipart/form-data" in content_type_val:
                 import io as _io
-
-                from .datastructures import File as _File
-                from .datastructures import Form as _Form
-                from .datastructures import UploadFile as _UF
-
                 boundary = ""
                 for _part in content_type_val.split(";"):
                     _part = _part.strip()
@@ -605,16 +755,14 @@ class TurboAPI(Router):
                     _form_fields, _file_fields = _parse_multipart(body, boundary)
                     _file_map = {f["name"]: f for f in _file_fields}
                     for param_name, param in sig.parameters.items():
-                        if param_name in call_args:
+                        if param_name in call_args or _get_depends(param) is not None:
                             continue
                         default = param.default
-                        ann = param.annotation
+                        ann = _annotation(param)
                         is_file_default = isinstance(default, _File)
                         is_upload_ann = ann is _UF
                         if is_file_default or is_upload_ann:
-                            field_name = (
-                                default.alias if is_file_default and default.alias else param_name
-                            )
+                            field_name = default.alias if is_file_default and default.alias else param_name
                             if field_name in _file_map:
                                 fd = _file_map[field_name]
                                 call_args[param_name] = _UF(
@@ -626,89 +774,55 @@ class TurboAPI(Router):
                         elif isinstance(default, _Form):
                             field_name = default.alias if default.alias else param_name
                             if field_name in _form_fields:
-                                val = _form_fields[field_name]
-                                if ann not in (inspect.Parameter.empty, str):
-                                    try:
-                                        val = ann(val)
-                                    except Exception:
-                                        pass
-                                call_args[param_name] = val
+                                call_args[param_name] = _coerce(_form_fields[field_name], ann)
                             elif default.default is not ...:
                                 call_args[param_name] = default.default
             elif "application/x-www-form-urlencoded" in content_type_val:
-                from .datastructures import Form as _Form
-
                 _qs = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
                 for param_name, param in sig.parameters.items():
-                    if param_name in call_args:
+                    if param_name in call_args or _get_depends(param) is not None:
                         continue
                     default = param.default
-                    ann = param.annotation
+                    ann = _annotation(param)
                     if isinstance(default, _Form):
                         field_name = default.alias if default.alias else param_name
                         if field_name in _qs:
-                            val = _qs[field_name][0]
-                            if ann not in (inspect.Parameter.empty, str):
-                                try:
-                                    val = ann(val)
-                                except Exception:
-                                    pass
-                            call_args[param_name] = val
+                            call_args[param_name] = _coerce(_qs[field_name][0], ann)
                         elif default.default is not ...:
                             call_args[param_name] = default.default
             else:
                 try:
                     json_body = _json.loads(body)
                     for param_name, param in sig.parameters.items():
-                        if param_name not in call_args:
-                            ann = param.annotation
-                            if ann != inspect.Parameter.empty and hasattr(ann, "model_validate"):
-                                call_args[param_name] = ann.model_validate(json_body)
-                            elif param_name in (json_body if isinstance(json_body, dict) else {}):
-                                call_args[param_name] = json_body[param_name]
+                        if param_name in call_args or _get_depends(param) is not None:
+                            continue
+                        ann = _annotation(param)
+                        if ann != inspect.Parameter.empty and hasattr(ann, "model_validate"):
+                            call_args[param_name] = ann.model_validate(json_body)
+                        elif param_name in (json_body if isinstance(json_body, dict) else {}):
+                            call_args[param_name] = _coerce(json_body[param_name], ann)
                 except (_json.JSONDecodeError, Exception):
                     pass
 
-        # Call handler
         try:
             if asyncio.iscoroutinefunction(route.handler):
                 result = await route.handler(**call_args)
             else:
                 result = route.handler(**call_args)
+        except _HTTPException as e:
+            await _send_json(e.status_code, {"detail": e.detail}, headers=e.headers)
+            return
         except Exception as e:
-            resp_body = _json.dumps({"detail": str(e)}).encode("utf-8")
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 500,
-                    "headers": [[b"content-type", b"application/json"]],
-                }
-            )
-            await send({"type": "http.response.body", "body": resp_body})
+            handler = None
+            for exc_type, candidate in self._exception_handlers.items():
+                if isinstance(e, exc_type):
+                    handler = candidate
+                    break
+            if handler is not None:
+                result = await _call_maybe_async(handler, None, e)
+                await _send_result(result)
+                return
+            await _send_json(500, {"detail": str(e)})
             return
 
-        # Serialize response
-        if isinstance(result, dict):
-            resp_body = _json.dumps(result).encode("utf-8")
-            content_type = b"application/json"
-        elif isinstance(result, str):
-            resp_body = result.encode("utf-8")
-            content_type = b"text/plain"
-        elif isinstance(result, bytes):
-            resp_body = result
-            content_type = b"application/octet-stream"
-        else:
-            resp_body = _json.dumps(result).encode("utf-8")
-            content_type = b"application/json"
-
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [
-                    [b"content-type", content_type],
-                    [b"server", b"TurboAPI"],
-                ],
-            }
-        )
-        await send({"type": "http.response.body", "body": resp_body})
+        await _send_result(result)
