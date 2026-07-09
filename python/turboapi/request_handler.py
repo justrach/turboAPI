@@ -1545,6 +1545,28 @@ def create_fast_model_handler(original_handler, model_class, param_name):
     _dumps = _json.dumps
     _returns_md = _returns_model(original_handler)
 
+    def _patch_model_dump_for_dhi_compat(model):
+        """Keep model_dump complete across dhi versions that omit untyped list fields."""
+        if not hasattr(model, "model_dump") or not hasattr(model, "__dict__"):
+            return model
+        original_model_dump = model.model_dump
+
+        def model_dump_compat(*args, **kwargs):
+            dumped = original_model_dump(*args, **kwargs)
+            if not isinstance(dumped, dict):
+                return dumped
+            for key, value in model.__dict__.items():
+                if key.startswith("__") or key == "model_dump" or callable(value):
+                    continue
+                dumped.setdefault(key, value)
+            return dumped
+
+        try:
+            model.model_dump = model_dump_compat
+        except Exception:
+            pass
+        return model
+
     def fast_model_handler(**kwargs):
         try:
             data = kwargs.get("body_dict")
@@ -1554,7 +1576,7 @@ def create_fast_model_handler(original_handler, model_class, param_name):
                     return (400, "application/json", _dumps({"detail": "Request body is empty"}))
                 data = _loads(body)
 
-            model = model_class(**data)
+            model = _patch_model_dump_for_dhi_compat(model_class(**data))
             result = original_handler(**{param_name: model})
 
             if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):

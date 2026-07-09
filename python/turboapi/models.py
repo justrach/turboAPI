@@ -40,6 +40,18 @@ class TurboRequest(BaseModel):
         data = json.loads(self.body.decode("utf-8"))
         return model_class.model_validate(data)
 
+    def model_dump(self) -> dict[str, Any]:
+        """Serialize request fields consistently across dhi versions."""
+        return {
+            "method": self.method,
+            "path": self.path,
+            "query_string": self.query_string,
+            "headers": self.headers,
+            "path_params": self.path_params,
+            "query_params": self.query_params,
+            "body": self.body,
+        }
+
     def text(self) -> str:
         """Get request body as text."""
         return self.body.decode("utf-8") if self.body else ""
@@ -88,6 +100,14 @@ class TurboResponse(BaseModel):
     def get_header(self, name: str, default: str | None = None) -> str | None:
         """Get a response header."""
         return self.headers.get(name, default)
+
+    def model_dump(self) -> dict[str, Any]:
+        """Serialize response fields consistently across dhi versions."""
+        return {
+            "status_code": self.status_code,
+            "headers": self.headers,
+            "content": self.content,
+        }
 
     @classmethod
     def json(cls, data: Any, status_code: int = 200, headers: dict[str, str] | None = None):
