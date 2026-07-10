@@ -71,6 +71,13 @@ pub fn build(b: *std.Build) void {
     lib.root_module.addIncludePath(.{ .cwd_relative = include_path });
     lib.root_module.addRPathSpecial("@loader_path");
 
+    if (target.result.os.tag == .linux) {
+        lib.root_module.addCSourceFile(.{
+            .file = b.path("src/arc4random_compat.c"),
+            .flags = &.{},
+        });
+    }
+
     // Python extension modules should resolve Python API symbols from the
     // running interpreter at import time. Linking libpython into release wheels
     // can bake in non-portable paths such as macOS framework locations.
