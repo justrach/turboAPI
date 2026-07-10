@@ -1545,27 +1545,60 @@ def create_fast_model_handler(original_handler, model_class, param_name):
     _dumps = _json.dumps
     _returns_md = _returns_model(original_handler)
 
-    def _patch_model_dump_for_dhi_compat(model):
-        """Keep model_dump complete across dhi versions that omit untyped list fields."""
-        if not hasattr(model, "model_dump") or not hasattr(model, "__dict__"):
-            return model
-        original_model_dump = model.model_dump
+    def _model_class_with_dhi_compat():
+        """Use a route-local subclass for dhi versions that omit untyped lists."""
+        def is_list_annotation(annotation):
+            annotation_text = str(annotation).replace(" ", "")
+            return (
+                annotation is list
+                or get_origin(annotation) is list
+                or annotation_text in {"list", "List", "typing.List"}
+                or annotation_text.startswith(("list[", "List[", "typing.List["))
+            )
 
-        def model_dump_compat(*args, **kwargs):
-            dumped = original_model_dump(*args, **kwargs)
-            if not isinstance(dumped, dict):
+        compat_fields = frozenset(
+            name
+            for cls in model_class.__mro__
+            for name, annotation in getattr(cls, "__annotations__", {}).items()
+            if is_list_annotation(annotation)
+        )
+        original_model_dump = getattr(model_class, "model_dump", None)
+        if (
+            not compat_fields
+            or not isinstance(model_class, type)
+            or not issubclass(model_class, Model)
+            or original_model_dump is not Model.model_dump
+        ):
+            return model_class
+
+        model_fields = getattr(model_class, "model_fields", {})
+        compat_fields = frozenset(
+            key
+            for key in compat_fields
+            if not getattr(model_fields.get(key), "exclude", False)
+            and not getattr(getattr(model_fields.get(key), "default", None), "exclude", False)
+        )
+        if not compat_fields:
+            return model_class
+
+        class DhiCompatModel(model_class):
+            def model_dump(self, *args, **kwargs):
+                dumped = original_model_dump(self, *args, **kwargs)
+                # Only repair the no-options call affected by dhi. Calls using
+                # aliases, include/exclude, or JSON mode retain dhi semantics.
+                if args or kwargs or not isinstance(dumped, dict):
+                    return dumped
+                for key in compat_fields:
+                    if key in self.__dict__:
+                        dumped.setdefault(key, self.__dict__[key])
                 return dumped
-            for key, value in model.__dict__.items():
-                if key.startswith("__") or key == "model_dump" or callable(value):
-                    continue
-                dumped.setdefault(key, value)
-            return dumped
 
-        try:
-            model.model_dump = model_dump_compat
-        except Exception:
-            pass
-        return model
+        DhiCompatModel.__name__ = model_class.__name__
+        DhiCompatModel.__qualname__ = model_class.__qualname__
+        DhiCompatModel.__module__ = model_class.__module__
+        return DhiCompatModel
+
+    handler_model_class = _model_class_with_dhi_compat()
 
     def fast_model_handler(**kwargs):
         try:
@@ -1576,7 +1609,7 @@ def create_fast_model_handler(original_handler, model_class, param_name):
                     return (400, "application/json", _dumps({"detail": "Request body is empty"}))
                 data = _loads(body)
 
-            model = _patch_model_dump_for_dhi_compat(model_class(**data))
+            model = handler_model_class(**data)
             result = original_handler(**{param_name: model})
 
             if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
