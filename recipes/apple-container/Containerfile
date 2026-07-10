@@ -1,0 +1,49 @@
+# Linux arm64 TurboAPI smoke image for Apple's container runtime.
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:debian@sha256:12bcf9d33038200b3c7da0fa2b0f416482cf26ea764d0554fadf861d5d789833
+FROM ${UV_IMAGE} AS builder
+ENV UV_PYTHON_INSTALL_DIR=/opt/python
+
+RUN uv python install 3.14.6t \
+    && uv venv --python 3.14.6t /opt/turboapi-build
+ENV PATH="/opt/turboapi-build/bin:/opt/zig:${PATH}"
+ENV VIRTUAL_ENV="/opt/turboapi-build"
+
+WORKDIR /src
+COPY pyproject.toml setup.py README.md LICENSE ./
+COPY python ./python
+COPY zig ./zig
+COPY turboapi-core ./turboapi-core
+COPY scripts/install-zig-linux.sh ./scripts/install-zig-linux.sh
+
+RUN test "$(uname -m)" = aarch64 \
+    && sh scripts/install-zig-linux.sh \
+    && python -c 'import sys, sysconfig; assert sys.version_info[:3] == (3, 14, 6); assert sysconfig.get_config_var("Py_GIL_DISABLED") == 1; assert not sys._is_gil_enabled()'
+
+RUN uv pip install 'build==1.5.1' 'setuptools==83.0.0' 'wheel==0.47.0' \
+    && rm -f python/turboapi/turbonet*.so \
+    && python zig/build_turbonet.py --install --release \
+        --target aarch64-linux-gnu.2.28 --glibc-compat \
+    && python -m build --wheel --no-isolation --outdir /dist
+
+# Install only the wheel into a clean environment. Runtime checks run outside
+# /src so an extension in the source tree cannot accidentally satisfy them.
+RUN uv venv --python 3.14.6t /opt/turboapi-runtime \
+    && uv pip install --python /opt/turboapi-runtime/bin/python 'dhi==1.1.19' \
+    && uv pip install --python /opt/turboapi-runtime/bin/python --no-deps /dist/*.whl
+
+FROM ${UV_IMAGE} AS runtime
+ENV UV_PYTHON_INSTALL_DIR=/opt/python
+COPY --from=builder /opt/python /opt/python
+COPY --from=builder /opt/turboapi-runtime /opt/turboapi-runtime
+
+WORKDIR /smoke
+COPY recipes/apple-container/app.py recipes/apple-container/verify_runtime.py ./
+ENV PATH="/opt/turboapi-runtime/bin:${PATH}"
+ENV VIRTUAL_ENV="/opt/turboapi-runtime"
+ENV PORT=8080
+
+RUN python verify_runtime.py
+
+USER 65532:65532
+EXPOSE 8080
+CMD ["/bin/sh", "-c", "python verify_runtime.py && exec python app.py"]

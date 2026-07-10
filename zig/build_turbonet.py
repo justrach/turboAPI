@@ -45,6 +45,15 @@ def main():
     parser = argparse.ArgumentParser(description="Build turbonet for the running Python")
     parser.add_argument("--install", action="store_true", help="Copy .so into python/turboapi/")
     parser.add_argument("--release", action="store_true", help="Build with ReleaseFast")
+    parser.add_argument(
+        "--target",
+        help="Zig target, including a minimum libc version when building portable Linux wheels",
+    )
+    parser.add_argument(
+        "--glibc-compat",
+        action="store_true",
+        help="Include compatibility code for the manylinux glibc floor",
+    )
     args = parser.parse_args()
 
     info = detect_python()
@@ -67,6 +76,12 @@ def main():
     cmd = ["zig", "build", f"-Dpython={py_arg}",
            f"-Dpy-include={info['include']}",
            f"-Dpy-libdir={info['libdir']}"]
+
+    if args.target:
+        cmd.append(f"-Dtarget={args.target}")
+
+    if args.glibc_compat:
+        cmd.append("-Dglibc-compat=true")
 
     if args.release:
         cmd.append("-Doptimize=ReleaseFast")
