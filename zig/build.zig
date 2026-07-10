@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
     // Normally auto-detected by build_turbonet.py; can also be set manually.
     const py_version = b.option([]const u8, "python", "Python label: 3.13, 3.14, or 3.14t") orelse "3.13";
     const is_free_threaded = std.mem.eql(u8, py_version, "3.14t");
+    const glibc_compat = b.option(bool, "glibc-compat", "Support the manylinux glibc floor") orelse false;
 
     const include_path = b.option([]const u8, "py-include", "Python include path (required)") orelse
         @panic("pass -Dpy-include=<path> or use: python zig/build_turbonet.py");
@@ -71,7 +72,7 @@ pub fn build(b: *std.Build) void {
     lib.root_module.addIncludePath(.{ .cwd_relative = include_path });
     lib.root_module.addRPathSpecial("@loader_path");
 
-    if (target.result.os.tag == .linux) {
+    if (target.result.os.tag == .linux and glibc_compat) {
         lib.root_module.addCSourceFile(.{
             .file = b.path("src/arc4random_compat.c"),
             .flags = &.{},

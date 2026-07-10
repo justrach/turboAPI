@@ -49,6 +49,11 @@ def main():
         "--target",
         help="Zig target, including a minimum libc version when building portable Linux wheels",
     )
+    parser.add_argument(
+        "--glibc-compat",
+        action="store_true",
+        help="Include compatibility code for the manylinux glibc floor",
+    )
     args = parser.parse_args()
 
     info = detect_python()
@@ -74,6 +79,9 @@ def main():
 
     if args.target:
         cmd.append(f"-Dtarget={args.target}")
+
+    if args.glibc_compat:
+        cmd.append("-Dglibc-compat=true")
 
     if args.release:
         cmd.append("-Doptimize=ReleaseFast")
