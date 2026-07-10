@@ -89,6 +89,12 @@ docker compose up
 
 This builds Python 3.14t from source, compiles the Zig backend, and runs the example app. Hit `http://localhost:8000` to verify.
 
+On an Apple silicon Mac, use the executable
+[Apple container recipe](recipes/apple-container/README.md). It verifies a
+Linux arm64 guest, free-threaded CPython 3.14t, the compiled Zig backend, port
+publishing, and a real HTTP response; it also documents the DNS workaround some
+Apple container environments require.
+
 ### Option 2: Local install
 
 ```bash

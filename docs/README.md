@@ -10,6 +10,7 @@ Welcome to the TurboAPI documentation! This directory contains detailed guides f
 | [Async Handlers](./ASYNC_HANDLERS.md) | How async handlers work |
 | [Benchmarks](./BENCHMARKS.md) | Benchmark suite and performance results |
 | [Performance Tuning](./PERFORMANCE_TUNING.md) | Optimization guide for production |
+| [Apple container](../recipes/apple-container/README.md) | Verified Linux arm64 + CPython 3.14t runtime recipe |
 
 ## Feature Documentation
 
