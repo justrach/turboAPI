@@ -28,3 +28,13 @@ pub fn warn(comptime fmt: []const u8, args: anytype) void {
 pub fn err(comptime fmt: []const u8, args: anytype) void {
     log(.err, fmt, args);
 }
+
+/// Set the minimum log level directly.
+pub fn setLevel(level: Level) void {
+    telemetry.setLevel(level);
+}
+
+/// Read TURBO_LOG_LEVEL from the environment and apply it.
+pub fn setLevelFromEnv() void {
+    telemetry.init();
+}

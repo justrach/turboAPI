@@ -11,6 +11,17 @@ const c = py.c;
 // All response state is held in a Python dict. The Python-side ResponseView
 // class wraps these calls for a clean Python API.
 
+/// These are public module functions — Python callers can pass any object.
+/// The unchecked PyDict_* calls below are undefined behavior on non-dicts.
+fn checkedStateDict(state: ?*c.PyObject) ?*c.PyObject {
+    const s = state orelse return null;
+    if (c.PyDict_Check(s) == 0) {
+        py.setError("ResponseView state must be a dict", .{});
+        return null;
+    }
+    return s;
+}
+
 pub fn response_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var status_code: c_long = 200;
 
@@ -20,6 +31,12 @@ pub fn response_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
             if (first) |item| {
                 if (c.PyLong_Check(item) != 0) {
                     status_code = c.PyLong_AsLong(item);
+                    if (status_code == -1 and c.PyErr_Occurred() != null) {
+                        // Huge int overflowed — default rather than return a
+                        // result with a pending exception (SystemError).
+                        c.PyErr_Clear();
+                        status_code = 200;
+                    }
                 }
             }
         }
@@ -58,8 +75,9 @@ pub fn response_set_header(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c
     var name: [*c]const u8 = null;
     var value: [*c]const u8 = null;
     if (c.PyArg_ParseTuple(args, "Oss", &state, &name, &value) == 0) return null;
+    const state_dict = checkedStateDict(state) orelse return null;
 
-    const headers = c.PyDict_GetItemString(state.?, "headers") orelse return py.pyNone();
+    const headers = c.PyDict_GetItemString(state_dict, "headers") orelse return py.pyNone();
     const val_obj = c.PyUnicode_FromString(value) orelse return null;
     _ = c.PyDict_SetItemString(headers, name, val_obj);
     c.Py_DecRef(val_obj);
@@ -71,8 +89,9 @@ pub fn response_get_header(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c
     var state: ?*c.PyObject = null;
     var name: [*c]const u8 = null;
     if (c.PyArg_ParseTuple(args, "Os", &state, &name) == 0) return null;
+    const state_dict = checkedStateDict(state) orelse return null;
 
-    const headers = c.PyDict_GetItemString(state.?, "headers") orelse return py.pyNone();
+    const headers = c.PyDict_GetItemString(state_dict, "headers") orelse return py.pyNone();
     const val = c.PyDict_GetItemString(headers, name);
     if (val) |v| {
         c.Py_IncRef(v);
@@ -86,9 +105,10 @@ pub fn response_set_body(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.P
     var state: ?*c.PyObject = null;
     var data: [*c]const u8 = null;
     if (c.PyArg_ParseTuple(args, "Os", &state, &data) == 0) return null;
+    const state_dict = checkedStateDict(state) orelse return null;
 
     const body = c.PyBytes_FromString(data) orelse return null;
-    _ = c.PyDict_SetItemString(state.?, "body", body);
+    _ = c.PyDict_SetItemString(state_dict, "body", body);
     c.Py_DecRef(body);
     return py.pyNone();
 }
@@ -99,9 +119,10 @@ pub fn response_set_body_bytes(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c)
     var buf: [*c]const u8 = null;
     var len: py.Py_ssize_t = 0;
     if (c.PyArg_ParseTuple(args, "Oy#", &state, &buf, &len) == 0) return null;
+    const state_dict = checkedStateDict(state) orelse return null;
 
     const body = c.PyBytes_FromStringAndSize(buf, len) orelse return null;
-    _ = c.PyDict_SetItemString(state.?, "body", body);
+    _ = c.PyDict_SetItemString(state_dict, "body", body);
     c.Py_DecRef(body);
     return py.pyNone();
 }
@@ -111,9 +132,10 @@ pub fn response_json(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObj
     var state: ?*c.PyObject = null;
     var data: [*c]const u8 = null;
     if (c.PyArg_ParseTuple(args, "Os", &state, &data) == 0) return null;
+    const state_dict = checkedStateDict(state) orelse return null;
 
     // Set content-type
-    const headers = c.PyDict_GetItemString(state.?, "headers");
+    const headers = c.PyDict_GetItemString(state_dict, "headers");
     if (headers) |h| {
         const ct = c.PyUnicode_FromString("application/json") orelse return null;
         _ = c.PyDict_SetItemString(h, "content-type", ct);
@@ -121,7 +143,7 @@ pub fn response_json(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObj
     }
     // Set body
     const body = c.PyBytes_FromString(data) orelse return null;
-    _ = c.PyDict_SetItemString(state.?, "body", body);
+    _ = c.PyDict_SetItemString(state_dict, "body", body);
     c.Py_DecRef(body);
     return py.pyNone();
 }
@@ -131,15 +153,16 @@ pub fn response_text(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObj
     var state: ?*c.PyObject = null;
     var data: [*c]const u8 = null;
     if (c.PyArg_ParseTuple(args, "Os", &state, &data) == 0) return null;
+    const state_dict = checkedStateDict(state) orelse return null;
 
-    const headers = c.PyDict_GetItemString(state.?, "headers");
+    const headers = c.PyDict_GetItemString(state_dict, "headers");
     if (headers) |h| {
         const ct = c.PyUnicode_FromString("text/plain; charset=utf-8") orelse return null;
         _ = c.PyDict_SetItemString(h, "content-type", ct);
         c.Py_DecRef(ct);
     }
     const body = c.PyBytes_FromString(data) orelse return null;
-    _ = c.PyDict_SetItemString(state.?, "body", body);
+    _ = c.PyDict_SetItemString(state_dict, "body", body);
     c.Py_DecRef(body);
     return py.pyNone();
 }

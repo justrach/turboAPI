@@ -147,8 +147,25 @@ def run_coroutine(coro):
     return runner(coro)
 
 
+async def _drain_body_iterator(iterator):
+    chunks = []
+    async for chunk in iterator:
+        if isinstance(chunk, str):
+            chunk = chunk.encode("utf-8")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _normalize_response_tuple(result):
     if isinstance(result, Response):
+        if hasattr(result, "body_iterator"):
+            # StreamingResponse: body is b"" until the iterator is drained —
+            # returning it as-is silently sent an empty body. The worker loop
+            # is idle here (run_until_complete already returned), so driving
+            # it again to collect the stream is safe.
+            loop = ensure_event_loop()
+            drained = loop.run_until_complete(_drain_body_iterator(result.body_iterator()))
+            return (result.status_code, result.media_type or "text/event-stream", drained)
         body = result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
         return (result.status_code, result.media_type or "application/json", body)
     if hasattr(result, "model_dump"):

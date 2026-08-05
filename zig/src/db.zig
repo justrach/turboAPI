@@ -112,7 +112,10 @@ fn now() i64 {
     return ts.sec;
 }
 
-/// Thread-safe cache lookup. Returns cached body or null if miss/expired.
+/// Thread-safe cache lookup. Returns a caller-owned copy of the cached body
+/// (free with allocator.free) or null if miss/expired. The copy is required:
+/// the cache owns the stored slice and can free it concurrently (TTL expiry,
+/// write invalidation), so handing out the raw slice unlocked is a UAF.
 fn cacheGet(key: []const u8) ?[]const u8 {
     if (!isDbCacheEnabled()) return null;
     db_cache_mutex.lock(runtime.io) catch return null;
@@ -130,7 +133,7 @@ fn cacheGet(key: []const u8) ?[]const u8 {
             }
             return null;
         }
-        return entry.body;
+        return allocator.dupe(u8, entry.body) catch null;
     }
     return null;
 }
@@ -381,21 +384,27 @@ fn serializeRow(row: anytype, col_names: []const []const u8, buf: []u8) ![]const
 
 fn serializeFixedSchemaRow(row: anytype, json_key_parts: []const []const u8, buf: []u8) ![]const u8 {
     var pos: usize = 0;
+    if (buf.len < 2) return error.SerializationFailed;
     buf[pos] = '{';
     pos += 1;
 
     const ncols = @min(json_key_parts.len, row.values.len);
     for (0..ncols) |i| {
+        const key_part = json_key_parts[i];
+        // ',' + key bytes + reserve the closing '}' so it can never overflow
+        if (pos + key_part.len + 2 > buf.len) return error.SerializationFailed;
         if (i > 0) {
             buf[pos] = ',';
             pos += 1;
         }
-        const key_part = json_key_parts[i];
         @memcpy(buf[pos..][0..key_part.len], key_part);
         pos += key_part.len;
-        pos += row.writeJsonValue(i, buf[pos..]);
+        const n = row.writeJsonValue(i, buf[pos..]);
+        if (n == 0) return error.SerializationFailed;
+        pos += n;
     }
 
+    if (pos + 1 > buf.len) return error.SerializationFailed;
     buf[pos] = '}';
     pos += 1;
     return buf[0..pos];
@@ -435,6 +444,7 @@ pub fn handleDbRoute(
                 cache_key = std.fmt.bufPrint(&cache_key_buf, "GET:{s}:{s}", .{ entry.table, pk_val }) catch "";
                 if (cache_key.len > 0) {
                     if (cacheGet(cache_key)) |cached_body| {
+                        defer allocator.free(@constCast(cached_body));
                         sendResponseFn(stream, 200, "application/json", cached_body);
                         return;
                     }
@@ -506,6 +516,7 @@ pub fn handleDbRoute(
                 cache_key = std.fmt.bufPrint(&cache_key_buf, "LIST:{s}:{s}:{s}", .{ entry.table, limit, offset }) catch "";
                 if (cache_key.len > 0) {
                     if (cacheGet(cache_key)) |cached_body| {
+                        defer allocator.free(@constCast(cached_body));
                         sendResponseFn(stream, 200, "application/json", cached_body);
                         return;
                     }
@@ -537,10 +548,6 @@ pub fn handleDbRoute(
 
             var row_count: usize = 0;
             while (result.next() catch null) |row| {
-                if (row_count > 0) {
-                    out_buf[out_pos] = ',';
-                    out_pos += 1;
-                }
                 var row_buf: [8192]u8 = undefined;
                 const row_json_result = if (known_columns)
                     serializeFixedSchemaRow(row, entry.json_key_parts, &row_buf)
@@ -548,6 +555,12 @@ pub fn handleDbRoute(
                     serializeRow(row, result.column_names, &row_buf);
                 const row_json = row_json_result catch break;
                 if (out_pos + row_json.len + 2 > out_buf.len) break;
+                // Write the separator only after the row serialized and fits —
+                // otherwise a break here would leave a trailing comma: [...,]
+                if (row_count > 0) {
+                    out_buf[out_pos] = ',';
+                    out_pos += 1;
+                }
                 @memcpy(out_buf[out_pos..][0..row_json.len], row_json);
                 out_pos += row_json.len;
                 row_count += 1;
@@ -714,21 +727,33 @@ pub fn handleDbRoute(
             var cache_key: []const u8 = "";
             if (cache_enabled) {
                 var ck_pos: usize = 0;
+                var key_ok = true;
                 const prefix = "Q:";
                 @memcpy(cache_key_buf[ck_pos..][0..prefix.len], prefix);
                 ck_pos += prefix.len;
                 const sql_key_len = @min(entry.custom_sql.len, 64);
+                // A truncated key could collide with a different query's
+                // entry — better to skip caching than serve wrong data.
+                if (entry.custom_sql.len > 64) key_ok = false;
                 @memcpy(cache_key_buf[ck_pos..][0..sql_key_len], entry.custom_sql[0..sql_key_len]);
                 ck_pos += sql_key_len;
                 for (param_values[0..param_count]) |v| {
+                    const vlen = @min(v.len, 32);
+                    if (v.len > 32) key_ok = false;
+                    // Bound-check before writing: 16 params x 33 bytes +
+                    // 66 prefix/sql bytes can exceed the 512-byte buffer.
+                    if (ck_pos + 1 + vlen > cache_key_buf.len) {
+                        key_ok = false;
+                        break;
+                    }
                     cache_key_buf[ck_pos] = ':';
                     ck_pos += 1;
-                    const vlen = @min(v.len, 32);
                     @memcpy(cache_key_buf[ck_pos..][0..vlen], v[0..vlen]);
                     ck_pos += vlen;
                 }
-                cache_key = cache_key_buf[0..ck_pos];
+                if (key_ok) cache_key = cache_key_buf[0..ck_pos];
                 if (cacheGet(cache_key)) |cached_body| {
+                    defer allocator.free(@constCast(cached_body));
                     sendResponseFn(stream, 200, "application/json", cached_body);
                     return;
                 }
@@ -794,13 +819,15 @@ pub fn handleDbRoute(
 
                     var row_count: usize = 0;
                     while (result.next() catch null) |row| {
+                        var row_buf: [8192]u8 = undefined;
+                        const row_json = serializeRow(row, result.column_names, &row_buf) catch break;
+                        if (out_pos + row_json.len + 2 > out_buf.len) break;
+                        // Separator only after the row serialized and fits —
+                        // a break before this point must not leave [...,]
                         if (row_count > 0) {
                             out_buf[out_pos] = ',';
                             out_pos += 1;
                         }
-                        var row_buf: [8192]u8 = undefined;
-                        const row_json = serializeRow(row, result.column_names, &row_buf) catch break;
-                        if (out_pos + row_json.len + 2 > out_buf.len) break;
                         @memcpy(out_buf[out_pos..][0..row_json.len], row_json);
                         out_pos += row_json.len;
                         row_count += 1;
@@ -1128,7 +1155,12 @@ fn execManyDynamicProtocol(sql: []const u8, py_rows: *c.PyObject, max_rows: usiz
     }
 
     return conn.execManyDynamic(sql, row_slices[0..max_rows], .{
-        .cache_name = "db_exec_many_raw",
+        // No cache_name: pg.zig ignores `sql` on a prepared-statement cache
+        // hit, so a fixed name would silently re-execute the FIRST SQL seen
+        // on this connection for every later, different SQL — wrong
+        // statements with wrong params. This is a bulk API, so the extra
+        // prepare per call is amortized over the row count.
+        .cache_name = null,
         .column_names = false,
     }) catch null;
 }
@@ -1249,6 +1281,15 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         }
     }
 
+    // Validate the primary-key column for CRUD ops — it is interpolated into
+    // SELECT/DELETE SQL just like the table name.
+    if (op != .custom_query and op != .custom_query_single and pk_col_s.len > 0) {
+        if (!isValidIdentifier(pk_col_s)) {
+            py.setError("Invalid primary key column: {s}", .{pk_col_s});
+            return null;
+        }
+    }
+
     // Parse column names (also used as param names for custom queries)
     var cols: [16][]const u8 = undefined;
     var ncols: usize = 0;
@@ -1257,6 +1298,13 @@ pub fn db_add_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         while (col_iter.next()) |col| {
             if (ncols >= 16) break;
             const trimmed = std.mem.trim(u8, col, " ");
+            // Column names are interpolated into SQL and JSON keys. Enforcing
+            // identifier rules kills SQL injection here AND bounds the total
+            // length the SQL builders' fixed col_buf can receive (16 x 64).
+            if (!isValidIdentifier(trimmed)) {
+                py.setError("Invalid column name: {s}", .{trimmed});
+                return null;
+            }
             cols[ncols] = allocator.dupe(u8, trimmed) catch return null;
             ncols += 1;
         }
@@ -1642,6 +1690,11 @@ pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     const tlen = @min(table_raw.len, 127);
     @memcpy(table_storage[0..tlen], table_raw[0..tlen]);
     const table = table_storage[0..tlen];
+    // The table name is interpolated into the COPY statement raw
+    if (!isValidIdentifier(table)) {
+        py.setError("Invalid table name: {s}", .{table});
+        return null;
+    }
 
     if (db_pool == null) {
         py.setError("Database not configured. Call configure_db() first.", .{});
@@ -1682,6 +1735,11 @@ pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
             const copy_len = @min(s.len, 63);
             @memcpy(col_storage[i][0..copy_len], s[0..copy_len]);
             col_slices[i] = col_storage[i][0..copy_len];
+            // Column names are interpolated into the COPY statement raw
+            if (!isValidIdentifier(col_slices[i])) {
+                py.setError("Invalid column name: {s}", .{col_slices[i]});
+                return null;
+            }
         }
     }
 
@@ -1698,7 +1756,7 @@ pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     if (all_same and first_row_obj != null) {
         // Optimization: extract one row, repeat it for copyFrom
         var one_row_storage: [32][256]u8 = undefined;
-        var one_row_slices: [32][]const u8 = undefined;
+        var one_row_slices: [32]?[]const u8 = undefined;
 
         const row_obj = first_row_obj.?;
         const row_len: usize = @intCast(c.PyObject_Length(row_obj));
@@ -1708,6 +1766,11 @@ pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
             else
                 c.PyList_GetItem(row_obj, @intCast(ci));
             if (item) |it| {
+                // Python None must become SQL NULL, not the string "None"
+                if (it == @as(*c.PyObject, @ptrCast(&c._Py_NoneStruct))) {
+                    one_row_slices[ci] = null;
+                    continue;
+                }
                 const str_obj = c.PyObject_Str(it) orelse {
                     one_row_slices[ci] = one_row_storage[ci][0..0];
                     continue;
@@ -1727,7 +1790,7 @@ pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         }
 
         // Build row_slices: all pointing to the same one_row_slices
-        const row_slices = allocator.alloc([]const []const u8, max_rows) catch {
+        const row_slices = allocator.alloc([]const ?[]const u8, max_rows) catch {
             py.setError("Out of memory for COPY row slices", .{});
             return null;
         };
@@ -1735,7 +1798,7 @@ pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
 
         // Each row_slices[i] must be a separate slice of []const u8
         // But they can all point to the same underlying data
-        const cell_slices = allocator.alloc([]const u8, cols_to_use) catch {
+        const cell_slices = allocator.alloc(?[]const u8, cols_to_use) catch {
             py.setError("Out of memory for COPY cell slices", .{});
             return null;
         };
@@ -1779,6 +1842,14 @@ pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         return null;
     };
     defer allocator.free(val_lens);
+    // Python None must become SQL NULL, not the string "None" — track it
+    // separately since an empty string is a legitimate cell value.
+    const val_nulls = allocator.alloc(bool, max_cells) catch {
+        py.setError("Out of memory for COPY null buffer", .{});
+        return null;
+    };
+    defer allocator.free(val_nulls);
+    @memset(val_nulls, false);
 
     for (0..max_rows) |ri| {
         const row_obj = c.PyList_GetItem(row_list, @intCast(ri)) orelse continue;
@@ -1792,6 +1863,11 @@ pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
                 c.PyList_GetItem(row_obj, @intCast(ci));
             if (item == null) {
                 val_lens[cell_idx] = 0;
+                continue;
+            }
+            if (item.? == @as(*c.PyObject, @ptrCast(&c._Py_NoneStruct))) {
+                val_lens[cell_idx] = 0;
+                val_nulls[cell_idx] = true;
                 continue;
             }
             const str_obj = c.PyObject_Str(item.?) orelse {
@@ -1810,12 +1886,12 @@ pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
         }
     }
 
-    const row_slices = allocator.alloc([]const []const u8, max_rows) catch {
+    const row_slices = allocator.alloc([]const ?[]const u8, max_rows) catch {
         py.setError("Out of memory for COPY row slices", .{});
         return null;
     };
     defer allocator.free(row_slices);
-    const cell_slices = allocator.alloc([]const u8, max_cells) catch {
+    const cell_slices = allocator.alloc(?[]const u8, max_cells) catch {
         py.setError("Out of memory for COPY cell slices", .{});
         return null;
     };
@@ -1824,7 +1900,10 @@ pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     for (0..max_rows) |ri| {
         for (0..cols_to_use) |ci| {
             const cell_idx = ri * cols_to_use + ci;
-            cell_slices[cell_idx] = val_storage[cell_idx][0..val_lens[cell_idx]];
+            cell_slices[cell_idx] = if (val_nulls[cell_idx])
+                null
+            else
+                val_storage[cell_idx][0..val_lens[cell_idx]];
         }
         row_slices[ri] = cell_slices[ri * cols_to_use ..][0..cols_to_use];
     }
@@ -1846,4 +1925,45 @@ pub fn db_copy_from(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     releaseConn(conn);
     py.PyEval_RestoreThread(gil_state);
     return c.PyLong_FromLongLong(row_count);
+}
+
+// ── Regression tests ─────────────────────────────────────────────────────────
+
+test "serializeRow fails cleanly instead of overflowing a small buffer" {
+    const testing = std.testing;
+    const big_text = "x" ** 4096;
+    var oids = [_]i32{25}; // text
+    var values = [_]pg.Result.State.Value{.{ .is_null = false, .data = big_text }};
+    var fake_result: pg.Result = undefined;
+    const row = pg.Row{ ._result = &fake_result, .oids = &oids, .values = &values };
+    const col_names = [_][]const u8{"payload"};
+
+    // Fits: {"payload":"..."} = 4096 + 14 bytes of framing
+    var ok_buf: [4200]u8 = undefined;
+    const json = try serializeRow(row, &col_names, &ok_buf);
+    try testing.expectEqual(@as(usize, 4110), json.len);
+
+    // Too small: must fail with SerializationFailed, never overflow the stack
+    var small_buf: [64]u8 = undefined;
+    try testing.expectError(error.SerializationFailed, serializeRow(row, &col_names, &small_buf));
+}
+
+test "serializeFixedSchemaRow fails cleanly instead of overflowing a small buffer" {
+    const testing = std.testing;
+    const big_text = "y" ** 4096;
+    var oids = [_]i32{25}; // text
+    var values = [_]pg.Result.State.Value{.{ .is_null = false, .data = big_text }};
+    var fake_result: pg.Result = undefined;
+    const row = pg.Row{ ._result = &fake_result, .oids = &oids, .values = &values };
+    const key_parts = [_][]const u8{"\"payload\":"};
+
+    var ok_buf: [4200]u8 = undefined;
+    const json = try serializeFixedSchemaRow(row, &key_parts, &ok_buf);
+    try testing.expectEqual(@as(usize, 4110), json.len);
+
+    var small_buf: [64]u8 = undefined;
+    try testing.expectError(
+        error.SerializationFailed,
+        serializeFixedSchemaRow(row, &key_parts, &small_buf),
+    );
 }

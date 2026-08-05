@@ -207,8 +207,11 @@ pub fn init() void {
     if (std.c.getenv("TURBO_LOG_FORMAT")) |_p| { const val = std.mem.span(_p);
         if (std.mem.eql(u8, val, "json")) log_format = .json;
     }
-    enabled.store(true, .release);
+    // Assign the exporter BEFORE publishing enabled=true: pushEvent gates on
+    // enabled and then calls active_exporter, so the reverse order lets a
+    // concurrent pushEvent jump through an undefined vtable.
     active_exporter = stderr_exporter;
+    enabled.store(true, .release);
 }
 
 pub fn pushEvent(event: Event) void {
@@ -222,6 +225,10 @@ pub fn isEnabled() bool {
 
 pub fn getLevel() Level {
     return log_level.load(.acquire);
+}
+
+pub fn setLevel(level: Level) void {
+    log_level.store(level, .release);
 }
 
 pub fn getFormat() @TypeOf(log_format) {

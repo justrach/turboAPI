@@ -2,6 +2,37 @@
 
 All notable changes to TurboAPI are documented here.
 
+## [1.0.33] — 2026-08-05
+
+#### Security
+
+- Request headers can no longer override already-extracted path/query params: implicit header mapping (Issue #132) now only fills params not bound elsewhere, so a client `User-Id` header cannot replace a `{user_id}` path value.
+- Added a JSON nesting-depth pre-check (cap 256) before `std.json` parsing and the recursive Python converter — deeply nested bodies previously overflowed the worker stack and killed the process.
+- `SO_SNDTIMEO` is now set alongside `SO_RCVTIMEO` — a client that never reads can no longer stall a worker (and the GIL) forever on a blocked `write()`.
+- DB route registration now validates column and primary-key names as SQL identifiers (table names already were), closing SQL injection via `db_add_route`; COPY FROM validates table/column names too.
+- `execManyDynamic` no longer reuses a fixed prepared-statement cache name for arbitrary SQL — pg.zig ignores `sql` on a cache hit, so different SQL re-executed the first prepared statement.
+- Python `None` now maps to SQL NULL in COPY FROM (was the literal string `"None"`); COPY cells escape `\`, tab, newline and CR per the Postgres text format.
+
+#### Fixed
+
+- Stack buffer overflow when a DB row serialized to more than 8 KB of JSON: all pg.zig JSON writers and `serializeFixedSchemaRow` now bounds-check and fail cleanly (500) instead of corrupting the stack.
+- Use-after-free in the DB response cache: `cacheGet` returned cache-owned memory that concurrent TTL expiry/invalidation could free mid-send; it now returns a caller-owned copy.
+- Use-after-free in `callPythonHandler` when a handler returned a non-str body: the json.dumps temporary was freed before the body was copied out.
+- Response-cache key fallback could collapse distinct requests (>512-byte keys) into one entry; oversized keys now skip caching. Same policy for custom-query cache keys.
+- `@intCast` on unvalidated Python status codes could panic a worker; invalid codes now map to 500.
+- Body read errors/truncated bodies no longer desync keep-alive connections.
+- List DB queries no longer emit trailing-comma JSON (`[...,]`) when the 64 KB buffer fills.
+- Async handlers: async dependencies (coroutine/async-gen Depends) no longer 500 via `asyncio.run()` inside the running loop; StreamingResponse from async handlers no longer 500s or silently sends an empty body; dependency generator teardown now runs in `finally` (and via `aclose()`) so failing requests don't leak DB sessions.
+- Zig vectorcall no longer coerces unparseable int/float params to 0 — returns 400.
+- Schema parsing no longer leaks allocations on failure; telemetry init no longer races on an undefined exporter; `_rv_*` response helpers guard against non-dict state.
+- benchmarks/postgres Dockerfile pinned to Zig 0.15.2 while the codebase requires 0.16 — bumped to 0.16.0.
+
+#### Performance
+
+- Request validation no longer heap-allocates error paths on the success path (stack-buffer path building) — removed an alloc/free per field and per array element per request.
+- `inspect.signature()` for dependencies and route-pattern regex construction are now memoized instead of re-run per request.
+- Benchmarks rerun in this session (local Apple Silicon, Colima VM for Docker suites): HTTP regression suite (`bench_regression.py`, WORKERS=4, wrk 4 threads/100 connections/10s per route) averaged 112,547 req/s across its six routes; driver-only pgbench and e2e HTTP+DB Docker suites reran within or above their previously recorded ranges in `benchmarks/pgbench/BENCHMARKS.md` and `benchmarks/postgres/BENCHMARKS.md` — no regressions observed.
+
 ## [1.0.27] — 2026-04-01
 
 ### Since 1.0.24

@@ -1299,6 +1299,10 @@ fn handleConnection(stream: std.Io.net.Stream, tstate: ?*anyopaque) void {
     // and the worker is freed. No kqueue needed — just a socket option.
     const timeout = std.posix.timeval{ .sec = 30, .usec = 0 };
     std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    // Slow-reader protection: responses are written with a blocking write()
+    // while the GIL is held, so a client that never reads would otherwise
+    // stall a worker (and the GIL) forever. Bound the send to 30s.
+    std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
 
     while (true) {
         handleOneRequest(stream, tstate) catch return;
@@ -1514,17 +1518,23 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
         .simple_sync => {
             // Param-aware cache: key is "METHOD /full/path" (includes param values)
             if (cache_noargs_responses) {
-                // Build cache key from method + path + query (e.g. "GET /users/123?sort=name")
+                // Build cache key from method + path + query (e.g. "GET /users/123?sort=name").
+                // If the key doesn't fit the stack buffer, skip caching entirely —
+                // a fallback key could collide with a different request's entry.
                 var cache_key_buf: [512]u8 = undefined;
-                const cache_key = if (query_string.len > 0)
-                    std.fmt.bufPrint(&cache_key_buf, "{s} {s}?{s}", .{ method, path, query_string }) catch path
+                const cache_key: ?[]const u8 = if (query_string.len > 0)
+                    std.fmt.bufPrint(&cache_key_buf, "{s} {s}?{s}", .{ method, path, query_string }) catch null
                 else
-                    std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch path;
-                if (getCachedResponse(cache_key)) |cached| {
-                    sendCachedBody(stream, cached.body, cached.content_type);
-                    return;
+                    std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch null;
+                if (cache_key) |key| {
+                    if (getCachedResponse(key)) |cached| {
+                        sendCachedBody(stream, cached.body, cached.content_type);
+                        return;
+                    }
+                    callPythonVectorcallCaching(tstate, entry, query_string, &match.params, stream, key);
+                } else {
+                    callPythonVectorcall(tstate, entry, query_string, &match.params, stream);
                 }
-                callPythonVectorcallCaching(tstate, entry, query_string, &match.params, stream, cache_key);
             } else {
                 callPythonVectorcall(tstate, entry, query_string, &match.params, stream);
             }
@@ -1540,14 +1550,18 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
                     }
                     callPythonAsyncNoArgs(tstate, entry, stream, entry_ptr, eager);
                 } else {
+                    // Same overflow policy as simple_sync: null key skips caching
+                    // rather than risking a collision on a fallback key.
                     var cache_key_buf: [512]u8 = undefined;
-                    const cache_key = if (query_string.len > 0)
-                        std.fmt.bufPrint(&cache_key_buf, "{s} {s}?{s}", .{ method, path, query_string }) catch path
+                    const cache_key: ?[]const u8 = if (query_string.len > 0)
+                        std.fmt.bufPrint(&cache_key_buf, "{s} {s}?{s}", .{ method, path, query_string }) catch null
                     else
-                        std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch path;
-                    if (getCachedResponse(cache_key)) |cached| {
-                        sendCachedBody(stream, cached.body, cached.content_type);
-                        return;
+                        std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch null;
+                    if (cache_key) |key| {
+                        if (getCachedResponse(key)) |cached| {
+                            sendCachedBody(stream, cached.body, cached.content_type);
+                            return;
+                        }
                     }
                     callPythonAsyncVectorcall(tstate, entry, query_string, &match.params, stream, cache_key, eager);
                 }
@@ -1590,10 +1604,19 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
         while (body_read < content_length) {
             const n = posix.read(stream.socket.handle, full_body[body_read..content_length]) catch |err| {
                 logger.err("[ZIG] body read error: {}", .{err});
-                return;
+                // Returning an error closes the connection — a plain return
+                // would loop and parse the next "request" from broken state.
+                return error.ReadError;
             };
             if (n == 0) break;
             body_read += n;
+        }
+        if (body_read < content_length) {
+            // Client disconnected mid-body: the stream can no longer be
+            // parsed at a request boundary, so fail and close rather than
+            // dispatch a truncated body as if it were complete.
+            sendResponseClose(stream, 400, "application/json", "{\"error\": \"Truncated request body\"}");
+            return error.TruncatedBody;
         }
         body = full_body[0..body_read];
     }
@@ -1739,6 +1762,16 @@ fn ffiError() FfiResponse {
 // Python fast handlers return (status_code, content_type, body_str).
 // Unpack and send — no dict key lookups, no hash computation.
 
+/// Convert a Python status-code object to u16 defensively: a buggy handler
+/// returning a non-int or an out-of-range code must not crash the worker via
+/// a safety panic (or UB in ReleaseFast) on @intCast.
+fn tupleStatusCode(sc_obj: ?*c.PyObject) u16 {
+    const code = c.PyLong_AsLong(sc_obj);
+    if (code == -1 and c.PyErr_Occurred() != null) c.PyErr_Clear();
+    if (code < 100 or code > 599) return 500;
+    return @intCast(code);
+}
+
 fn sendTupleResponse(stream: std.Io.net.Stream, result: *c.PyObject) void {
     const sc_obj = py.PyTuple_GetItem(result, 0) orelse {
         sendResponse(stream, 500, "application/json", "{\"error\":\"bad tuple[0]\"}");
@@ -1753,7 +1786,7 @@ fn sendTupleResponse(stream: std.Io.net.Stream, result: *c.PyObject) void {
         return;
     };
 
-    const status_code: u16 = @intCast(c.PyLong_AsLong(sc_obj));
+    const status_code: u16 = tupleStatusCode(sc_obj);
     const ct_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(ct_obj) orelse "application/json";
     const content_type = std.mem.span(ct_cstr);
 
@@ -1778,7 +1811,7 @@ fn sendTupleResponseAndCache(stream: std.Io.net.Stream, result: *c.PyObject, cac
     const ct_obj = py.PyTuple_GetItem(result, 1) orelse return;
     const body_obj = py.PyTuple_GetItem(result, 2) orelse return;
 
-    const status_code: u16 = @intCast(c.PyLong_AsLong(sc_obj));
+    const status_code: u16 = tupleStatusCode(sc_obj);
     const ct_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(ct_obj) orelse "application/json";
     const content_type = std.mem.span(ct_cstr);
 
@@ -1804,7 +1837,7 @@ fn sendTupleResponseAndCacheEntry(stream: std.Io.net.Stream, result: *c.PyObject
     const ct_obj = py.PyTuple_GetItem(result, 1) orelse return;
     const body_obj = py.PyTuple_GetItem(result, 2) orelse return;
 
-    const status_code: u16 = @intCast(c.PyLong_AsLong(sc_obj));
+    const status_code: u16 = tupleStatusCode(sc_obj);
     const ct_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(ct_obj) orelse "application/json";
     const content_type = std.mem.span(ct_cstr);
 
@@ -1900,11 +1933,19 @@ fn callPythonVectorcall(
         if (val_str) |vs| {
             const py_obj: ?*c.PyObject = switch (pm.type_tag) {
                 .int => blk: {
-                    const n = std.fmt.parseInt(i64, vs, 10) catch 0;
+                    // Unparseable input must not silently become 0
+                    const n = std.fmt.parseInt(i64, vs, 10) catch {
+                        sendResponse(stream, 400, "application/json", "{\"error\":\"Invalid integer parameter\"}");
+                        return;
+                    };
                     break :blk c.PyLong_FromLongLong(n);
                 },
                 .float => blk: {
-                    const f = std.fmt.parseFloat(f64, vs) catch 0.0;
+                    // Unparseable input must not silently become 0.0
+                    const f = std.fmt.parseFloat(f64, vs) catch {
+                        sendResponse(stream, 400, "application/json", "{\"error\":\"Invalid float parameter\"}");
+                        return;
+                    };
                     break :blk c.PyFloat_FromDouble(f);
                 },
                 .bool_val => blk: {
@@ -1998,11 +2039,19 @@ fn callPythonAsyncVectorcall(
         if (val_str) |vs| {
             const py_obj: ?*c.PyObject = switch (pm.type_tag) {
                 .int => blk: {
-                    const n = std.fmt.parseInt(i64, vs, 10) catch 0;
+                    // Unparseable input must not silently become 0
+                    const n = std.fmt.parseInt(i64, vs, 10) catch {
+                        sendResponse(stream, 400, "application/json", "{\"error\":\"Invalid integer parameter\"}");
+                        return;
+                    };
                     break :blk c.PyLong_FromLongLong(n);
                 },
                 .float => blk: {
-                    const f = std.fmt.parseFloat(f64, vs) catch 0.0;
+                    // Unparseable input must not silently become 0.0
+                    const f = std.fmt.parseFloat(f64, vs) catch {
+                        sendResponse(stream, 400, "application/json", "{\"error\":\"Invalid float parameter\"}");
+                        return;
+                    };
                     break :blk c.PyFloat_FromDouble(f);
                 },
                 .bool_val => blk: {
@@ -2076,11 +2125,19 @@ fn callPythonVectorcallCaching(
         if (val_str) |vs| {
             const py_obj: ?*c.PyObject = switch (pm.type_tag) {
                 .int => blk: {
-                    const n = std.fmt.parseInt(i64, vs, 10) catch 0;
+                    // Unparseable input must not silently become 0
+                    const n = std.fmt.parseInt(i64, vs, 10) catch {
+                        sendResponse(stream, 400, "application/json", "{\"error\":\"Invalid integer parameter\"}");
+                        return;
+                    };
                     break :blk c.PyLong_FromLongLong(n);
                 },
                 .float => blk: {
-                    const f = std.fmt.parseFloat(f64, vs) catch 0;
+                    // Unparseable input must not silently become 0.0
+                    const f = std.fmt.parseFloat(f64, vs) catch {
+                        sendResponse(stream, 400, "application/json", "{\"error\":\"Invalid float parameter\"}");
+                        return;
+                    };
                     break :blk c.PyFloat_FromDouble(f);
                 },
                 .bool_val => blk: {
@@ -2122,7 +2179,7 @@ fn callPythonVectorcallCaching(
     const ct_obj = py.PyTuple_GetItem(result, 1) orelse return;
     const body_obj = py.PyTuple_GetItem(result, 2) orelse return;
 
-    const status_code: u16 = @intCast(c.PyLong_AsLong(sc_obj));
+    const status_code: u16 = tupleStatusCode(sc_obj);
     const ct_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(ct_obj) orelse "application/json";
     const content_type = std.mem.span(ct_cstr);
 
@@ -2357,6 +2414,10 @@ fn jsonValueToPyObject(val: std.json.Value) ?*c.PyObject {
 // ── model_sync fast dispatch: Zig-parsed JSON → Python dict (no json.loads) ──
 
 fn callPythonModelHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, body: []const u8, params: *const router_mod.RouteParams, stream: std.Io.net.Stream) void {
+    if (!dhi.jsonNestingWithinLimit(body, dhi.MAX_JSON_NESTING)) {
+        sendResponse(stream, 400, "application/json", "{\"error\":\"JSON nesting too deep\"}");
+        return;
+    }
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch {
         sendResponse(stream, 400, "application/json", "{\"error\":\"Invalid JSON\"}");
         return;
@@ -2635,6 +2696,10 @@ fn callPythonHandler(tstate: ?*anyopaque, entry: HandlerEntry, method: []const u
 
     // content — json.dumps() if not already a string or raw bytes
     var body_slice: []const u8 = "null";
+    // The json.dumps() branch below produces a temporary str whose UTF-8
+    // buffer dies at its DecRef — keep an owned copy alive until owned_body.
+    var body_tmp: ?[]u8 = null;
+    defer if (body_tmp) |t| allocator.free(t);
     if (c.PyDict_GetItemString(result, "content")) |content_obj| {
         if (c.PyUnicode_Check(content_obj) != 0) {
             // Already a string, use directly
@@ -2662,7 +2727,10 @@ fn callPythonHandler(tstate: ?*anyopaque, entry: HandlerEntry, method: []const u
                         if (json_result) |jr| {
                             defer c.Py_DecRef(jr);
                             if (c.PyUnicode_AsUTF8(jr)) |cs| {
-                                body_slice = std.mem.span(cs);
+                                // cs points into jr, which the DecRef frees —
+                                // copy it out before that happens.
+                                body_tmp = allocator.dupe(u8, std.mem.span(cs)) catch null;
+                                if (body_tmp) |t| body_slice = t;
                             }
                         }
                     }
@@ -2776,7 +2844,15 @@ pub fn sendResponse(stream: std.Io.net.Stream, status: u16, content_type: []cons
         &header_buf,
         "HTTP/1.1 {d} {s}\r\nServer: TurboAPI\r\nDate: {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive",
         .{ status, statusText(status), date_str, content_type, body.len },
-    ) catch return;
+    ) catch blk: {
+        // A handler returned an absurdly long content_type — falling back to
+        // octet-stream beats silently dropping the response on keep-alive.
+        break :blk std.fmt.bufPrint(
+            &header_buf,
+            "HTTP/1.1 {d} {s}\r\nServer: TurboAPI\r\nDate: {s}\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nConnection: keep-alive",
+            .{ status, statusText(status), date_str, body.len },
+        ) catch return;
+    };
 
     // Assemble: header + cors_headers (pre-rendered, "" if disabled) + \r\n\r\n + body
     const trailer = "\r\n\r\n";
@@ -2847,8 +2923,8 @@ test "response cache is safe under concurrent access" {
     for (threads) |thread| thread.join();
 
     try std.testing.expectEqual(@as(usize, 2), response_cache_count);
-    try std.testing.expectEqualStrings("{\"item_id\":1}", getCachedResponse("GET /items/1").?);
-    try std.testing.expectEqualStrings("{\"item_id\":2}", getCachedResponse("GET /items/2").?);
+    try std.testing.expectEqualStrings("{\"item_id\":1}", getCachedResponse("GET /items/1").?.body);
+    try std.testing.expectEqualStrings("{\"item_id\":2}", getCachedResponse("GET /items/2").?.body);
 }
 
 test "HTTP framing parser validates Content-Length and Transfer-Encoding" {

@@ -4,9 +4,9 @@ FROM python:3.14-bookworm AS builder
 # Install Zig
 RUN ARCH=$(dpkg --print-architecture) \
     && if [ "$ARCH" = "arm64" ]; then ZIG_ARCH=aarch64; else ZIG_ARCH=x86_64; fi \
-    && curl -fSL "https://ziglang.org/download/0.15.2/zig-${ZIG_ARCH}-linux-0.15.2.tar.xz" \
+    && curl -fSL "https://ziglang.org/download/0.16.0/zig-${ZIG_ARCH}-linux-0.16.0.tar.xz" \
        | tar -xJ -C /opt \
-    && ln -s /opt/zig-${ZIG_ARCH}-linux-0.15.2/zig /usr/local/bin/zig
+    && ln -s /opt/zig-${ZIG_ARCH}-linux-0.16.0/zig /usr/local/bin/zig
 
 # Install wrk
 RUN apt-get update && apt-get install -y --no-install-recommends \

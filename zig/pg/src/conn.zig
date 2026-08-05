@@ -597,8 +597,9 @@ pub const Conn = struct {
 
     /// COPY FROM STDIN: bulk insert rows as tab-separated text.
     /// Sends COPY command, then CopyData messages for each row, then CopyDone.
-    /// Returns number of rows inserted.
-    pub fn copyFrom(self: *Conn, table: []const u8, columns: []const []const u8, rows: []const []const []const u8) !i64 {
+    /// A null cell is sent as NULL (\N); string cells are escaped per the
+    /// COPY text format. Returns number of rows inserted.
+    pub fn copyFrom(self: *Conn, table: []const u8, columns: []const []const u8, rows: []const []const ?[]const u8) !i64 {
         if (self.canQuery() == false) {
             return error.ConnectionBusy;
         }
@@ -610,6 +611,7 @@ pub const Conn = struct {
         var sql_buf: [1024]u8 = undefined;
         var sql_pos: usize = 0;
         const prefix = "COPY ";
+        if (prefix.len + table.len + 1 > sql_buf.len) return error.NameTooLong;
         @memcpy(sql_buf[sql_pos..][0..prefix.len], prefix);
         sql_pos += prefix.len;
         @memcpy(sql_buf[sql_pos..][0..table.len], table);
@@ -617,6 +619,8 @@ pub const Conn = struct {
         sql_buf[sql_pos] = '(';
         sql_pos += 1;
         for (columns, 0..) |col, i| {
+            // ',' + col + ") FROM STDIN" must all fit
+            if (sql_pos + 1 + col.len + 12 > sql_buf.len) return error.NameTooLong;
             if (i > 0) {
                 sql_buf[sql_pos] = ',';
                 sql_pos += 1;
@@ -654,7 +658,26 @@ pub const Conn = struct {
 
             for (copy_row, 0..) |val, i| {
                 if (i > 0) try buf.writeByte('\t');
-                try buf.write(val);
+                if (val) |v| {
+                    // COPY text format: backslash, tab, newline and carriage
+                    // return must be escaped or they corrupt the row framing
+                    // (or let a cell inject extra rows/columns).
+                    if (std.mem.indexOfAny(u8, v, "\\\t\n\r") == null) {
+                        try buf.write(v); // fast path: nothing to escape
+                    } else {
+                        for (v) |ch| {
+                            switch (ch) {
+                                '\\' => try buf.write("\\\\"),
+                                '\t' => try buf.write("\\t"),
+                                '\n' => try buf.write("\\n"),
+                                '\r' => try buf.write("\\r"),
+                                else => try buf.writeByte(ch),
+                            }
+                        }
+                    }
+                } else {
+                    try buf.write("\\N"); // NULL
+                }
             }
             try buf.writeByte('\n');
 

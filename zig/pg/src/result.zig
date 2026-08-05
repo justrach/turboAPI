@@ -466,27 +466,34 @@ pub fn RowT(comptime fail_mode: lib.FailMode) type {
                 16 => {
                     const v = data[0] != 0;
                     const s = if (v) "true" else "false";
+                    if (pos + s.len > buf.len) return 0;
                     @memcpy(buf[pos..][0..s.len], s);
                     pos += s.len;
                 },
                 // JSON — already valid JSON, pass through
                 114 => {
+                    if (pos + data.len > buf.len) return 0;
                     @memcpy(buf[pos..][0..data.len], data);
                     pos += data.len;
                 },
                 // JSONB — strip version byte, pass through
                 3802 => {
                     const json_data = data[1..];
+                    if (pos + json_data.len > buf.len) return 0;
                     @memcpy(buf[pos..][0..json_data.len], json_data);
                     pos += json_data.len;
                 },
                 // Integer arrays
                 1005, 1007, 1016 => { // int2[], int4[], int8[]
-                    pos += writeIntArrayJson(data, oid, buf[pos..]);
+                    const n = writeIntArrayJson(data, oid, buf[pos..]);
+                    if (n == 0) return 0;
+                    pos += n;
                 },
                 // Text arrays
                 1009, 1015 => { // text[], varchar[]
-                    pos += writeTextArrayJson(data, buf[pos..]);
+                    const n = writeTextArrayJson(data, buf[pos..]);
+                    if (n == 0) return 0;
+                    pos += n;
                 },
                 // Timestamp — format as ISO 8601
                 1114, 1184 => { // timestamp, timestamptz
@@ -494,6 +501,8 @@ pub fn RowT(comptime fail_mode: lib.FailMode) type {
                     // Postgres epoch is 2000-01-01, Unix is 1970-01-01
                     const pg_epoch_offset: i64 = 946684800;
                     const unix_sec = @divTrunc(usec, 1_000_000) + pg_epoch_offset;
+                    // 2 quotes + up to 20 digits for the epoch seconds
+                    if (pos + 22 > buf.len) return 0;
                     buf[pos] = '"';
                     pos += 1;
                     const s = std.fmt.bufPrint(buf[pos..], "{d}", .{unix_sec}) catch return 0;
@@ -506,13 +515,18 @@ pub fn RowT(comptime fail_mode: lib.FailMode) type {
                     // pgvector support — dynamic OID, check at runtime
                     if (types.Vector.oid_decimal != 0 and oid == types.Vector.oid_decimal) {
                         const vec = types.Vector.decode(data);
-                        pos += vec.writeJson(buf[pos..]);
+                        const n = vec.writeJson(buf[pos..]);
+                        if (n == 0) return 0;
+                        pos += n;
                         return pos;
                     }
-                    // Default: quote as string (SIMD-accelerated escape scan)
+                    // Default: quote as string (SIMD-accelerated escape scan).
+                    // Reserve the closing quote's byte so it can never overflow.
+                    if (pos + 2 > buf.len) return 0;
                     buf[pos] = '"';
                     pos += 1;
-                    pos += simdJsonEscape(data, buf[pos..]);
+                    const esc = simdJsonEscape(data, buf[pos .. buf.len - 1]) orelse return 0;
+                    pos += esc;
                     buf[pos] = '"';
                     pos += 1;
                 },
@@ -524,11 +538,14 @@ pub fn RowT(comptime fail_mode: lib.FailMode) type {
         /// Requires column_names to be populated (queryOpts with .column_names = true).
         pub fn writeJsonRow(self: *const Self, col_names: []const []const u8, buf: []u8) usize {
             var pos: usize = 0;
+            if (buf.len < 2) return 0;
             buf[pos] = '{';
             pos += 1;
 
             const ncols = @min(col_names.len, self.values.len);
             for (0..ncols) |i| {
+                // ',' + '"' + name + '"' + ':' — reserve 4 bytes of punctuation
+                if (pos + col_names[i].len + 4 > buf.len) return 0;
                 if (i > 0) {
                     buf[pos] = ',';
                     pos += 1;
@@ -543,9 +560,12 @@ pub fn RowT(comptime fail_mode: lib.FailMode) type {
                 buf[pos] = ':';
                 pos += 1;
                 // Value
-                pos += self.writeJsonValue(i, buf[pos..]);
+                const n = self.writeJsonValue(i, buf[pos..]);
+                if (n == 0) return 0;
+                pos += n;
             }
 
+            if (pos + 1 > buf.len) return 0;
             buf[pos] = '}';
             pos += 1;
             return pos;
@@ -556,7 +576,10 @@ pub fn RowT(comptime fail_mode: lib.FailMode) type {
 /// SIMD-accelerated JSON string escaping.
 /// Scans 16 bytes at a time for chars needing escape (", \, control chars).
 /// Falls back to scalar for remainder and when escapes are found.
-fn simdJsonEscape(data: []const u8, buf: []u8) usize {
+/// Returns the number of bytes written, or null if `buf` was too small to
+/// hold the entire escaped string (callers must treat null as failure —
+/// a truncated escape would produce malformed JSON).
+fn simdJsonEscape(data: []const u8, buf: []u8) ?usize {
     const simd_width = 16;
     var pos: usize = 0;
     var i: usize = 0;
@@ -607,6 +630,9 @@ fn simdJsonEscape(data: []const u8, buf: []u8) usize {
         i += 1;
     }
 
+    // Buffer exhausted before all input was escaped — caller must fail
+    // rather than emit truncated JSON.
+    if (i < data.len) return null;
     return pos;
 }
 
@@ -616,6 +642,7 @@ fn writeIntArrayJson(data: []const u8, oid: i32, buf: []u8) usize {
     // 4 bytes: ndim, 4 bytes: flags, 4 bytes: element OID
     // per dimension: 4 bytes length, 4 bytes lower bound
     // then: per element: 4 bytes length (or -1 for null), then data
+    if (buf.len < 2) return 0;
     if (data.len < 12) {
         @memcpy(buf[0..2], "[]");
         return 2;
@@ -643,6 +670,9 @@ fn writeIntArrayJson(data: []const u8, oid: i32, buf: []u8) usize {
     var offset: usize = 20; // skip header (12 + 4 length + 4 lower bound)
     var i: i32 = 0;
     while (i < nelems and offset + 4 <= data.len) : (i += 1) {
+        // ',' + at most 20 digits for an i64 + the closing ']' — bail out as
+        // a serialization failure instead of overflowing the caller's buffer.
+        if (pos + 24 > buf.len) return 0;
         if (i > 0) {
             buf[pos] = ',';
             pos += 1;
@@ -679,6 +709,7 @@ fn writeIntArrayJson(data: []const u8, oid: i32, buf: []u8) usize {
 
 /// Parse Postgres binary text array and write as JSON: ["a","b","c"]
 fn writeTextArrayJson(data: []const u8, buf: []u8) usize {
+    if (buf.len < 2) return 0;
     if (data.len < 12) {
         @memcpy(buf[0..2], "[]");
         return 2;
@@ -698,22 +729,30 @@ fn writeTextArrayJson(data: []const u8, buf: []u8) usize {
     var offset: usize = 20;
     var i: i32 = 0;
     while (i < nelems and offset + 4 <= data.len) : (i += 1) {
-        if (i > 0) {
-            buf[pos] = ',';
-            pos += 1;
-        }
         const elem_len = std.mem.readInt(i32, data[offset..][0..4], .big);
         offset += 4;
         if (elem_len == -1) {
+            // ',' + "null" + closing ']'
+            if (pos + 6 > buf.len) return 0;
+            if (i > 0) {
+                buf[pos] = ',';
+                pos += 1;
+            }
             @memcpy(buf[pos..][0..4], "null");
             pos += 4;
         } else {
             const slen: usize = @intCast(@as(u32, @bitCast(elem_len)));
             if (offset + slen > data.len) break;
+            // Worst case every char escapes (2x) + quotes + ',' + closing ']'.
+            // Fail the whole value rather than emit a truncated element.
+            if (pos + 2 * slen + 4 > buf.len) return 0;
+            if (i > 0) {
+                buf[pos] = ',';
+                pos += 1;
+            }
             buf[pos] = '"';
             pos += 1;
             for (data[offset..][0..slen]) |ch| {
-                if (pos + 2 >= buf.len) break;
                 if (ch == '"' or ch == '\\') {
                     buf[pos] = '\\';
                     pos += 1;

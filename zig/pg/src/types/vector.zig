@@ -68,6 +68,7 @@ pub const Vector = struct {
     /// SIMD-accelerated endian conversion.
     pub fn writeJson(self: Vector, buf: []u8) usize {
         const dim = self.dim;
+        if (buf.len < 2) return 0;
         if (dim == 0) {
             @memcpy(buf[0..2], "[]");
             return 2;
@@ -93,11 +94,14 @@ pub const Vector = struct {
             const floats: @Vector(simd_width, f32) = @bitCast(ints);
 
             inline for (0..simd_width) |j| {
+                // ',' + up to ~60 chars of f32 decimal + the closing ']'.
+                // Fail (0) rather than overflow the caller's buffer.
+                if (pos + 64 > buf.len) return 0;
                 if (batch > 0 or j > 0) {
                     buf[pos] = ',';
                     pos += 1;
                 }
-                const s = std.fmt.bufPrint(buf[pos..], "{d}", .{floats[j]}) catch break;
+                const s = std.fmt.bufPrint(buf[pos..], "{d}", .{floats[j]}) catch return 0;
                 pos += s.len;
             }
         }
@@ -105,6 +109,7 @@ pub const Vector = struct {
         // Scalar remainder
         var k: usize = simd_batches * simd_width;
         while (k < dim) : (k += 1) {
+            if (pos + 64 > buf.len) return 0;
             if (k > 0) {
                 buf[pos] = ',';
                 pos += 1;
@@ -112,7 +117,7 @@ pub const Vector = struct {
             const offset = k * 4;
             const n = std.mem.readInt(i32, float_data[offset..][0..4], .big);
             const v: f32 = @bitCast(n);
-            const s = std.fmt.bufPrint(buf[pos..], "{d}", .{v}) catch break;
+            const s = std.fmt.bufPrint(buf[pos..], "{d}", .{v}) catch return 0;
             pos += s.len;
         }
 

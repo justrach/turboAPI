@@ -74,6 +74,53 @@ class RequestParsingError(ValueError):
     """Raised when request data cannot be parsed into handler parameters."""
 
 
+_dep_signature_cache: dict = {}
+
+_path_regex_cache: dict = {}
+
+
+def _dep_signature(dep_fn):
+    """Memoized inspect.signature for dependency callables.
+
+    Dependencies are resolved on every request, and inspect.signature() is
+    expensive (it builds the full Signature object). Returns
+    (sig_params_or_None, security_call_params_or_None) where sig_params is a
+    tuple of (name, Parameter) and call_params a tuple of parameter names.
+    """
+    # Key by the object itself when hashable (keeps it alive, avoiding id()
+    # reuse collisions); fall back to id() for unhashable callables.
+    try:
+        hash(dep_fn)
+        key = dep_fn
+    except TypeError:
+        key = id(dep_fn)
+
+    cached = _dep_signature_cache.get(key, ...)
+    if cached is not ...:
+        return cached
+
+    try:
+        sig_params = tuple(inspect.signature(dep_fn).parameters.items())
+    except (ValueError, TypeError):
+        sig_params = None
+
+    call_params = None
+    try:
+        from turboapi.security import SecurityBase
+
+        if isinstance(dep_fn, SecurityBase) and hasattr(dep_fn, "__call__"):
+            try:
+                call_params = tuple(inspect.signature(dep_fn.__call__).parameters.keys())
+            except (ValueError, TypeError):
+                call_params = ()
+    except ImportError:
+        pass
+
+    cached = (sig_params, call_params)
+    _dep_signature_cache[key] = cached
+    return cached
+
+
 class DependencyResolver:
     """Resolve Depends() dependencies recursively with caching and cleanup."""
 
@@ -124,26 +171,19 @@ class DependencyResolver:
 
         # First resolve any sub-dependencies this function needs
         sub_kwargs = {}
-        if callable(dep_fn):
-            try:
-                sig = inspect.signature(dep_fn)
-                for p_name, p in sig.parameters.items():
-                    sub_dep = get_depends(p)
-                    if sub_dep is not None and sub_dep.dependency is not None:
-                        sub_kwargs[p_name] = DependencyResolver._resolve_single(
-                            sub_dep.dependency, sub_dep.use_cache, context, cache, cleanups
-                        )
-            except (ValueError, TypeError):
-                pass
+        sig_params, memo_call_params = _dep_signature(dep_fn)
+        if callable(dep_fn) and sig_params is not None:
+            for p_name, p in sig_params:
+                sub_dep = get_depends(p)
+                if sub_dep is not None and sub_dep.dependency is not None:
+                    sub_kwargs[p_name] = DependencyResolver._resolve_single(
+                        sub_dep.dependency, sub_dep.use_cache, context, cache, cleanups
+                    )
 
         # Check if it's a security scheme callable
         if isinstance(dep_fn, SecurityBase) and hasattr(dep_fn, "__call__"):
-            # Inspect __call__ signature to pass the right context
-            try:
-                call_sig = inspect.signature(dep_fn.__call__)
-                call_params = list(call_sig.parameters.keys())
-            except (ValueError, TypeError):
-                call_params = []
+            # Inspect __call__ signature to pass the right context (memoized)
+            call_params = list(memo_call_params) if memo_call_params is not None else []
 
             if "headers" in call_params:
                 # APIKeyHeader — pass full headers dict
@@ -189,6 +229,110 @@ class DependencyResolver:
             result = asyncio.run(dep_fn(**sub_kwargs))
         else:
             result = dep_fn(**sub_kwargs)
+
+        if use_cache:
+            cache[cache_key] = result
+        return result
+
+    @staticmethod
+    async def resolve_dependencies_async(
+        handler_signature: inspect.Signature, context: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Async variant of resolve_dependencies.
+
+        Awaits coroutine and async-generator dependencies on the current event
+        loop instead of calling asyncio.run(), which raises RuntimeError when
+        the loop is already running — i.e. inside every async handler, where
+        the sync variant turned any async dependency into a 500.
+        """
+        from turboapi.security import get_depends
+
+        cache = {}
+        cleanups = []  # generators to close after request
+        resolved = {}
+
+        for param_name, param in handler_signature.parameters.items():
+            depends = get_depends(param)
+            if depends is not None:
+                dep_fn = depends.dependency
+                if dep_fn is None:
+                    continue
+
+                value = await DependencyResolver._resolve_single_async(
+                    dep_fn, depends.use_cache, context, cache, cleanups
+                )
+                resolved[param_name] = value
+
+        # Store cleanups in context for later teardown
+        context["_cleanups"] = cleanups
+        return resolved
+
+    @staticmethod
+    async def _resolve_single_async(dep_fn, use_cache, context, cache, cleanups):
+        """Async variant of _resolve_single — see resolve_dependencies_async."""
+        from turboapi.security import SecurityBase, get_depends
+
+        cache_key = id(dep_fn)
+        if use_cache and cache_key in cache:
+            return cache[cache_key]
+
+        # First resolve any sub-dependencies this function needs
+        sub_kwargs = {}
+        sig_params, memo_call_params = _dep_signature(dep_fn)
+        if callable(dep_fn) and sig_params is not None:
+            for p_name, p in sig_params:
+                sub_dep = get_depends(p)
+                if sub_dep is not None and sub_dep.dependency is not None:
+                    sub_kwargs[p_name] = await DependencyResolver._resolve_single_async(
+                        sub_dep.dependency, sub_dep.use_cache, context, cache, cleanups
+                    )
+
+        # Check if it's a security scheme callable
+        if isinstance(dep_fn, SecurityBase) and hasattr(dep_fn, "__call__"):
+            # Inspect __call__ signature to pass the right context (memoized)
+            call_params = list(memo_call_params) if memo_call_params is not None else []
+
+            if "headers" in call_params:
+                # APIKeyHeader — pass full headers dict
+                result = dep_fn(headers=context.get("headers", {}))
+            elif "query_params" in call_params:
+                # APIKeyQuery — parse query string into dict
+                from urllib.parse import parse_qs
+
+                qs = context.get("query_string", "")
+                qp = (
+                    {k: v[0] for k, v in parse_qs(qs, keep_blank_values=True).items()} if qs else {}
+                )
+                result = dep_fn(query_params=qp)
+            elif "cookies" in call_params:
+                # APIKeyCookie — pass cookies dict
+                result = dep_fn(cookies=context.get("cookies", {}))
+            else:
+                # OAuth2/HTTPBearer/HTTPBasic — pass authorization header
+                headers = context.get("headers", {})
+                auth_header = None
+                for k, v in headers.items():
+                    if k.lower() == "authorization":
+                        auth_header = v
+                        break
+                result = dep_fn(auth_header)
+            # Async security callables must be awaited, not returned as coroutines
+            if inspect.isawaitable(result):
+                result = await result
+        elif inspect.isgeneratorfunction(dep_fn):
+            gen = dep_fn(**sub_kwargs)
+            result = next(gen)
+            cleanups.append(gen)
+        elif inspect.isasyncgenfunction(dep_fn):
+            agen = dep_fn(**sub_kwargs)
+            result = await agen.__anext__()
+            cleanups.append(agen)
+        elif inspect.iscoroutinefunction(dep_fn):
+            result = await dep_fn(**sub_kwargs)
+        else:
+            result = dep_fn(**sub_kwargs)
+            if inspect.isawaitable(result):
+                result = await result
 
         if use_cache:
             cache[cache_key] = result
@@ -309,12 +453,15 @@ class PathParamParser:
         """
         import re
 
-        # Convert route pattern to regex
-        # Replace {param} with named capture groups
-        pattern = re.sub(r"\{(\w+)\}", r"(?P<\1>[^/]+)", route_pattern)
-        pattern = f"^{pattern}$"
+        # Convert route pattern to regex (memoized — this runs per request)
+        pattern = _path_regex_cache.get(route_pattern)
+        if pattern is None:
+            pattern = re.compile(
+                "^" + re.sub(r"\{(\w+)\}", r"(?P<\1>[^/]+)", route_pattern) + "$"
+            )
+            _path_regex_cache[route_pattern] = pattern
 
-        match = re.match(pattern, actual_path)
+        match = pattern.match(actual_path)
         if not match:
             return {}
 
@@ -343,7 +490,9 @@ class HeaderParser:
 
     @staticmethod
     def parse_headers(
-        headers_dict: dict[str, str], handler_signature: inspect.Signature
+        headers_dict: dict[str, str],
+        handler_signature: inspect.Signature,
+        skip: set[str] | frozenset[str] | None = None,
     ) -> dict[str, Any]:
         """
         Parse headers and extract parameters needed by handler.
@@ -384,7 +533,12 @@ class HeaderParser:
                     if header_marker.default is not ...:
                         parsed_headers[param_name] = header_marker.default
             else:
-                # Not a Header marker, but still try to match by name
+                # Implicit header-name mapping (Issue #132 extension). Only
+                # applied when the param was NOT already bound from the path or
+                # query string — otherwise any client header (e.g. "user-id: 0")
+                # could override an extracted, type-coerced path/query param.
+                if skip and param_name in skip:
+                    continue
                 header_key = param_name.replace("_", "-").lower()
                 for header_name, header_value in headers_dict.items():
                     if header_name.lower() == header_key:
@@ -907,6 +1061,7 @@ def create_enhanced_handler(original_handler, route_definition, *, debug: bool =
                 isinstance(param.default, (Depends, SecurityBase)) or get_depends(param) is not None
             )
         ):
+            # Implicit header-name mapping (Issue #132) may apply to this param
             _has_header_params = True
         if _has_security and (
             isinstance(param.default, (Depends, SecurityBase)) or get_depends(param) is not None
@@ -936,11 +1091,14 @@ def create_enhanced_handler(original_handler, route_definition, *, debug: bool =
                         )
                         parsed_params.update(path_params)
 
-                # 3. Parse headers
+                # 3. Parse headers (path/query params already bound win over
+                #    implicit header mapping; explicit Header() still binds)
                 if "headers" in kwargs:
                     headers_dict = kwargs.get("headers", {})
                     if headers_dict:
-                        header_params = HeaderParser.parse_headers(headers_dict, sig)
+                        header_params = HeaderParser.parse_headers(
+                            headers_dict, sig, skip=set(parsed_params)
+                        )
                         parsed_params.update(header_params)
 
                 # 3.5. Resolve Form / File / UploadFile parameters from Zig-parsed data
@@ -1034,24 +1192,34 @@ def create_enhanced_handler(original_handler, route_definition, *, debug: bool =
                     "query_string": kwargs.get("query_string", ""),
                     "body": kwargs.get("body", b""),
                 }
-                dependency_params = DependencyResolver.resolve_dependencies(sig, context)
+                dependency_params = await DependencyResolver.resolve_dependencies_async(
+                    sig, context
+                )
                 parsed_params.update(dependency_params)
 
                 # Filter to only pass expected parameters
                 filtered_kwargs = {k: v for k, v in parsed_params.items() if k in sig.parameters}
 
-                # Call original async handler and await it
-                result = await original_handler(**filtered_kwargs)
-
-                # Run dependency cleanups (generator teardown)
-                cleanups = context.get("_cleanups", [])
-                for gen in cleanups:
-                    try:
-                        next(gen)
-                    except StopIteration:
-                        pass
-                    except Exception:
-                        pass
+                # Call original async handler and await it. Dependency
+                # generators must teardown even when the handler raises —
+                # otherwise a failing request leaks DB sessions etc.
+                try:
+                    result = await original_handler(**filtered_kwargs)
+                finally:
+                    # Run dependency cleanups (generator teardown)
+                    cleanups = context.get("_cleanups", [])
+                    for gen in cleanups:
+                        try:
+                            if inspect.isasyncgen(gen):
+                                # aclose() runs the async gen's finally block
+                                # without requiring another yield
+                                await gen.aclose()
+                            else:
+                                next(gen)
+                        except StopIteration:
+                            pass
+                        except Exception:
+                            pass
 
                 # Normalize response - may return 2, 3, or 4-element tuple
                 normalized = ResponseHandler.normalize_response(result)
@@ -1113,11 +1281,14 @@ def create_enhanced_handler(original_handler, route_definition, *, debug: bool =
                                         pass
                             parsed_params.update(params)
 
-                # 3. Parse headers (only if handler needs them)
+                # 3. Parse headers (only if handler needs them; path/query
+                #    params already bound win over implicit header mapping)
                 if _has_header_params:
                     headers_dict = kwargs.get("headers", {})
                     if headers_dict:
-                        header_params = HeaderParser.parse_headers(headers_dict, sig)
+                        header_params = HeaderParser.parse_headers(
+                            headers_dict, sig, skip=set(parsed_params)
+                        )
                         parsed_params.update(header_params)
 
                 # 3.5. Resolve Form / File / UploadFile parameters from Zig-parsed data
@@ -1216,19 +1387,22 @@ def create_enhanced_handler(original_handler, route_definition, *, debug: bool =
                 # Filter to only pass expected parameters
                 filtered_kwargs = {k: v for k, v in parsed_params.items() if k in _param_names}
 
-                # Call original sync handler
-                result = original_handler(**filtered_kwargs)
-
-                # Run dependency cleanups (generator teardown)
-                if _has_dependencies:
-                    cleanups = context.get("_cleanups", [])
-                    for gen in cleanups:
-                        try:
-                            next(gen)
-                        except StopIteration:
-                            pass
-                        except Exception:
-                            pass
+                # Call original sync handler. Dependency generators must
+                # teardown even when the handler raises — otherwise a
+                # failing request leaks DB sessions etc.
+                try:
+                    result = original_handler(**filtered_kwargs)
+                finally:
+                    # Run dependency cleanups (generator teardown)
+                    if _has_dependencies:
+                        cleanups = context.get("_cleanups", [])
+                        for gen in cleanups:
+                            try:
+                                next(gen)
+                            except StopIteration:
+                                pass
+                            except Exception:
+                                pass
 
                 # Normalize response - may return 2, 3, or 4-element tuple
                 normalized = ResponseHandler.normalize_response(result)
@@ -1314,7 +1488,9 @@ def create_async_pos_handler(original_handler, *, debug: bool = False):
         try:
             result = await original_handler(*args)
             if isinstance(result, _Response):
-                streaming_body = _collect_streaming_body_sync(result)
+                # Async handler: collect on the running loop — the sync
+                # collector's asyncio.run() raises inside a running loop.
+                streaming_body = await _collect_streaming_body_async(result)
                 if streaming_body is not None:
                     return (result.status_code, result.media_type or "text/event-stream", streaming_body)
                 body = (
@@ -1358,6 +1534,18 @@ def create_fast_handler(original_handler, route_definition, *, debug: bool = Fal
             _converters[pname] = int
         elif ann is float:
             _converters[pname] = float
+
+    def _coerce_param(name, value):
+        converter = _converters.get(name)
+        if converter is None:
+            return value
+        try:
+            return converter(value)
+        except (ValueError, TypeError):
+            # Bad client input is a 400, not an unhandled 500
+            raise RequestParsingError(
+                f"Invalid value for parameter '{name}': expected {converter.__name__}"
+            )
 
     method_str = (
         route_definition.method.value.upper() if hasattr(route_definition, "method") else "GET"
@@ -1410,8 +1598,7 @@ def create_fast_handler(original_handler, route_definition, *, debug: bool = Fal
             if path_params:
                 for k, v in path_params.items():
                     if k in param_names:
-                        converter = _converters.get(k)
-                        call_kwargs[k] = converter(v) if converter else v
+                        call_kwargs[k] = _coerce_param(k, v)
 
             if len(call_kwargs) < len(param_names):
                 qs = kwargs.get("query_string", "")
@@ -1420,7 +1607,7 @@ def create_fast_handler(original_handler, route_definition, *, debug: bool = Fal
 
                     for k, v in parse_qs(qs, keep_blank_values=True).items():
                         if k in param_names and k not in call_kwargs:
-                            call_kwargs[k] = v[0]
+                            call_kwargs[k] = _coerce_param(k, v[0])
 
             if len(call_kwargs) < len(param_names):
                 headers = kwargs.get("headers", {})
@@ -1487,6 +1674,18 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
         elif ann is float:
             _converters[pname] = float
 
+    def _coerce_param(name, value):
+        converter = _converters.get(name)
+        if converter is None:
+            return value
+        try:
+            return converter(value)
+        except (ValueError, TypeError):
+            # Bad client input is a 400, not an unhandled 500
+            raise RequestParsingError(
+                f"Invalid value for parameter '{name}': expected {converter.__name__}"
+            )
+
     method_str = (
         route_definition.method.value.upper() if hasattr(route_definition, "method") else "GET"
     )
@@ -1504,8 +1703,7 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
         if path_params:
             for k, v in path_params.items():
                 if k in param_names:
-                    converter = _converters.get(k)
-                    call_kwargs[k] = converter(v) if converter else v
+                    call_kwargs[k] = _coerce_param(k, v)
 
         if len(call_kwargs) < len(param_names):
             qs = kwargs.get("query_string", "")
@@ -1514,7 +1712,7 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
 
                 for k, v in parse_qs(qs, keep_blank_values=True).items():
                     if k in param_names and k not in call_kwargs:
-                        call_kwargs[k] = v[0]
+                        call_kwargs[k] = _coerce_param(k, v[0])
 
         if len(call_kwargs) < len(param_names):
             headers = kwargs.get("headers", {})
@@ -1566,7 +1764,9 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
             result = await original_handler(**call_kwargs)
 
             if isinstance(result, _Response):
-                streaming_body = _collect_streaming_body_sync(result)
+                # Async handler: collect on the running loop — the sync
+                # collector's asyncio.run() raises inside a running loop.
+                streaming_body = await _collect_streaming_body_async(result)
                 if streaming_body is not None:
                     return (result.status_code, result.media_type or "text/event-stream", streaming_body)
                 ct = result.media_type or "application/json"
