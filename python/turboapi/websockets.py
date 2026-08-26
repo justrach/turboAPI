@@ -29,10 +29,24 @@ from urllib.parse import parse_qsl
 def _bounded_int_env(
     name: str, default: int, hard_min: int, hard_max: int
 ) -> int:
-    try:
-        return min(max(hard_min, int(os.environ.get(name, default))), hard_max)
-    except (TypeError, ValueError):
+    """Read an unsigned 64-bit ASCII decimal and clamp it to fixed bounds.
+
+    Signs, whitespace, non-ASCII digits, empty values, and uint64 overflow are
+    invalid and use ``default``. This intentionally matches Zig's native
+    server normalization byte-for-byte.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw or any(byte < "0" or byte > "9" for byte in raw):
         return default
+    # Avoid asking Python to construct an arbitrarily large integer from an
+    # untrusted environment string, and match Zig's u64 overflow boundary.
+    significant = raw.lstrip("0") or "0"
+    if len(significant) > 20 or (
+        len(significant) == 20 and significant > "18446744073709551615"
+    ):
+        return default
+    value = int(significant, 10)
+    return min(max(hard_min, value), hard_max)
 
 
 class WebSocketDisconnect(Exception):
@@ -571,7 +585,7 @@ class WebSocket:
 
     @property
     def transport_metrics(self) -> dict[str, int]:
-        """Queue occupancy/capacity only; message payloads are never exposed."""
+        """Transport occupancy, capacity, and deadline; never message payloads."""
         if not self._is_zig_backed:
             return {
                 "inbound_messages": 0,
@@ -580,6 +594,7 @@ class WebSocket:
                 "outbound_bytes": 0,
                 "message_limit": 0,
                 "byte_limit": 0,
+                "write_timeout_ms": 0,
             }
         self._bind_native_loop()
         t = _turbonet()

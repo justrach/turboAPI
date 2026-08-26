@@ -98,21 +98,32 @@ TURBO_WS_WRITE_TIMEOUT_MS=5000 \
 python app.py
 ```
 
-- `TURBO_WS_WORKER_POOL_SIZE` defaults to 24 and is hard-capped at 512.
-- `TURBO_MAX_WEBSOCKETS` is clamped to the dedicated WebSocket pool size; zero
-  disables WebSocket admission.
+Every numeric WebSocket setting uses one strict normalization contract in both
+the Python bridge and native server: a non-empty string of ASCII decimal digits
+that fits in an unsigned 64-bit integer. A sign, whitespace, non-ASCII digit,
+other character, empty value, or integer overflow makes the entire value
+invalid and selects its documented default. Leading zeroes are valid. Valid
+values are then clamped to the setting's minimum and maximum.
+
+- `TURBO_WS_WORKER_POOL_SIZE` defaults to 24 and is clamped to 0–512. Zero
+  disables the dedicated pool.
+- `TURBO_MAX_WEBSOCKETS` defaults to the normalized worker count, is clamped to
+  0–512, and is then capped by that worker count. Zero disables WebSocket
+  admission.
 - `TURBO_WS_QUEUE_MESSAGES` and `TURBO_WS_QUEUE_BYTES` bound each direction of
-  each connected Python WebSocket. The hard maxima are 1024 messages and 16 MiB
-  per direction. Overload fails closed with code 1013 when a close frame can be
-  written; a blocked transport is shut down immediately.
+  each connected Python WebSocket. They default to 64 messages and 16 MiB and
+  are clamped to 1–1024 messages and 1 byte–16 MiB per direction. Overload
+  fails closed with code 1013 when a close frame can be written; a blocked
+  transport is shut down immediately.
 - `TURBO_WS_WRITE_TIMEOUT_MS` bounds how long an unwritable peer may retain a
   WebSocket slot. It defaults to 5000 ms and is clamped to 100–30000 ms.
 - Excess upgrades receive HTTP `503 Service Unavailable` before the `101`
   WebSocket handshake.
 
-`websocket.transport_metrics` exposes queue counts, byte occupancy, and limits
-without exposing payload contents. The runtime remains bounded and is not a
-claim of unbounded/evented connection scaling.
+`websocket.transport_metrics` exposes queue counts, byte occupancy, limits,
+and the normalized write timeout without exposing payload contents. The
+runtime remains bounded and is not a claim of unbounded/evented connection
+scaling.
 
 The configured application-queue payload ceiling is
 `active WebSockets × 2 directions × TURBO_WS_QUEUE_BYTES` (768 MiB with the

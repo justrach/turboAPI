@@ -963,10 +963,13 @@ const MAX_WS_QUEUE_MESSAGES = 1024;
 const MAX_WS_QUEUE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_WS_QUEUE_MESSAGES = 64;
 const DEFAULT_WS_QUEUE_BYTES = 16 * 1024 * 1024;
+const DEFAULT_WS_WRITE_TIMEOUT_MS = 5000;
+const MIN_WS_WRITE_TIMEOUT_MS = 100;
+const MAX_WS_WRITE_TIMEOUT_MS = 30000;
 
 var ws_queue_message_limit: usize = DEFAULT_WS_QUEUE_MESSAGES;
 var ws_queue_byte_limit: usize = DEFAULT_WS_QUEUE_BYTES;
-var ws_write_timeout_ms: usize = 5000;
+var ws_write_timeout_ms: usize = DEFAULT_WS_WRITE_TIMEOUT_MS;
 var http_header_timeout_ms: usize = 30000;
 
 /// WebSockets use a dedicated pool, so a long-lived socket never occupies an
@@ -981,9 +984,86 @@ const WebSocketCapacity = struct {
 var active_websockets: std.atomic.Value(usize) = .init(0);
 var max_active_websockets: std.atomic.Value(usize) = .init(0);
 
-fn readUsizeEnv(name: [*:0]const u8, fallback: usize) usize {
+/// Parse the cross-language WebSocket numeric environment contract: non-empty
+/// ASCII decimal digits representing a u64. Signs, whitespace, non-ASCII
+/// digits, and overflow are invalid. Leading zeroes are valid.
+fn parseStrictDecimalU64(raw: []const u8) ?u64 {
+    if (raw.len == 0) return null;
+    var value: u64 = 0;
+    for (raw) |byte| {
+        if (byte < '0' or byte > '9') return null;
+        const multiplied = @mulWithOverflow(value, @as(u64, 10));
+        if (multiplied[1] != 0) return null;
+        const added = @addWithOverflow(multiplied[0], @as(u64, byte - '0'));
+        if (added[1] != 0) return null;
+        value = added[0];
+    }
+    return value;
+}
+
+fn normalizeBoundedUsize(
+    raw: ?[]const u8,
+    fallback: usize,
+    hard_min: usize,
+    hard_max: usize,
+) usize {
+    std.debug.assert(hard_min <= hard_max);
+    const parsed = parseStrictDecimalU64(raw orelse return fallback) orelse return fallback;
+    const bounded = @min(@max(@as(u64, @intCast(hard_min)), parsed), @as(u64, @intCast(hard_max)));
+    return @intCast(bounded);
+}
+
+fn readBoundedUsizeEnv(
+    name: [*:0]const u8,
+    fallback: usize,
+    hard_min: usize,
+    hard_max: usize,
+) usize {
     const ptr = std.c.getenv(name) orelse return fallback;
-    return std.fmt.parseInt(usize, std.mem.span(ptr), 10) catch fallback;
+    return normalizeBoundedUsize(std.mem.span(ptr), fallback, hard_min, hard_max);
+}
+
+test "strict numeric environment normalization matches Python contract" {
+    const invalid = [_]?[]const u8{
+        null,
+        "",
+        "-1",
+        " 1",
+        "1 ",
+        "+1",
+        "invalid",
+        "\xd9\xa1",
+        "18446744073709551616",
+    };
+    for (invalid) |raw| {
+        try std.testing.expectEqual(@as(usize, 64), normalizeBoundedUsize(raw, 64, 1, 1024));
+        try std.testing.expectEqual(@as(usize, 24), normalizeBoundedUsize(raw, 24, 0, MAX_POOL_SIZE));
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), normalizeBoundedUsize("0", 64, 1, 1024));
+    try std.testing.expectEqual(@as(usize, 0), normalizeBoundedUsize("0", 24, 0, MAX_POOL_SIZE));
+    try std.testing.expectEqual(@as(usize, 7), normalizeBoundedUsize("7", 64, 1, 1024));
+    try std.testing.expectEqual(@as(usize, 1), normalizeBoundedUsize("1", 64, 1, 1024));
+    try std.testing.expectEqual(@as(usize, 1024), normalizeBoundedUsize("1024", 64, 1, 1024));
+    try std.testing.expectEqual(@as(usize, 1024), normalizeBoundedUsize("1025", 64, 1, 1024));
+    try std.testing.expectEqual(@as(usize, 1024), normalizeBoundedUsize("18446744073709551615", 64, 1, 1024));
+    try std.testing.expectEqual(@as(usize, 1), normalizeBoundedUsize("000000000000000000000000000000000000", 64, 1, 1024));
+
+    // Every actual WebSocket setting uses the same parser with its own bounds.
+    const worker_min = normalizeBoundedUsize("0", DEFAULT_WS_POOL_SIZE, 0, MAX_POOL_SIZE);
+    const worker_max = normalizeBoundedUsize("512", DEFAULT_WS_POOL_SIZE, 0, MAX_POOL_SIZE);
+    const active_min = normalizeBoundedUsize("0", worker_max, 0, MAX_POOL_SIZE);
+    const active_max = normalizeBoundedUsize("512", worker_max, 0, MAX_POOL_SIZE);
+    try std.testing.expectEqual(@as(usize, 0), worker_min);
+    try std.testing.expectEqual(@as(usize, 512), worker_max);
+    try std.testing.expectEqual(@as(usize, 0), active_min);
+    try std.testing.expectEqual(@as(usize, 512), active_max);
+    try std.testing.expectEqual(@as(usize, 1), normalizeBoundedUsize("1", DEFAULT_WS_QUEUE_MESSAGES, 1, MAX_WS_QUEUE_MESSAGES));
+    try std.testing.expectEqual(@as(usize, MAX_WS_QUEUE_MESSAGES), normalizeBoundedUsize("1024", DEFAULT_WS_QUEUE_MESSAGES, 1, MAX_WS_QUEUE_MESSAGES));
+    try std.testing.expectEqual(@as(usize, 1), normalizeBoundedUsize("1", DEFAULT_WS_QUEUE_BYTES, 1, MAX_WS_QUEUE_BYTES));
+    try std.testing.expectEqual(@as(usize, MAX_WS_QUEUE_BYTES), normalizeBoundedUsize("16777216", DEFAULT_WS_QUEUE_BYTES, 1, MAX_WS_QUEUE_BYTES));
+    try std.testing.expectEqual(@as(usize, MIN_WS_WRITE_TIMEOUT_MS), normalizeBoundedUsize("100", DEFAULT_WS_WRITE_TIMEOUT_MS, MIN_WS_WRITE_TIMEOUT_MS, MAX_WS_WRITE_TIMEOUT_MS));
+    try std.testing.expectEqual(@as(usize, MAX_WS_WRITE_TIMEOUT_MS), normalizeBoundedUsize("30000", DEFAULT_WS_WRITE_TIMEOUT_MS, MIN_WS_WRITE_TIMEOUT_MS, MAX_WS_WRITE_TIMEOUT_MS));
 }
 
 fn clampWebSocketCapacity(worker_count: usize, requested_max: usize) WebSocketCapacity {
@@ -995,8 +1075,8 @@ fn clampWebSocketCapacity(worker_count: usize, requested_max: usize) WebSocketCa
 }
 
 fn webSocketCapacity() WebSocketCapacity {
-    const worker_count = @min(readUsizeEnv("TURBO_WS_WORKER_POOL_SIZE", DEFAULT_WS_POOL_SIZE), MAX_POOL_SIZE);
-    const requested_max = readUsizeEnv("TURBO_MAX_WEBSOCKETS", worker_count);
+    const worker_count = readBoundedUsizeEnv("TURBO_WS_WORKER_POOL_SIZE", DEFAULT_WS_POOL_SIZE, 0, MAX_POOL_SIZE);
+    const requested_max = readBoundedUsizeEnv("TURBO_MAX_WEBSOCKETS", worker_count, 0, MAX_POOL_SIZE);
     return clampWebSocketCapacity(worker_count, requested_max);
 }
 
@@ -1183,10 +1263,10 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     // connection. Neither pool may exceed its static storage ceiling.
     const effective_thread_count = @min(thread_count, MAX_POOL_SIZE);
     const ws_capacity = webSocketCapacity();
-    ws_queue_message_limit = @min(@max(@as(usize, 1), readUsizeEnv("TURBO_WS_QUEUE_MESSAGES", DEFAULT_WS_QUEUE_MESSAGES)), MAX_WS_QUEUE_MESSAGES);
-    ws_queue_byte_limit = @min(@max(@as(usize, 1), readUsizeEnv("TURBO_WS_QUEUE_BYTES", DEFAULT_WS_QUEUE_BYTES)), MAX_WS_QUEUE_BYTES);
-    ws_write_timeout_ms = @min(@max(@as(usize, 100), readUsizeEnv("TURBO_WS_WRITE_TIMEOUT_MS", 5000)), 30000);
-    http_header_timeout_ms = @min(@max(@as(usize, 100), readUsizeEnv("TURBO_HTTP_HEADER_TIMEOUT_MS", 30000)), 30000);
+    ws_queue_message_limit = readBoundedUsizeEnv("TURBO_WS_QUEUE_MESSAGES", DEFAULT_WS_QUEUE_MESSAGES, 1, MAX_WS_QUEUE_MESSAGES);
+    ws_queue_byte_limit = readBoundedUsizeEnv("TURBO_WS_QUEUE_BYTES", DEFAULT_WS_QUEUE_BYTES, 1, MAX_WS_QUEUE_BYTES);
+    ws_write_timeout_ms = readBoundedUsizeEnv("TURBO_WS_WRITE_TIMEOUT_MS", DEFAULT_WS_WRITE_TIMEOUT_MS, MIN_WS_WRITE_TIMEOUT_MS, MAX_WS_WRITE_TIMEOUT_MS);
+    http_header_timeout_ms = readBoundedUsizeEnv("TURBO_HTTP_HEADER_TIMEOUT_MS", 30000, 100, 30000);
     active_websockets.store(0, .release);
     max_active_websockets.store(ws_capacity.max_active, .release);
 
@@ -3224,7 +3304,8 @@ pub fn ws_metrics(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
         !wsMetricPut(result, "outbound_messages", outbound_messages) or
         !wsMetricPut(result, "outbound_bytes", outbound_bytes) or
         !wsMetricPut(result, "message_limit", ws_queue_message_limit) or
-        !wsMetricPut(result, "byte_limit", ws_queue_byte_limit))
+        !wsMetricPut(result, "byte_limit", ws_queue_byte_limit) or
+        !wsMetricPut(result, "write_timeout_ms", ws_write_timeout_ms))
     {
         c.Py_DecRef(result);
         return null;

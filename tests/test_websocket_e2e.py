@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -199,6 +200,20 @@ def ws_server(tmp_path_factory: pytest.TempPathFactory):
             except WebSocketDisconnect:
                 pass
 
+        @app.websocket("/ws-env-normalization")
+        async def env_normalization_handler(ws: WebSocket):
+            await ws.accept()
+            metrics = ws.transport_metrics
+            await ws.send_json({{
+                "native_message_limit": metrics["message_limit"],
+                "python_message_limit": ws._zig_inbound.maxsize,
+                "native_byte_limit": metrics["byte_limit"],
+                "python_byte_limit": ws._queue_bytes,
+                "native_write_timeout_ms": metrics["write_timeout_ms"],
+                "python_write_timeout_ms": int(ws._write_timeout_s * 1000),
+            }})
+            await ws.close()
+
         @app.get("/ws-buffer-count/{{nonce}}")
         def buffer_count(nonce: str):
             return {{"count": buffered_receive_count}}
@@ -209,8 +224,15 @@ def ws_server(tmp_path_factory: pytest.TempPathFactory):
     )
     log_path = tmp_path_factory.mktemp("websocket-e2e") / "server.log"
     with log_path.open("wb") as log_file:
+        env = os.environ.copy()
+        env.update({
+            "TURBO_WS_QUEUE_MESSAGES": "+4",
+            "TURBO_WS_QUEUE_BYTES": " 4096",
+            "TURBO_WS_WRITE_TIMEOUT_MS": "-100",
+        })
         proc = subprocess.Popen(
             [sys.executable, "-c", script],
+            env=env,
             stdout=log_file,
             stderr=subprocess.STDOUT,
         )
@@ -356,6 +378,19 @@ async def test_ws_python_echo(ws_server: str) -> None:
         assert await ws.recv() == "py-echo:hello"
         await ws.send("again")
         assert await ws.recv() == "py-echo:again"
+
+
+@pytest.mark.asyncio
+async def test_ws_python_and_native_env_normalization_match(ws_server: str) -> None:
+    async with websockets.connect(f"ws://{ws_server}/ws-env-normalization") as ws:
+        assert json.loads(await ws.recv()) == {
+            "native_message_limit": 64,
+            "python_message_limit": 64,
+            "native_byte_limit": 16 * 1024 * 1024,
+            "python_byte_limit": 16 * 1024 * 1024,
+            "native_write_timeout_ms": 5000,
+            "python_write_timeout_ms": 5000,
+        }
 
 
 @pytest.mark.asyncio

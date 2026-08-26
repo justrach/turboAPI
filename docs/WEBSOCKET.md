@@ -227,9 +227,13 @@ The Zig HTTP core handles real WebSocket connections. Current limitations are:
 - subprotocol negotiation and `permessage-deflate` are not implemented.
 
 Queue occupancy is available as `websocket.transport_metrics`. It contains
-only message/byte counts and configured limits, never message payloads. See
-[Performance Tuning](./PERFORMANCE_TUNING.md#websocket-isolation-and-backpressure)
-for the worker and queue environment variables.
+only message/byte counts, configured limits, and the normalized write timeout,
+never message payloads. Every numeric WebSocket environment setting accepts
+only non-empty ASCII decimal digits fitting in an unsigned 64-bit integer;
+signs, whitespace, non-ASCII digits, overflow, invalid text, and empty values
+select that setting's default before clamping. See [Performance
+Tuning](./PERFORMANCE_TUNING.md#websocket-isolation-and-backpressure) for the
+exact bounds.
 
 ## Performance Tips
 
