@@ -154,11 +154,12 @@ def _upgrade(
     security_headers: list[tuple[str, str]] | None = None,
     include_host: bool = True,
     connection: str = "Upgrade",
+    request_line: str | None = None,
 ) -> tuple[socket.socket, int, bytes]:
     host, port_text = server.rsplit(":", 1)
     client = socket.create_connection((host, int(port_text)), timeout=2)
     lines = [
-        f"GET {path} HTTP/1.1",
+        request_line or f"GET {path} HTTP/1.1",
         "Upgrade: websocket",
         f"Connection: {connection}",
     ]
@@ -408,6 +409,59 @@ def test_mandatory_handshake_validation_precedes_guard(
     after = _stats(server)
     assert after["guarded"] == before["guarded"]
     assert after["handled"] == before["handled"]
+
+
+@pytest.mark.parametrize(
+    "request_line",
+    [
+        "GET /guarded?tenant=alpha HTTP/1.0",
+        "GET /guarded?tenant=alpha",
+        "GET /guarded?tenant=alpha HTTP/1.1 extra",
+        "GET  /guarded?tenant=alpha HTTP/1.1",
+        "GET /guarded?tenant=alpha  HTTP/1.1",
+    ],
+)
+def test_invalid_or_unsupported_upgrade_request_line_fails_before_guard(
+    guarded_server, request_line: str
+) -> None:
+    server, _log_path = guarded_server
+    before = _stats(server)
+    client, status, response = _upgrade(
+        server,
+        "/guarded?tenant=alpha",
+        security_headers=_valid_security_headers(),
+        request_line=request_line,
+    )
+    try:
+        assert status == 400
+        assert b"101 Switching Protocols" not in response
+        headers, body = response.split(b"\r\n\r\n", 1)
+        assert len(response) <= 512
+        assert b"Content-Length: 0" in headers
+        assert body == b""
+    finally:
+        client.close()
+    after = _stats(server)
+    assert after["guarded"] == before["guarded"]
+    assert after["handled"] == before["handled"]
+
+
+def test_ordinary_http_1_0_request_remains_compatible(guarded_server) -> None:
+    server, _log_path = guarded_server
+    host, port_text = server.rsplit(":", 1)
+    with socket.create_connection((host, int(port_text)), timeout=2) as client:
+        client.sendall(
+            (f"GET /stats?probe=1 HTTP/1.0\r\nHost: {server}\r\nConnection: close\r\n\r\n").encode(
+                "ascii"
+            )
+        )
+        response = bytearray()
+        while b"\r\n\r\n" not in response:
+            chunk = client.recv(1024)
+            if not chunk:
+                break
+            response.extend(chunk)
+    assert response.startswith(b"HTTP/1.1 200 ")
 
 
 @pytest.mark.parametrize(

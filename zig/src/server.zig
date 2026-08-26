@@ -1331,12 +1331,86 @@ const WsUpgradeOutcome = enum {
     handled,
 };
 
+const HttpRequestLine = struct {
+    method: []const u8,
+    request_target: []const u8,
+    version: []const u8,
+};
+
+fn isValidRequestLineField(field: []const u8) bool {
+    if (field.len == 0) return false;
+    for (field) |byte| {
+        if (byte <= ' ' or byte == 0x7f) return false;
+    }
+    return true;
+}
+
+/// Parse the complete HTTP request line as METHOD SP TARGET SP VERSION.
+/// RFC request-line separators are single SP bytes; accepting a prefix and
+/// ignoring trailing tokens could otherwise let malformed requests reach the
+/// WebSocket policy/101 path.
+fn parseHttpRequestLine(line: []const u8) error{InvalidRequestLine}!HttpRequestLine {
+    const first_space = std.mem.indexOfScalar(u8, line, ' ') orelse return error.InvalidRequestLine;
+    if (first_space == 0) return error.InvalidRequestLine;
+    const second_space = std.mem.indexOfPosLinear(u8, line, first_space + 1, " ") orelse return error.InvalidRequestLine;
+    if (second_space == first_space + 1) return error.InvalidRequestLine;
+    if (std.mem.indexOfPosLinear(u8, line, second_space + 1, " ") != null) return error.InvalidRequestLine;
+
+    const parsed = HttpRequestLine{
+        .method = line[0..first_space],
+        .request_target = line[first_space + 1 .. second_space],
+        .version = line[second_space + 1 ..],
+    };
+    if (!isValidRequestLineField(parsed.method) or
+        !isValidRequestLineField(parsed.request_target) or
+        !isValidRequestLineField(parsed.version)) return error.InvalidRequestLine;
+    return parsed;
+}
+
+test "HTTP request line parsing consumes exactly three fields" {
+    const parsed = try parseHttpRequestLine("GET /chat?tenant=alpha HTTP/1.1");
+    try std.testing.expectEqualStrings("GET", parsed.method);
+    try std.testing.expectEqualStrings("/chat?tenant=alpha", parsed.request_target);
+    try std.testing.expectEqualStrings("HTTP/1.1", parsed.version);
+
+    const malformed = [_][]const u8{
+        "GET /chat",
+        "GET  /chat HTTP/1.1",
+        "GET /chat  HTTP/1.1",
+        "GET /chat HTTP/1.1 extra",
+        "GET\t/chat HTTP/1.1",
+        "GET /chat\tHTTP/1.1",
+    };
+    for (malformed) |line| {
+        try std.testing.expectError(error.InvalidRequestLine, parseHttpRequestLine(line));
+    }
+}
+
 /// Case-insensitive header lookup.
 fn findHeader(headers: []const HeaderPair, name: []const u8) ?[]const u8 {
     for (headers) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
     }
     return null;
+}
+
+fn hasWebSocketUpgradeHeader(
+    request_head: []const u8,
+    first_line_end: usize,
+    header_end_pos: usize,
+) bool {
+    var pos = first_line_end + 2;
+    while (pos < header_end_pos) {
+        const line_end = std.mem.indexOfPos(u8, request_head, pos, "\r\n") orelse header_end_pos;
+        const line = request_head[pos..line_end];
+        pos = line_end + 2;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        if (!std.ascii.eqlIgnoreCase(name, "upgrade")) continue;
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.ascii.eqlIgnoreCase(value, "websocket")) return true;
+    }
+    return false;
 }
 
 /// Security-sensitive WebSocket headers must be unambiguous. Reject repeated
@@ -2218,13 +2292,19 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
 
     const request_head = header_buf[0..total_read];
 
-    // Phase 2: Parse the first line to get method + path (cheap — no allocs)
-    const first_line_end = std.mem.indexOf(u8, request_head, "\r\n") orelse return;
+    // Phase 2: Parse the complete request line (cheap — no allocs). Never let
+    // a valid prefix hide a missing version or trailing request-line tokens.
+    const first_line_end = std.mem.indexOf(u8, request_head, "\r\n") orelse {
+        sendUpgradeError(stream, 400, "Bad Request");
+        return;
+    };
     const first_line = request_head[0..first_line_end];
-
-    var parts = std.mem.splitScalar(u8, first_line, ' ');
-    const method = parts.next() orelse return;
-    const raw_path = parts.next() orelse return;
+    const request_line = parseHttpRequestLine(first_line) catch {
+        sendUpgradeError(stream, 400, "Bad Request");
+        return;
+    };
+    const method = request_line.method;
+    const raw_path = request_line.request_target;
 
     const q_idx = std.mem.indexOf(u8, raw_path, "?");
     const path = if (q_idx) |i| raw_path[0..i] else raw_path;
@@ -2235,9 +2315,17 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     // lookup. WS routes are stored in a separate map (getWebSocketRoutes())
     // populated by the Python `@app.websocket(...)` decorator, plus the
     // hardcoded /ws-echo demo route.
-    switch (tryWebSocketUpgrade(stream, request_head, first_line_end, he, method, path, query_string, tstate)) {
-        .handled => return,
-        .not_websocket => {},
+    if (std.mem.eql(u8, request_line.version, "HTTP/1.1")) {
+        switch (tryWebSocketUpgrade(stream, request_head, first_line_end, he, method, path, query_string, tstate)) {
+            .handled => return,
+            .not_websocket => {},
+        }
+    } else if (hasWebSocketUpgradeHeader(request_head, first_line_end, he)) {
+        // RFC 6455 upgrades use HTTP/1.1. Preserve ordinary HTTP compatibility
+        // for other parsed versions, but fail a would-be upgrade closed before
+        // route lookup, application guard, capacity admission, or 101.
+        sendUpgradeError(stream, 400, "Bad Request");
+        return;
     }
 
     // Phase 3: Route match EARLY — before header parsing, so fast handlers

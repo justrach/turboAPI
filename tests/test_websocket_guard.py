@@ -376,3 +376,124 @@ def test_startup_snapshot_is_serialized_with_live_registration(monkeypatch) -> N
     assert server.current == ("/race", new_handler, new_guard)
     assert app._websocket_routes["/race"] is new_handler
     assert app._websocket_guards["/race"] is new_guard
+
+
+def test_startup_reentrant_addition_registers_live(monkeypatch) -> None:
+    app = TurboAPI()
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
+
+    async def initial_handler(_websocket) -> None:
+        pass
+
+    async def added_handler(_websocket) -> None:
+        pass
+
+    app.websocket("/initial")(initial_handler)
+
+    class ReentrantAddServer:
+        routes: dict[str, tuple[object, object]] = {}
+        added = False
+
+        def add_websocket_route(self, path, handler, guard=None) -> None:
+            self.routes[path] = (handler, guard)
+            if path == "/initial" and not self.added:
+                self.added = True
+                app.websocket("/added")(added_handler)
+
+    server = ReentrantAddServer()
+    app.zig_server = server
+    assert app._register_websocket_routes_with_server(server) == ("/initial",)
+
+    assert server.routes == {
+        "/initial": (initial_handler, None),
+        "/added": (added_handler, None),
+    }
+    assert app._websocket_routes["/added"] is added_handler
+
+
+def test_startup_reentrant_replacement_reads_current_not_stale_snapshot(monkeypatch) -> None:
+    app = TurboAPI()
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
+
+    async def trigger_handler(_websocket) -> None:
+        pass
+
+    async def old_later_handler(_websocket) -> None:
+        pass
+
+    async def new_later_handler(_websocket) -> None:
+        pass
+
+    app.websocket("/trigger")(trigger_handler)
+    app.websocket("/later")(old_later_handler)
+
+    class ReentrantReplaceServer:
+        routes: dict[str, tuple[object, object]] = {}
+        calls: list[tuple[str, object]] = []
+        replaced = False
+
+        def add_websocket_route(self, path, handler, guard=None) -> None:
+            self.calls.append((path, handler))
+            self.routes[path] = (handler, guard)
+            if path == "/trigger" and not self.replaced:
+                self.replaced = True
+                app.websocket("/later")(new_later_handler)
+
+    server = ReentrantReplaceServer()
+    app.zig_server = server
+    assert app._register_websocket_routes_with_server(server) == (
+        "/trigger",
+        "/later",
+    )
+
+    assert server.routes["/later"] == (new_later_handler, None)
+    assert app._websocket_routes["/later"] is new_later_handler
+    assert ("/later", old_later_handler) not in server.calls
+    assert server.calls.count(("/later", new_later_handler)) == 2
+
+
+def test_startup_failure_after_reentry_is_consistent_and_retryable(monkeypatch) -> None:
+    app = TurboAPI()
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
+
+    async def initial_handler(_websocket) -> None:
+        pass
+
+    async def added_handler(_websocket) -> None:
+        pass
+
+    app.websocket("/initial")(initial_handler)
+
+    class FailingReentrantServer:
+        routes: dict[str, tuple[object, object]] = {}
+        reentered = False
+        fail_startup = True
+
+        def add_websocket_route(self, path, handler, guard=None) -> None:
+            self.routes[path] = (handler, guard)
+            if path == "/initial" and not self.reentered:
+                self.reentered = True
+                app.websocket("/added")(added_handler)
+                if self.fail_startup:
+                    raise RuntimeError("startup registration failed")
+
+    server = FailingReentrantServer()
+    app.zig_server = server
+    with pytest.raises(RuntimeError, match="startup registration failed"):
+        app._register_websocket_routes_with_server(server)
+
+    assert app._websocket_routes == {
+        "/initial": initial_handler,
+        "/added": added_handler,
+    }
+    assert server.routes["/added"] == (added_handler, None)
+
+    server.fail_startup = False
+    assert app._register_websocket_routes_with_server(server) == (
+        "/initial",
+        "/added",
+    )
+    assert server.routes == {
+        "/initial": (initial_handler, None),
+        "/added": (added_handler, None),
+    }

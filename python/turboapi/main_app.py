@@ -278,7 +278,18 @@ class TurboAPI(Router):
 
         registered: list[str] = []
         with self._websocket_registration_lock:
-            for ws_path, ws_handler in self._websocket_routes.items():
+            # Snapshot only the keys. A native add may decref a replaced
+            # callback whose finalizer re-enters @app.websocket(), so iterating
+            # the live dictionary is unsafe even under this reentrant lock.
+            # Read each current pair immediately before its native add: a
+            # reentrant replacement of a not-yet-processed path then wins over
+            # the startup snapshot, while newly added paths register through
+            # the decorator's live path.
+            ws_paths = tuple(self._websocket_routes)
+            for ws_path in ws_paths:
+                ws_handler = self._websocket_routes.get(ws_path)
+                if ws_handler is None:
+                    continue
                 ws_guard = self._websocket_guards.get(ws_path)
                 if ws_guard is None:
                     server.add_websocket_route(ws_path, ws_handler)

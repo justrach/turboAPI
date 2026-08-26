@@ -100,7 +100,9 @@ invoking the guard. Header names are compared case-insensitively, preventing an
 edge and application from making different first-value/last-value decisions.
 Before guard evaluation, the native core also requires the RFC 6455 handshake
 fields, including a non-empty `Host`, version 13, and a canonical Base64
-`Sec-WebSocket-Key` that decodes to exactly 16 bytes.
+`Sec-WebSocket-Key` that decodes to exactly 16 bytes. The complete request line
+must be exactly `METHOD SP TARGET SP HTTP/1.1`; missing or extra fields and
+WebSocket upgrades over HTTP/1.0 are rejected before route policy runs.
 
 Guards run after RFC 6455 validation and exact route lookup, but before active
 WebSocket capacity admission. Rejected sockets therefore do not consume an
@@ -112,7 +114,10 @@ a replacement affects only subsequent upgrades. Registration is serialized per
 application across both Python route dictionaries and the native route map, so
 concurrent free-threaded replacements cannot split handler/guard state. If
 native registration fails, the Python route dictionaries retain the previous
-route.
+route. Startup registration snapshots route paths rather than iterating a live
+dictionary, then reads each current handler/guard pair immediately before its
+native add. Reentrant additions register live, and a reentrant replacement of a
+not-yet-processed path cannot be overwritten by stale startup state.
 
 ## Handler Types
 
