@@ -37,9 +37,10 @@ def guarded_server(tmp_path_factory: pytest.TempPathFactory):
         from turboapi.websockets import WebSocket, WebSocketDisconnect
 
         app = TurboAPI(title="ws-guard-e2e", version="0.0.1")
-        state = {{"handled": 0, "swapped": False}}
+        state = {{"guarded": 0, "handled": 0, "swapped": False}}
 
         def guard(request: WebSocketUpgradeRequest):
+            state["guarded"] += 1
             if request.headers.get("origin") != "https://allowed.example":
                 return WebSocketUpgradeRejection(403)
             if request.headers.get("authorization") != "Bearer integration-credential":
@@ -151,15 +152,18 @@ def _upgrade(
     authorization: str | None = None,
     origin: str | None = "https://allowed.example",
     security_headers: list[tuple[str, str]] | None = None,
+    include_host: bool = True,
+    connection: str = "Upgrade",
 ) -> tuple[socket.socket, int, bytes]:
     host, port_text = server.rsplit(":", 1)
     client = socket.create_connection((host, int(port_text)), timeout=2)
     lines = [
         f"GET {path} HTTP/1.1",
-        f"Host: {server}",
         "Upgrade: websocket",
-        "Connection: Upgrade",
+        f"Connection: {connection}",
     ]
+    if include_host:
+        lines.insert(1, f"Host: {server}")
     if security_headers is None:
         lines.extend(
             [
@@ -326,6 +330,87 @@ def test_origin_allowlist_and_request_metadata(guarded_server) -> None:
 
 
 @pytest.mark.parametrize(
+    ("key", "expected_status"),
+    [
+        ("not%%%base64%%%%%%%%%%%", 400),
+        (base64.b64encode(b"x" * 15).decode("ascii"), 400),
+        (base64.b64encode(b"x" * 17).decode("ascii"), 400),
+        ("dGhlIHNhbXBsZSBub25jZR==", 400),
+    ],
+)
+def test_invalid_websocket_key_fails_before_guard(
+    guarded_server, key: str, expected_status: int
+) -> None:
+    server, _log_path = guarded_server
+    before = _stats(server)
+    security_headers = [
+        (name, key if name.lower() == "sec-websocket-key" else value)
+        for name, value in _valid_security_headers()
+    ]
+    client, status, response = _upgrade(
+        server,
+        "/guarded?tenant=alpha",
+        security_headers=security_headers,
+    )
+    try:
+        assert status == expected_status
+        assert b"101 Switching Protocols" not in response
+    finally:
+        client.close()
+    after = _stats(server)
+    assert after["guarded"] == before["guarded"]
+    assert after["handled"] == before["handled"]
+
+
+@pytest.mark.parametrize(
+    "upgrade_kwargs,security_headers,expected_status",
+    [
+        ({"include_host": False}, _valid_security_headers(), 400),
+        ({"connection": "keep-alive"}, _valid_security_headers(), 400),
+        (
+            {},
+            [
+                header
+                for header in _valid_security_headers()
+                if header[0].lower() != "sec-websocket-key"
+            ],
+            400,
+        ),
+        (
+            {},
+            [
+                (name, "12" if name.lower() == "sec-websocket-version" else value)
+                for name, value in _valid_security_headers()
+            ],
+            426,
+        ),
+    ],
+)
+def test_mandatory_handshake_validation_precedes_guard(
+    guarded_server,
+    upgrade_kwargs: dict[str, object],
+    security_headers: list[tuple[str, str]],
+    expected_status: int,
+) -> None:
+    server, _log_path = guarded_server
+    before = _stats(server)
+    client, status, response = _upgrade(
+        server,
+        "/guarded?tenant=alpha",
+        security_headers=security_headers,
+        **upgrade_kwargs,
+    )
+    try:
+        assert status == expected_status
+        assert b"101 Switching Protocols" not in response
+    finally:
+        client.close()
+    after = _stats(server)
+    assert after["guarded"] == before["guarded"]
+    assert after["handled"] == before["handled"]
+
+
+@pytest.mark.parametrize(
     "duplicate_headers",
     [
         [
@@ -360,17 +445,17 @@ def test_origin_allowlist_and_request_metadata(guarded_server) -> None:
             ("sec-websocket-version", "12"),
             ("SEC-WEBSOCKET-VERSION", "13"),
         ],
+        [("Host", "allowed.example"), ("hOsT", "denied.example")],
     ],
 )
 def test_duplicate_security_headers_fail_before_guard(
     guarded_server, duplicate_headers: list[tuple[str, str]]
 ) -> None:
     server, _log_path = guarded_server
+    before = _stats(server)
     duplicate_name = duplicate_headers[0][0].lower()
     remaining_headers = [
-        header
-        for header in _valid_security_headers()
-        if header[0].lower() != duplicate_name
+        header for header in _valid_security_headers() if header[0].lower() != duplicate_name
     ]
     client, status, response = _upgrade(
         server,
@@ -385,6 +470,9 @@ def test_duplicate_security_headers_fail_before_guard(
         assert body == b""
     finally:
         client.close()
+    after = _stats(server)
+    assert after["guarded"] == before["guarded"]
+    assert after["handled"] == before["handled"]
 
 
 def test_guard_runs_before_capacity_admission(guarded_server) -> None:

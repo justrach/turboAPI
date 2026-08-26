@@ -94,10 +94,13 @@ application-selected rejection statuses are `400`, `401`, `403`, `404`, `429`,
 an empty body and fixed bounded headers; request metadata and exception text are
 never included. A 401 rejection includes `WWW-Authenticate: Bearer`.
 
-TurboAPI rejects duplicate `Authorization`, `Origin`, `Sec-WebSocket-Key`, or
-`Sec-WebSocket-Version` headers with HTTP 400 before invoking the guard. Header
-names are compared case-insensitively, preventing an edge and application from
-making different first-value/last-value authentication decisions.
+TurboAPI rejects duplicate `Host`, `Authorization`, `Origin`,
+`Sec-WebSocket-Key`, or `Sec-WebSocket-Version` headers with HTTP 400 before
+invoking the guard. Header names are compared case-insensitively, preventing an
+edge and application from making different first-value/last-value decisions.
+Before guard evaluation, the native core also requires the RFC 6455 handshake
+fields, including a non-empty `Host`, version 13, and a canonical Base64
+`Sec-WebSocket-Key` that decodes to exactly 16 bytes.
 
 Guards run after RFC 6455 validation and exact route lookup, but before active
 WebSocket capacity admission. Rejected sockets therefore do not consume an
@@ -105,8 +108,11 @@ active WebSocket slot. Keep guard work short and non-blocking.
 
 Live route replacement is synchronized. An in-flight upgrade retains one owned
 handler/guard snapshot from policy evaluation through connection handling, while
-a replacement affects only subsequent upgrades. If native registration fails,
-the Python route dictionaries retain the previous route.
+a replacement affects only subsequent upgrades. Registration is serialized per
+application across both Python route dictionaries and the native route map, so
+concurrent free-threaded replacements cannot split handler/guard state. If
+native registration fails, the Python route dictionaries retain the previous
+route.
 
 ## Handler Types
 

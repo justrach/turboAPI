@@ -5,6 +5,7 @@ FastAPI-compatible application with revolutionary performance
 
 import asyncio
 import inspect
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -85,6 +86,11 @@ class TurboAPI(Router):
         self._mounts: dict[str, Any] = {}
         self._websocket_routes: dict[str, Callable] = {}
         self._websocket_guards: dict[str, Callable] = {}
+        # A route registration is one transaction across the Python handler
+        # and guard maps and the live native route map.  RLock is intentional:
+        # replacing a native route may decref an old callback whose finalizer
+        # re-enters application registration on the same thread.
+        self._websocket_registration_lock = threading.RLock()
         self._exception_handlers: dict[type, Callable] = {}
         self._openapi_schema: dict | None = None
 
@@ -212,51 +218,74 @@ class TurboAPI(Router):
             raise TypeError("WebSocket guard must be callable")
 
         def decorator(func: Callable):
-            missing = object()
-            previous_handler = self._websocket_routes.get(path, missing)
-            previous_guard = self._websocket_guards.get(path, missing)
-            self._websocket_routes[path] = func
-            if guard is None:
-                self._websocket_guards.pop(path, None)
-            else:
-                self._websocket_guards[path] = guard
-            # Register with the Zig server if it's running. The decorator may
-            # be invoked at module-import time (before app.run()) — in that
-            # case we keep _websocket_routes around and register lazily on
-            # run(). If a turbonet server instance already exists, register
-            # immediately so the route is live without an app.run() round-trip
-            # (useful in tests).
-            try:
-                import importlib.util
-            except ImportError:
-                return func
-
-            try:
-                if importlib.util.find_spec("turboapi.turbonet") is not None:
-                    srv = getattr(self, "_turbonet_server", None) or getattr(
-                        self, "zig_server", None
-                    )
-                    if srv is not None and hasattr(srv, "add_websocket_route"):
-                        if guard is None:
-                            srv.add_websocket_route(path, func)
-                        else:
-                            srv.add_websocket_route(path, func, guard)
-            except BaseException:
-                # Native registration is transactional. Mirror that guarantee
-                # in Python so a failed live replacement does not leave the
-                # application dictionaries disagreeing with the native map.
-                if previous_handler is missing:
-                    self._websocket_routes.pop(path, None)
-                else:
-                    self._websocket_routes[path] = previous_handler
-                if previous_guard is missing:
+            with self._websocket_registration_lock:
+                missing = object()
+                previous_handler = self._websocket_routes.get(path, missing)
+                previous_guard = self._websocket_guards.get(path, missing)
+                self._websocket_routes[path] = func
+                if guard is None:
                     self._websocket_guards.pop(path, None)
                 else:
-                    self._websocket_guards[path] = previous_guard
-                raise
-            return func
+                    self._websocket_guards[path] = guard
+                # Register with the Zig server if it's running. The decorator
+                # may be invoked at module-import time (before app.run()) — in
+                # that case we keep the dictionaries and register lazily on
+                # run(). The lock spans the complete Python/native transaction
+                # so free-threaded callers cannot observe or roll back another
+                # registration's state.
+                try:
+                    import importlib.util
+                except ImportError:
+                    return func
+
+                try:
+                    if importlib.util.find_spec("turboapi.turbonet") is not None:
+                        srv = getattr(self, "_turbonet_server", None) or getattr(
+                            self, "zig_server", None
+                        )
+                        if srv is not None and hasattr(srv, "add_websocket_route"):
+                            if guard is None:
+                                srv.add_websocket_route(path, func)
+                            else:
+                                srv.add_websocket_route(path, func, guard)
+                except BaseException:
+                    # Native registration is transactional. Mirror that
+                    # guarantee in Python so a failed live replacement does not
+                    # leave the application dictionaries disagreeing with the
+                    # native map.
+                    if previous_handler is missing:
+                        self._websocket_routes.pop(path, None)
+                    else:
+                        self._websocket_routes[path] = previous_handler
+                    if previous_guard is missing:
+                        self._websocket_guards.pop(path, None)
+                    else:
+                        self._websocket_guards[path] = previous_guard
+                    raise
+                return func
 
         return decorator
+
+    def _register_websocket_routes_with_server(self, server: Any) -> tuple[str, ...]:
+        """Register the current Python WebSocket snapshot with a native server.
+
+        Startup registration shares the same lock as live decorator updates.
+        This prevents a free-threaded update from landing between reading the
+        handler and its guard or racing a duplicate native registration.
+        """
+        if not hasattr(server, "add_websocket_route"):
+            return ()
+
+        registered: list[str] = []
+        with self._websocket_registration_lock:
+            for ws_path, ws_handler in self._websocket_routes.items():
+                ws_guard = self._websocket_guards.get(ws_path)
+                if ws_guard is None:
+                    server.add_websocket_route(ws_path, ws_handler)
+                else:
+                    server.add_websocket_route(ws_path, ws_handler, ws_guard)
+                registered.append(ws_path)
+        return tuple(registered)
 
     def exception_handler(self, exc_class: type):
         """Register a custom exception handler.
@@ -500,14 +529,8 @@ class TurboAPI(Router):
             for route in self.registry.get_routes():
                 server.add_route(route.method.value, route.path, route.handler)
 
-            # Register WebSocket routes registered via @app.websocket(...)
-            for ws_path, ws_handler in self._websocket_routes.items():
-                if hasattr(server, "add_websocket_route"):
-                    ws_guard = self._websocket_guards.get(ws_path)
-                    if ws_guard is None:
-                        server.add_websocket_route(ws_path, ws_handler)
-                    else:
-                        server.add_websocket_route(ws_path, ws_handler, ws_guard)
+            # Serialize startup registration with live decorator updates.
+            self._register_websocket_routes_with_server(server)
 
             print("\n[SERVER] Starting Zig server...")
             server.run()

@@ -1343,13 +1343,16 @@ fn findHeader(headers: []const HeaderPair, name: []const u8) ?[]const u8 {
 /// values rather than inheriting first-value/last-value behavior that can differ
 /// between the edge, the native core, and an application guard.
 fn hasDuplicateWebSocketSecurityHeader(headers: []const HeaderPair) bool {
+    var host_seen = false;
     var authorization_seen = false;
     var origin_seen = false;
     var key_seen = false;
     var version_seen = false;
 
     for (headers) |header| {
-        const seen = if (std.ascii.eqlIgnoreCase(header.name, "authorization"))
+        const seen = if (std.ascii.eqlIgnoreCase(header.name, "host"))
+            &host_seen
+        else if (std.ascii.eqlIgnoreCase(header.name, "authorization"))
             &authorization_seen
         else if (std.ascii.eqlIgnoreCase(header.name, "origin"))
             &origin_seen
@@ -1367,6 +1370,7 @@ fn hasDuplicateWebSocketSecurityHeader(headers: []const HeaderPair) bool {
 
 test "WebSocket security header duplicates are case-insensitive" {
     const unique = [_]HeaderPair{
+        .{ .name = "Host", .value = "example.test" },
         .{ .name = "Authorization", .value = "Bearer one" },
         .{ .name = "Origin", .value = "https://example.test" },
         .{ .name = "Sec-WebSocket-Key", .value = "key" },
@@ -1379,6 +1383,31 @@ test "WebSocket security header duplicates are case-insensitive" {
         .{ .name = "AUTHORIZATION", .value = "Bearer two" },
     };
     try std.testing.expect(hasDuplicateWebSocketSecurityHeader(&duplicate));
+}
+
+/// RFC 6455 section 4.2.1 requires a standard Base64 value that decodes to
+/// exactly 16 bytes. Re-encoding also rejects non-canonical padding/bits, so
+/// the value hashed into Sec-WebSocket-Accept has one unambiguous encoding.
+fn isValidWebSocketKey(key: []const u8) bool {
+    if (key.len != std.base64.standard.Encoder.calcSize(16)) return false;
+    const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(key) catch return false;
+    if (decoded_len != 16) return false;
+
+    var decoded: [16]u8 = undefined;
+    std.base64.standard.Decoder.decode(&decoded, key) catch return false;
+
+    var canonical: [24]u8 = undefined;
+    const encoded = std.base64.standard.Encoder.encode(&canonical, &decoded);
+    return std.mem.eql(u8, key, encoded);
+}
+
+test "WebSocket key is canonical Base64 for exactly 16 decoded bytes" {
+    try std.testing.expect(isValidWebSocketKey("dGhlIHNhbXBsZSBub25jZQ=="));
+    try std.testing.expect(isValidWebSocketKey("eHh4eHh4eHh4eHh4eHh4eA=="));
+    try std.testing.expect(!isValidWebSocketKey("not%%%base64%%%%%%%%%%%"));
+    try std.testing.expect(!isValidWebSocketKey("eHh4eHh4eHh4eHh4eHh4"));
+    try std.testing.expect(!isValidWebSocketKey("eHh4eHh4eHh4eHh4eHh4eHg="));
+    try std.testing.expect(!isValidWebSocketKey("dGhlIHNhbXBsZSBub25jZR=="));
 }
 
 /// Case-insensitive substring search in a comma-separated header value.
@@ -1434,6 +1463,15 @@ fn tryWebSocketUpgrade(
         return .handled;
     }
 
+    const host_h = findHeader(headers.items, "host") orelse {
+        sendUpgradeError(stream, 400, "Bad Request");
+        return .handled;
+    };
+    if (std.mem.trim(u8, host_h, " \t").len == 0) {
+        sendUpgradeError(stream, 400, "Bad Request");
+        return .handled;
+    }
+
     const conn_h = findHeader(headers.items, "connection") orelse {
         sendUpgradeError(stream, 400, "Bad Request");
         return .handled;
@@ -1460,6 +1498,10 @@ fn tryWebSocketUpgrade(
         return .handled;
     };
     const key = std.mem.trim(u8, key_h, " \t");
+    if (!isValidWebSocketKey(key)) {
+        sendUpgradeError(stream, 400, "Bad Request");
+        return .handled;
+    }
 
     // Route lookup and any application policy must run after the RFC 6455
     // request has been validated, but before capacity admission and the 101.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import threading
 from collections.abc import Mapping
 
 import pytest
@@ -130,3 +131,248 @@ def test_failed_live_registration_rolls_back_python_routes(monkeypatch) -> None:
         app.websocket("/new", guard=replacement_guard)(replacement_handler)
     assert "/new" not in app._websocket_routes
     assert "/new" not in app._websocket_guards
+
+
+def test_concurrent_successful_registrations_keep_python_and_native_in_sync(
+    monkeypatch,
+) -> None:
+    app = TurboAPI()
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
+
+    async def first_handler(_websocket) -> None:
+        pass
+
+    async def second_handler(_websocket) -> None:
+        pass
+
+    def first_guard(_request: WebSocketUpgradeRequest) -> bool:
+        return True
+
+    def second_guard(_request: WebSocketUpgradeRequest) -> bool:
+        return True
+
+    first_entered_native = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    second_entered_native = threading.Event()
+
+    class ReorderedServer:
+        current = None
+
+        def add_websocket_route(self, path, handler, guard=None) -> None:
+            if handler is first_handler:
+                first_entered_native.set()
+                assert release_first.wait(2)
+            elif handler is second_handler:
+                second_entered_native.set()
+            self.current = (path, handler, guard)
+
+    server = ReorderedServer()
+    app.zig_server = server
+    errors: list[BaseException] = []
+
+    def register_first() -> None:
+        try:
+            app.websocket("/race", guard=first_guard)(first_handler)
+        except BaseException as exc:  # pragma: no cover - assertion aid
+            errors.append(exc)
+
+    def register_second() -> None:
+        second_started.set()
+        try:
+            app.websocket("/race", guard=second_guard)(second_handler)
+        except BaseException as exc:  # pragma: no cover - assertion aid
+            errors.append(exc)
+
+    first = threading.Thread(target=register_first)
+    second = threading.Thread(target=register_second)
+    first.start()
+    assert first_entered_native.wait(2)
+    second.start()
+    assert second_started.wait(2)
+    assert not second_entered_native.wait(0.05)
+    release_first.set()
+    first.join(2)
+    second.join(2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert server.current == ("/race", second_handler, second_guard)
+    assert app._websocket_routes["/race"] is second_handler
+    assert app._websocket_guards["/race"] is second_guard
+
+
+@pytest.mark.parametrize("failure_first", [True, False])
+def test_concurrent_success_and_failure_roll_back_their_own_snapshot(
+    monkeypatch, failure_first: bool
+) -> None:
+    app = TurboAPI()
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
+
+    def old_guard(_request: WebSocketUpgradeRequest) -> bool:
+        return True
+
+    async def old_handler(_websocket) -> None:
+        pass
+
+    app.websocket("/race", guard=old_guard)(old_handler)
+
+    async def successful_handler(_websocket) -> None:
+        pass
+
+    async def failing_handler(_websocket) -> None:
+        pass
+
+    def successful_guard(_request: WebSocketUpgradeRequest) -> bool:
+        return True
+
+    def failing_guard(_request: WebSocketUpgradeRequest) -> bool:
+        return False
+
+    first_handler = failing_handler if failure_first else successful_handler
+    first_guard = failing_guard if failure_first else successful_guard
+    second_handler = successful_handler if failure_first else failing_handler
+    second_guard = successful_guard if failure_first else failing_guard
+    first_entered_native = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    second_entered_native = threading.Event()
+
+    class ReorderedServer:
+        current = ("/race", old_handler, old_guard)
+
+        def add_websocket_route(self, path, handler, guard=None) -> None:
+            if handler is first_handler:
+                first_entered_native.set()
+                assert release_first.wait(2)
+            elif handler is second_handler:
+                second_entered_native.set()
+            if handler is failing_handler:
+                raise RuntimeError("native registration failed")
+            self.current = (path, handler, guard)
+
+    server = ReorderedServer()
+    app.zig_server = server
+    errors: list[tuple[object, BaseException]] = []
+
+    def register(handler, guard, started=None) -> None:
+        if started is not None:
+            started.set()
+        try:
+            app.websocket("/race", guard=guard)(handler)
+        except BaseException as exc:
+            errors.append((handler, exc))
+
+    first = threading.Thread(target=register, args=(first_handler, first_guard))
+    second = threading.Thread(
+        target=register,
+        args=(second_handler, second_guard, second_started),
+    )
+    first.start()
+    assert first_entered_native.wait(2)
+    second.start()
+    assert second_started.wait(2)
+    assert not second_entered_native.wait(0.05)
+    release_first.set()
+    first.join(2)
+    second.join(2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert len(errors) == 1
+    assert errors[0][0] is failing_handler
+    assert isinstance(errors[0][1], RuntimeError)
+    assert server.current == ("/race", successful_handler, successful_guard)
+    assert app._websocket_routes["/race"] is successful_handler
+    assert app._websocket_guards["/race"] is successful_guard
+
+
+def test_live_registration_lock_is_reentrant(monkeypatch) -> None:
+    app = TurboAPI()
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
+
+    async def inner_handler(_websocket) -> None:
+        pass
+
+    async def outer_handler(_websocket) -> None:
+        pass
+
+    class ReentrantServer:
+        routes: dict[str, object] = {}
+
+        def add_websocket_route(self, path, handler, guard=None) -> None:
+            self.routes[path] = (handler, guard)
+            if path == "/outer":
+                app.websocket("/inner")(inner_handler)
+
+    server = ReentrantServer()
+    app.zig_server = server
+    app.websocket("/outer")(outer_handler)
+
+    assert server.routes["/outer"] == (outer_handler, None)
+    assert server.routes["/inner"] == (inner_handler, None)
+    assert app._websocket_routes["/outer"] is outer_handler
+    assert app._websocket_routes["/inner"] is inner_handler
+
+
+def test_startup_snapshot_is_serialized_with_live_registration(monkeypatch) -> None:
+    app = TurboAPI()
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
+
+    def old_guard(_request: WebSocketUpgradeRequest) -> bool:
+        return True
+
+    def new_guard(_request: WebSocketUpgradeRequest) -> bool:
+        return True
+
+    async def old_handler(_websocket) -> None:
+        pass
+
+    async def new_handler(_websocket) -> None:
+        pass
+
+    app.websocket("/race", guard=old_guard)(old_handler)
+    startup_entered_native = threading.Event()
+    release_startup = threading.Event()
+    replacement_started = threading.Event()
+    replacement_entered_native = threading.Event()
+
+    class BlockingStartupServer:
+        current = None
+
+        def add_websocket_route(self, path, handler, guard=None) -> None:
+            if handler is old_handler:
+                startup_entered_native.set()
+                assert release_startup.wait(2)
+            elif handler is new_handler:
+                replacement_entered_native.set()
+            self.current = (path, handler, guard)
+
+    server = BlockingStartupServer()
+    app.zig_server = server
+
+    startup = threading.Thread(
+        target=app._register_websocket_routes_with_server,
+        args=(server,),
+    )
+
+    def replace() -> None:
+        replacement_started.set()
+        app.websocket("/race", guard=new_guard)(new_handler)
+
+    replacement = threading.Thread(target=replace)
+    startup.start()
+    assert startup_entered_native.wait(2)
+    replacement.start()
+    assert replacement_started.wait(2)
+    assert not replacement_entered_native.wait(0.05)
+    release_startup.set()
+    startup.join(2)
+    replacement.join(2)
+
+    assert not startup.is_alive()
+    assert not replacement.is_alive()
+    assert server.current == ("/race", new_handler, new_guard)
+    assert app._websocket_routes["/race"] is new_handler
+    assert app._websocket_guards["/race"] is new_guard
