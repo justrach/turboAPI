@@ -10,6 +10,14 @@ import os
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
+# Private native tuple-ABI constants. The Zig boundary independently enforces
+# the same limits; the marker prevents Python-side preflight failures from
+# being confused with a legitimate headerless response.
+_NATIVE_HEADER_ERROR = "__turboapi_response_header_error__"
+_NATIVE_MAX_HEADER_PAIRS = 128
+_NATIVE_MAX_HEADER_BYTES = 16 * 1024
+_NATIVE_HEADER_ERROR_TUPLE = (500, "application/json", b"", _NATIVE_HEADER_ERROR)
+
 
 class Response:
     """Base response class."""
@@ -48,7 +56,7 @@ class Response:
         if isinstance(self.body, bytes):
             try:
                 return json.loads(self.body.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
+            except json.JSONDecodeError, UnicodeDecodeError:
                 return self.body.decode("utf-8")
         return self._content
 
@@ -61,16 +69,38 @@ class Response:
         validates every pair before writing it to the wire.
         """
         body = self.body if isinstance(self.body, bytes) else self.body.encode("utf-8")
-        base = (self.status_code, self.media_type or "application/json", body)
         if not self.headers:
-            return base
+            return (self.status_code, self.media_type or "application/json", body)
 
-        flat_headers: list[str] = []
-        for name, value in self.headers.items():
-            values = value if isinstance(value, (list, tuple)) else (value,)
-            for item in values:
-                flat_headers.extend((str(name), str(item)))
-        return (*base, tuple(flat_headers))
+        try:
+            flat_headers: list[str] = []
+            pair_count = 0
+            serialized_bytes = 0
+            for name, value in self.headers.items():
+                values = value if isinstance(value, (list, tuple)) else (value,)
+                for item in values:
+                    name_text = str(name)
+                    value_text = str(item)
+                    pair_count += 1
+                    serialized_bytes += (
+                        len(name_text.encode("utf-8"))
+                        + len(value_text.encode("utf-8"))
+                        + 4  # leading CRLF plus ": " separator
+                    )
+                    if (
+                        pair_count > _NATIVE_MAX_HEADER_PAIRS
+                        or serialized_bytes > _NATIVE_MAX_HEADER_BYTES
+                    ):
+                        return _NATIVE_HEADER_ERROR_TUPLE
+                    flat_headers.extend((name_text, value_text))
+            return (
+                self.status_code,
+                self.media_type or "application/json",
+                body,
+                tuple(flat_headers),
+            )
+        except Exception:
+            return _NATIVE_HEADER_ERROR_TUPLE
 
     def set_cookie(
         self,

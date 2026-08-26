@@ -31,6 +31,11 @@ def metadata_server(request: pytest.FixtureRequest, tmp_path):
 
         from dhi import BaseModel
         from turboapi import JSONResponse, TurboAPI
+        from turboapi.responses import (
+            _NATIVE_HEADER_ERROR,
+            _NATIVE_MAX_HEADER_BYTES,
+            _NATIVE_MAX_HEADER_PAIRS,
+        )
 
         app = TurboAPI(title="fast-response-metadata", version="0.0.1")
         calls = {{}}
@@ -86,8 +91,9 @@ def metadata_server(request: pytest.FixtureRequest, tmp_path):
 
         @app.get("/malformed")
         def malformed():
+            calls["malformed"] = calls.get("malformed", 0) + 1
             return JSONResponse(
-                {{"safe": True}},
+                {{"secret": "malformed-original", "calls": calls["malformed"]}},
                 status_code=210,
                 headers={{
                     "x-safe": "kept",
@@ -97,6 +103,61 @@ def metadata_server(request: pytest.FixtureRequest, tmp_path):
                     "transfer-encoding": "chunked",
                 }},
             )
+
+        @app.get("/too-many")
+        def too_many():
+            calls["too-many"] = calls.get("too-many", 0) + 1
+            headers = {{f"x-{{index:03d}}": "v" for index in range(_NATIVE_MAX_HEADER_PAIRS)}}
+            headers["strict-transport-security"] = "max-age=31536000"
+            return JSONResponse(
+                {{"secret": "too-many-original", "calls": calls["too-many"]}},
+                status_code=299,
+                headers=headers,
+            )
+
+        @app.get("/too-large")
+        def too_large():
+            calls["too-large"] = calls.get("too-large", 0) + 1
+            exact_value = "z" * (_NATIVE_MAX_HEADER_BYTES - len("x-fill") - 4)
+            return JSONResponse(
+                {{"secret": "too-large-original", "calls": calls["too-large"]}},
+                status_code=298,
+                headers={{"x-fill": exact_value, "cache-control": "no-store"}},
+            )
+
+        class OomHeaderValue:
+            def __str__(self):
+                raise MemoryError("simulated header normalization OOM")
+
+        class InjectedMarkerResponse(JSONResponse):
+            def _native_tuple(self):
+                return (
+                    self.status_code,
+                    self.media_type,
+                    self.body,
+                    _NATIVE_HEADER_ERROR,
+                )
+
+        @app.get("/injected-marker")
+        def injected_marker():
+            calls["injected-marker"] = calls.get("injected-marker", 0) + 1
+            return InjectedMarkerResponse(
+                {{"secret": "injected-marker-original", "calls": calls["injected-marker"]}},
+                status_code=296,
+            )
+
+        @app.get("/oom-marker")
+        def oom_marker():
+            calls["oom-marker"] = calls.get("oom-marker", 0) + 1
+            return JSONResponse(
+                {{"secret": "oom-marker-original", "calls": calls["oom-marker"]}},
+                status_code=297,
+                headers={{"x-oom": OomHeaderValue()}},
+            )
+
+        @app.get("/stats/{{name}}")
+        def stats(name: str):
+            return {{"calls": calls.get(name, 0)}}
 
         if __name__ == "__main__":
             app.run(host="127.0.0.1", port={port})
@@ -209,7 +270,7 @@ def test_all_native_fast_classifications_preserve_response_metadata(metadata_ser
         assert classification in log
 
 
-def test_duplicate_and_malformed_headers_are_safe_on_the_wire(metadata_server):
+def test_duplicate_headers_survive_initial_response_and_cache_hit(metadata_server):
     port, _, _ = metadata_server
 
     for _ in range(2):
@@ -221,14 +282,29 @@ def test_duplicate_and_malformed_headers_are_safe_on_the_wire(metadata_server):
         assert set_cookies[1].startswith("second=two;")
         assert json.loads(body) == {"ok": True}
 
-        status, headers, body = _request(port, "GET", "/malformed")
-        normalized = [(name.lower(), value) for name, value in headers]
-        assert status == 210
-        assert ("x-safe", "kept") in normalized
-        assert not any(name == "x-injected" for name, _ in normalized)
-        assert not any(
-            "injected" in name or "injected" in value.lower() for name, value in normalized
-        )
-        assert not any(name == "transfer-encoding" for name, _ in normalized)
-        assert ("content-length", str(len(body))) in normalized
-        assert json.loads(body) == {"safe": True}
+
+def test_invalid_over_limit_and_error_marker_responses_fail_closed(metadata_server):
+    port, _, _ = metadata_server
+    cases = (
+        ("malformed", {"x-safe", "x-injected", "transfer-encoding"}),
+        ("too-many", {"x-000", "strict-transport-security"}),
+        ("too-large", {"x-fill", "cache-control"}),
+        ("injected-marker", set()),
+        ("oom-marker", set()),
+    )
+
+    for route, forbidden_headers in cases:
+        for _ in range(2):
+            status, headers, body = _request(port, "GET", f"/{route}")
+            normalized = [(name.lower(), value) for name, value in headers]
+            names = {name for name, _ in normalized}
+            assert status == 500
+            assert ("content-type", "application/json") in normalized
+            assert ("content-length", str(len(body))) in normalized
+            assert not names.intersection(forbidden_headers)
+            assert body == b'{"error":"invalid native response metadata"}'
+            assert b"original" not in body
+
+        status, _, body = _request(port, "GET", f"/stats/{route}")
+        assert status == 200
+        assert json.loads(body) == {"calls": 2}

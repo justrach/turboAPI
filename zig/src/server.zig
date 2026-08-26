@@ -352,6 +352,7 @@ var response_cache: ?std.StringHashMap(*CachedResponse) = null;
 var response_cache_lock: std.Io.Mutex = .init;
 var response_cache_count: usize = 0;
 const MAX_CACHE_ENTRIES: usize = 10_000; // bounded to prevent OOM via unique paths
+const CacheInsertResult = enum { cached, capacity, out_of_memory };
 var model_schemas: ?std.StringHashMap(dhi.ModelSchema) = null;
 var router: ?router_mod.Router = null;
 var server_host: []const u8 = "127.0.0.1";
@@ -467,34 +468,35 @@ fn getCachedResponse(key: []const u8) ?*const CachedResponse {
 }
 
 /// Cache an owned response, respecting MAX_CACHE_ENTRIES to prevent OOM.
-fn cacheResponse(key: []const u8, cached_response: *CachedResponse) void {
+fn cacheResponse(key: []const u8, cached_response: *CachedResponse) CacheInsertResult {
     response_cache_lock.lockUncancelable(runtime.io);
     defer response_cache_lock.unlock(runtime.io);
 
     if (response_cache_count >= MAX_CACHE_ENTRIES) {
         cached_response.destroy();
-        return;
+        return .capacity;
     }
 
     const key_dupe = allocator.dupe(u8, key) catch {
         cached_response.destroy();
-        return;
+        return .out_of_memory;
     };
     const cache = getResponseCache();
     const gop = cache.getOrPut(key_dupe) catch {
         cached_response.destroy();
         allocator.free(key_dupe);
-        return;
+        return .out_of_memory;
     };
 
     if (gop.found_existing) {
         cached_response.destroy();
         allocator.free(key_dupe);
-        return;
+        return .cached;
     }
 
     gop.value_ptr.* = cached_response;
     response_cache_count += 1;
+    return .cached;
 }
 
 fn getCachedEntryResponse(entry: *const HandlerEntry) ?*const CachedResponse {
@@ -503,22 +505,23 @@ fn getCachedEntryResponse(entry: *const HandlerEntry) ?*const CachedResponse {
     return @ptrFromInt(ptr_val);
 }
 
-fn cacheEntryResponse(entry: *HandlerEntry, cached_response: *CachedResponse) void {
+fn cacheEntryResponse(entry: *HandlerEntry, cached_response: *CachedResponse) CacheInsertResult {
     response_cache_lock.lockUncancelable(runtime.io);
     defer response_cache_lock.unlock(runtime.io);
 
     if (entry.cached_response_ptr.load(.monotonic) != 0) {
         cached_response.destroy();
-        return;
+        return .cached;
     }
 
     if (response_cache_count >= MAX_CACHE_ENTRIES) {
         cached_response.destroy();
-        return;
+        return .capacity;
     }
 
     entry.cached_response_ptr.store(@intFromPtr(cached_response), .release);
     response_cache_count += 1;
+    return .cached;
 }
 
 fn sendCachedJsonBody(stream: std.Io.net.Stream, body: []const u8) void {
@@ -4125,6 +4128,9 @@ fn ffiError() FfiResponse {
 
 const MAX_RESPONSE_HEADER_PAIRS: usize = 128;
 const MAX_RESPONSE_HEADER_BYTES: usize = 16 * 1024;
+const RESPONSE_HEADER_ERROR_MARKER = "__turboapi_response_header_error__";
+const CONTROLLED_RESPONSE_ERROR_BODY = "{\"error\":\"invalid native response metadata\"}";
+const TupleResponseError = error{ InvalidResponseTuple, InvalidResponseHeaders, OutOfMemory };
 
 fn isResponseHeaderToken(name: []const u8) bool {
     if (name.len == 0) return false;
@@ -4162,47 +4168,74 @@ fn isZigOwnedResponseHeader(name: []const u8) bool {
     return false;
 }
 
-fn renderTupleExtraHeaders(result: *c.PyObject) ?[]u8 {
-    const headers_obj = py.PyTuple_GetItem(result, 3) orelse return null;
-    if (c.PyTuple_Check(headers_obj) == 0) return null;
+fn appendValidatedResponseHeader(
+    rendered: *std.ArrayList(u8),
+    header_allocator: std.mem.Allocator,
+    name: []const u8,
+    value: []const u8,
+) TupleResponseError!void {
+    if (!isResponseHeaderToken(name) or !isSafeResponseHeaderValue(value) or isZigOwnedResponseHeader(name)) {
+        return error.InvalidResponseHeaders;
+    }
+    if (name.len > MAX_RESPONSE_HEADER_BYTES - 4) return error.InvalidResponseHeaders;
+    const value_capacity = MAX_RESPONSE_HEADER_BYTES - 4 - name.len;
+    if (value.len > value_capacity) return error.InvalidResponseHeaders;
+    const required = name.len + value.len + 4;
+    if (rendered.items.len > MAX_RESPONSE_HEADER_BYTES - required) return error.InvalidResponseHeaders;
 
-    const item_count_signed = c.PyTuple_Size(headers_obj);
-    if (item_count_signed <= 0 or @mod(item_count_signed, 2) != 0) return null;
-    const pair_count = @min(@as(usize, @intCast(@divExact(item_count_signed, 2))), MAX_RESPONSE_HEADER_PAIRS);
+    try rendered.appendSlice(header_allocator, "\r\n");
+    try rendered.appendSlice(header_allocator, name);
+    try rendered.appendSlice(header_allocator, ": ");
+    try rendered.appendSlice(header_allocator, value);
+}
+
+fn responseHeaderPairCount(item_count_signed: c.Py_ssize_t) TupleResponseError!usize {
+    if (item_count_signed <= 0 or @mod(item_count_signed, 2) != 0) return error.InvalidResponseHeaders;
+    if (item_count_signed > MAX_RESPONSE_HEADER_PAIRS * 2) return error.InvalidResponseHeaders;
+    return @intCast(@divExact(item_count_signed, 2));
+}
+
+fn renderTupleExtraHeaders(result: *c.PyObject) TupleResponseError![]u8 {
+    const headers_obj = py.PyTuple_GetItem(result, 3) orelse return error.InvalidResponseHeaders;
+    if (c.PyUnicode_Check(headers_obj) != 0) {
+        var marker_len: c.Py_ssize_t = 0;
+        const marker_ptr = c.PyUnicode_AsUTF8AndSize(headers_obj, &marker_len) orelse {
+            c.PyErr_Clear();
+            return error.InvalidResponseHeaders;
+        };
+        if (marker_len >= 0 and std.mem.eql(u8, marker_ptr[0..@intCast(marker_len)], RESPONSE_HEADER_ERROR_MARKER)) {
+            return error.InvalidResponseHeaders;
+        }
+        return error.InvalidResponseHeaders;
+    }
+    if (c.PyTuple_Check(headers_obj) == 0) return error.InvalidResponseHeaders;
+
+    const pair_count = try responseHeaderPairCount(c.PyTuple_Size(headers_obj));
 
     var rendered: std.ArrayList(u8) = .empty;
     defer rendered.deinit(allocator);
     for (0..pair_count) |pair_index| {
-        const name_obj = py.PyTuple_GetItem(headers_obj, @intCast(pair_index * 2)) orelse continue;
-        const value_obj = py.PyTuple_GetItem(headers_obj, @intCast(pair_index * 2 + 1)) orelse continue;
+        const name_obj = py.PyTuple_GetItem(headers_obj, @intCast(pair_index * 2)) orelse return error.InvalidResponseHeaders;
+        const value_obj = py.PyTuple_GetItem(headers_obj, @intCast(pair_index * 2 + 1)) orelse return error.InvalidResponseHeaders;
 
         var name_len: c.Py_ssize_t = 0;
         const name_ptr = c.PyUnicode_AsUTF8AndSize(name_obj, &name_len) orelse {
             c.PyErr_Clear();
-            continue;
+            return error.InvalidResponseHeaders;
         };
         var value_len: c.Py_ssize_t = 0;
         const value_ptr = c.PyUnicode_AsUTF8AndSize(value_obj, &value_len) orelse {
             c.PyErr_Clear();
-            continue;
+            return error.InvalidResponseHeaders;
         };
-        if (name_len < 0 or value_len < 0) continue;
+        if (name_len < 0 or value_len < 0) return error.InvalidResponseHeaders;
         const name = name_ptr[0..@intCast(name_len)];
         const value = value_ptr[0..@intCast(value_len)];
-        if (!isResponseHeaderToken(name) or !isSafeResponseHeaderValue(value) or isZigOwnedResponseHeader(name)) continue;
-
-        const required = 2 + name.len + 2 + value.len;
-        if (rendered.items.len + required > MAX_RESPONSE_HEADER_BYTES) break;
-        rendered.appendSlice(allocator, "\r\n") catch return null;
-        rendered.appendSlice(allocator, name) catch return null;
-        rendered.appendSlice(allocator, ": ") catch return null;
-        rendered.appendSlice(allocator, value) catch return null;
+        try appendValidatedResponseHeader(&rendered, allocator, name, value);
     }
 
-    if (rendered.items.len == 0) {
-        return null;
-    }
-    return rendered.toOwnedSlice(allocator) catch null;
+    if (rendered.items.len == 0) return error.InvalidResponseHeaders;
+    return try rendered.toOwnedSlice(allocator);
 }
 
 const TupleResponse = struct {
@@ -4228,59 +4261,64 @@ const TupleResponse = struct {
     }
 };
 
-fn extractTupleResponse(result: *c.PyObject) ?TupleResponse {
-    if (c.PyTuple_Check(result) == 0) return null;
+fn extractTupleResponse(result: *c.PyObject) TupleResponseError!TupleResponse {
+    if (c.PyTuple_Check(result) == 0) return error.InvalidResponseTuple;
     const tuple_size = c.PyTuple_Size(result);
-    if (tuple_size < 3) return null;
-    const sc_obj = py.PyTuple_GetItem(result, 0) orelse return null;
-    const ct_obj = py.PyTuple_GetItem(result, 1) orelse return null;
-    const body_obj = py.PyTuple_GetItem(result, 2) orelse return null;
+    if (tuple_size < 3 or tuple_size > 4) return error.InvalidResponseTuple;
+    const sc_obj = py.PyTuple_GetItem(result, 0) orelse return error.InvalidResponseTuple;
+    const ct_obj = py.PyTuple_GetItem(result, 1) orelse return error.InvalidResponseTuple;
+    const body_obj = py.PyTuple_GetItem(result, 2) orelse return error.InvalidResponseTuple;
 
     const status_long = c.PyLong_AsLong(sc_obj);
     if (status_long < 100 or status_long > 599) {
         c.PyErr_Clear();
-        return null;
+        return error.InvalidResponseTuple;
     }
 
     var content_type_len: c.Py_ssize_t = 0;
     const content_type_ptr = c.PyUnicode_AsUTF8AndSize(ct_obj, &content_type_len) orelse {
         c.PyErr_Clear();
-        return null;
+        return error.InvalidResponseTuple;
     };
-    if (content_type_len <= 0) return null;
+    if (content_type_len <= 0) return error.InvalidResponseTuple;
     const content_type = content_type_ptr[0..@intCast(content_type_len)];
-    if (!isSafeResponseHeaderValue(content_type)) return null;
+    if (!isSafeResponseHeaderValue(content_type)) return error.InvalidResponseHeaders;
 
     var body: []const u8 = "";
     if (c.PyUnicode_Check(body_obj) != 0) {
         var body_len: c.Py_ssize_t = 0;
         const body_ptr = c.PyUnicode_AsUTF8AndSize(body_obj, &body_len) orelse {
             c.PyErr_Clear();
-            return null;
+            return error.InvalidResponseTuple;
         };
-        if (body_len < 0) return null;
+        if (body_len < 0) return error.InvalidResponseTuple;
         body = body_ptr[0..@intCast(body_len)];
     } else if (c.PyBytes_Check(body_obj) != 0) {
         var body_len: c.Py_ssize_t = 0;
         var body_ptr: [*c]u8 = undefined;
         if (c.PyBytes_AsStringAndSize(body_obj, @ptrCast(&body_ptr), &body_len) != 0 or body_len < 0) {
             c.PyErr_Clear();
-            return null;
+            return error.InvalidResponseTuple;
         }
         body = body_ptr[0..@intCast(body_len)];
-    } else return null;
+    } else return error.InvalidResponseTuple;
 
     return .{
         .status_code = @intCast(status_long),
         .content_type = content_type,
         .body = body,
-        .extra_headers = if (tuple_size >= 4) renderTupleExtraHeaders(result) else null,
+        .extra_headers = if (tuple_size == 4) try renderTupleExtraHeaders(result) else null,
     };
 }
 
+fn sendControlledResponseMetadataError(stream: std.Io.net.Stream) void {
+    c.PyErr_Clear();
+    sendResponse(stream, 500, "application/json", CONTROLLED_RESPONSE_ERROR_BODY);
+}
+
 fn sendTupleResponse(stream: std.Io.net.Stream, result: *c.PyObject) void {
-    const response = extractTupleResponse(result) orelse {
-        sendResponse(stream, 500, "application/json", "{\"error\":\"bad response tuple\"}");
+    const response = extractTupleResponse(result) catch {
+        sendControlledResponseMetadataError(stream);
         return;
     };
     defer response.deinit();
@@ -4288,23 +4326,35 @@ fn sendTupleResponse(stream: std.Io.net.Stream, result: *c.PyObject) void {
 }
 
 fn sendTupleResponseAndCache(stream: std.Io.net.Stream, result: *c.PyObject, cache_key: []const u8) void {
-    const response = extractTupleResponse(result) orelse {
-        sendResponse(stream, 500, "application/json", "{\"error\":\"bad response tuple\"}");
+    const response = extractTupleResponse(result) catch {
+        sendControlledResponseMetadataError(stream);
         return;
     };
     defer response.deinit();
-    response.send(stream);
-    if (response.cloneForCache()) |cached| cacheResponse(cache_key, cached);
+    const cached = response.cloneForCache() orelse {
+        sendControlledResponseMetadataError(stream);
+        return;
+    };
+    switch (cacheResponse(cache_key, cached)) {
+        .cached, .capacity => response.send(stream),
+        .out_of_memory => sendControlledResponseMetadataError(stream),
+    }
 }
 
 fn sendTupleResponseAndCacheEntry(stream: std.Io.net.Stream, result: *c.PyObject, entry: *HandlerEntry) void {
-    const response = extractTupleResponse(result) orelse {
-        sendResponse(stream, 500, "application/json", "{\"error\":\"bad response tuple\"}");
+    const response = extractTupleResponse(result) catch {
+        sendControlledResponseMetadataError(stream);
         return;
     };
     defer response.deinit();
-    response.send(stream);
-    if (response.cloneForCache()) |cached| cacheEntryResponse(entry, cached);
+    const cached = response.cloneForCache() orelse {
+        sendControlledResponseMetadataError(stream);
+        return;
+    };
+    switch (cacheEntryResponse(entry, cached)) {
+        .cached, .capacity => response.send(stream),
+        .out_of_memory => unreachable,
+    }
 }
 
 // ── simple_sync_noargs: PyObject_CallNoArgs — no tuple/dict construction ─────
@@ -5312,10 +5362,17 @@ fn checkCachedResponseAllocationFailure(test_allocator: std.mem.Allocator) !void
     try std.testing.expectEqualStrings("\r\nCache-Control: no-store", response.extra_headers);
 }
 
+fn checkResponseHeaderAppendAllocationFailure(test_allocator: std.mem.Allocator) !void {
+    var rendered: std.ArrayList(u8) = .empty;
+    defer rendered.deinit(test_allocator);
+    try appendValidatedResponseHeader(&rendered, test_allocator, "Cache-Control", "no-store");
+    try std.testing.expectEqualStrings("\r\nCache-Control: no-store", rendered.items);
+}
+
 fn cacheThreadWorker(ctx: *const CacheThreadCtx) void {
     for (0..ctx.iterations) |_| {
         const response = CachedResponse.create(201, "application/json", ctx.body, "\r\nCache-Control: no-store") orelse return;
-        cacheResponse(ctx.key, response);
+        _ = cacheResponse(ctx.key, response);
         const cached = getCachedResponse(ctx.key) orelse continue;
         std.debug.assert(cached.status_code == 201);
         std.debug.assert(std.mem.eql(u8, cached.body, ctx.body));
@@ -5365,6 +5422,33 @@ test "response header validation rejects splitting and framing overrides" {
     try std.testing.expect(isZigOwnedResponseHeader("Keep-Alive"));
     try std.testing.expect(isZigOwnedResponseHeader("Trailer"));
     try std.testing.expect(!isZigOwnedResponseHeader("Cache-Control"));
+}
+
+test "response header count and byte limits are exact and fail closed" {
+    try std.testing.expectEqual(MAX_RESPONSE_HEADER_PAIRS, try responseHeaderPairCount(MAX_RESPONSE_HEADER_PAIRS * 2));
+    try std.testing.expectError(error.InvalidResponseHeaders, responseHeaderPairCount(MAX_RESPONSE_HEADER_PAIRS * 2 + 2));
+    try std.testing.expectError(error.InvalidResponseHeaders, responseHeaderPairCount(MAX_RESPONSE_HEADER_PAIRS * 2 - 1));
+
+    var exact_value: [MAX_RESPONSE_HEADER_BYTES - 5]u8 = undefined;
+    @memset(&exact_value, 'z');
+    var rendered: std.ArrayList(u8) = .empty;
+    defer rendered.deinit(std.testing.allocator);
+    try appendValidatedResponseHeader(&rendered, std.testing.allocator, "x", &exact_value);
+    try std.testing.expectEqual(MAX_RESPONSE_HEADER_BYTES, rendered.items.len);
+    const previous_len = rendered.items.len;
+    try std.testing.expectError(
+        error.InvalidResponseHeaders,
+        appendValidatedResponseHeader(&rendered, std.testing.allocator, "Cache-Control", "no-store"),
+    );
+    try std.testing.expectEqual(previous_len, rendered.items.len);
+}
+
+test "response header rendering is allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkResponseHeaderAppendAllocationFailure,
+        .{},
+    );
 }
 
 test "cached response construction is allocation-failure safe" {
