@@ -65,16 +65,13 @@ jobs:
       - name: Run remaining Python tests
         run: |
           python -m pytest tests/ -v --tb=short \
-            --ignore=tests/test_websocket_e2e.py \
-            --deselect tests/test_fastapi_parity.py::TestWebSocket::test_websocket_send_receive \
-            --deselect tests/test_fastapi_parity.py::TestWebSocket::test_websocket_send_json
+            --ignore=tests/test_websocket_e2e.py
 
   release:
     needs: verify
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
-      actions: write
       contents: write
     steps:
       - uses: actions/checkout@v4
@@ -131,11 +128,3 @@ jobs:
           git commit -m "release: v${VERSION}"
           git tag "v${VERSION}"
           git push && git push --tags
-
-      - name: Trigger build
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          VERSION="${{ steps.bump.outputs.version }}"
-          echo "Tagged v${VERSION}"
-          gh workflow run build-and-release.yml --ref main
