@@ -953,7 +953,10 @@ fn renderResponse(status: u16, content_type: []const u8, body: []const u8) ?[]co
 
 // ── Thread pool for connection handling ─────────────────────────────────────
 
-const MAX_POOL_SIZE = 128;
+// Keep the native storage bounded, while allowing deployments with many
+// concurrent keep-alive connections to choose a larger pool explicitly. The
+// default remains conservative; TURBO_THREAD_POOL_SIZE controls active workers.
+const MAX_POOL_SIZE = 512;
 const DEFAULT_POOL_SIZE = 24;
 const DEFAULT_HTTP_WORKER_RESERVE = 4;
 

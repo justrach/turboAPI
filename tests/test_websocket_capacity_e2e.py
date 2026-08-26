@@ -1,9 +1,14 @@
-"""Real-core regression coverage for bounded WebSocket admission.
+"""Real-core regression coverage for native connection capacity.
 
 TurboAPI currently gives an upgraded WebSocket exclusive use of one connection
 worker for its lifetime.  This test intentionally uses a four-worker server,
 caps WebSockets at three, and verifies that the fourth upgrade is rejected
 before ``101 Switching Protocols`` while the reserved worker still serves HTTP.
+
+The native HTTP core also keeps a worker attached to each persistent connection.
+The pool-ceiling regression starts 256 workers and proves that all 256 requested
+keep-alive connections can receive an HTTP response instead of being silently
+clamped to a smaller pool.
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import pathlib
 import socket
 import subprocess
 import sys
@@ -19,6 +25,11 @@ import time
 import urllib.request
 
 import pytest
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - the native core is Unix-only today
+    resource = None
 
 
 def _free_port() -> int:
@@ -82,9 +93,114 @@ def capped_ws_server():
         proc.wait()
 
 
+@pytest.fixture
+def pool256_server(tmp_path: pathlib.Path):
+    if resource is None:
+        pytest.skip("resource limits are unavailable on this platform")
+
+    original_nofile = resource.getrlimit(resource.RLIMIT_NOFILE)
+    desired_nofile = 512
+    if original_nofile[0] < desired_nofile:
+        if original_nofile[1] < desired_nofile:
+            pytest.skip("hard file-descriptor limit is below 512")
+        resource.setrlimit(
+            resource.RLIMIT_NOFILE,
+            (desired_nofile, original_nofile[1]),
+        )
+
+    port = _free_port()
+    script = textwrap.dedent(
+        f"""
+        from turboapi import TurboAPI
+
+        app = TurboAPI(title="pool-capacity-e2e", version="0.0.1")
+
+        @app.get("/ping")
+        def ping():
+            return {{"ok": True}}
+
+        if __name__ == "__main__":
+            app.run(host="127.0.0.1", port={port})
+        """
+    )
+    env = os.environ.copy()
+    env["TURBO_THREAD_POOL_SIZE"] = "256"
+    log_path = tmp_path / "pool256-server.log"
+    with log_path.open("wb") as log_file:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            env=env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
+
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                break
+        except OSError:
+            if proc.poll() is not None:
+                raise RuntimeError(f"pool test server exited with {proc.returncode}")
+            time.sleep(0.05)
+    else:
+        proc.terminate()
+        raise TimeoutError(f"pool test server did not start on {port}")
+
+    try:
+        yield f"127.0.0.1:{port}", log_path
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        if original_nofile[0] < desired_nofile:
+            resource.setrlimit(resource.RLIMIT_NOFILE, original_nofile)
+
+
 def _http_ping(server: str) -> dict[str, object]:
     with urllib.request.urlopen(f"http://{server}/ping", timeout=1.0) as response:
         return json.loads(response.read())
+
+
+def _persistent_http_ping(server: str) -> socket.socket:
+    host, port_text = server.rsplit(":", 1)
+    client = socket.create_connection((host, int(port_text)), timeout=5.0)
+    request = (
+        "GET /ping HTTP/1.1\r\n"
+        f"Host: {server}\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n"
+    )
+    client.sendall(request.encode("ascii"))
+
+    response = bytearray()
+    while b"\r\n\r\n" not in response:
+        chunk = client.recv(4096)
+        if not chunk:
+            raise AssertionError("server closed before sending response headers")
+        response.extend(chunk)
+        if len(response) > 8192:
+            raise AssertionError("oversized HTTP response headers")
+
+    raw_headers, body = bytes(response).split(b"\r\n\r\n", 1)
+    first_line, *header_lines = raw_headers.split(b"\r\n")
+    assert first_line.split()[1] == b"200"
+    headers = {
+        name.strip().lower(): value.strip()
+        for line in header_lines
+        for name, value in [line.split(b":", 1)]
+    }
+    content_length = int(headers[b"content-length"])
+    while len(body) < content_length:
+        chunk = client.recv(content_length - len(body))
+        if not chunk:
+            raise AssertionError("server closed before sending the response body")
+        body += chunk
+    assert json.loads(body[:content_length]) == {"ok": True}
+    return client
 
 
 def _upgrade(server: str) -> tuple[socket.socket, int]:
@@ -154,3 +270,18 @@ def test_websocket_cap_preserves_http_worker_and_reuses_slot(capped_ws_server: s
     finally:
         for client in clients:
             _close_websocket(client)
+
+
+def test_requested_pool256_serves_256_persistent_clients(pool256_server) -> None:
+    server, log_path = pool256_server
+    clients: list[socket.socket] = []
+    try:
+        # This direct native-core signal makes the ceiling assertion independent
+        # of load timing.  The persistent clients below exercise the behavior.
+        assert "Zig HTTP core active – 256-thread pool" in log_path.read_text()
+
+        for _ in range(256):
+            clients.append(_persistent_http_ping(server))
+    finally:
+        for client in clients:
+            client.close()
