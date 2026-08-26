@@ -121,9 +121,14 @@ pub const Method = enum(u3) {
 pub const Router = struct {
     trees: [8]?*RouteNode,
     alloc: Allocator,
+    other_trees: ?*std.StringHashMap(*RouteNode),
 
     pub fn init(alloc: Allocator) Router {
-        return .{ .trees = @splat(null), .alloc = alloc };
+        return .{
+            .trees = @splat(null),
+            .alloc = alloc,
+            .other_trees = null,
+        };
     }
 
     pub fn deinit(self: *Router) void {
@@ -134,26 +139,55 @@ pub const Router = struct {
                 tree.* = null;
             }
         }
+
+        if (self.other_trees) |other_trees| {
+            var it = other_trees.iterator();
+            while (it.next()) |entry| {
+                const root = entry.value_ptr.*;
+                root.deinitRecursive(self.alloc);
+                self.alloc.destroy(root);
+                self.alloc.free(entry.key_ptr.*);
+            }
+            other_trees.deinit();
+            self.alloc.destroy(other_trees);
+            self.other_trees = null;
+        }
     }
 
     /// Add a route pattern. `handler_key` is stored as-is (e.g. "GET /users/{id}").
     /// `method` is the HTTP method (e.g. "GET"). Path must start with '/'.
+    /// Registration is startup-only: finish all addRoute calls before publishing
+    /// the router to threads that call findRoute. Concurrent mutation is unsupported.
     pub fn addRoute(self: *Router, method: []const u8, path: []const u8, handler_key: []const u8) !void {
         if (path.len == 0 or path[0] != '/') return error.InvalidPath;
         const m = Method.fromString(method);
+        if (m == .OTHER) return self.addOtherRoute(method, path[1..], handler_key);
+
         const idx = @intFromEnum(m);
-        if (self.trees[idx] == null) {
-            const root = try self.alloc.create(RouteNode);
-            root.* = RouteNode.initEmpty();
-            self.trees[idx] = root;
-        }
-        try self.addRouteImpl(path[1..], handler_key, self.trees[idx].?);
+        if (self.trees[idx]) |root| return self.addRouteImpl(path[1..], handler_key, root);
+
+        const root = try self.alloc.create(RouteNode);
+        root.* = RouteNode.initEmpty();
+        var root_owned = true;
+        errdefer if (root_owned) {
+            root.deinitRecursive(self.alloc);
+            self.alloc.destroy(root);
+        };
+
+        try self.addRouteImpl(path[1..], handler_key, root);
+        self.trees[idx] = root;
+        root_owned = false;
     }
 
     /// Find the handler key and extract path parameters for the given path.
-    pub fn findRoute(self: *const Router, method: []const u8, path: []const u8) ?RouteMatch {
+    /// Concurrent lookups require registration to be complete and the allocator
+    /// to support concurrent allocation for wildcard matches.
+    pub inline fn findRoute(self: *const Router, method: []const u8, path: []const u8) ?RouteMatch {
         const m = Method.fromString(method);
-        const root = self.trees[@intFromEnum(m)] orelse return null;
+        const root = if (m == .OTHER)
+            self.findOtherTree(method) orelse return null
+        else
+            self.trees[@intFromEnum(m)] orelse return null;
         const search = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
         var params: RouteParams = .{};
@@ -168,6 +202,56 @@ pub const Router = struct {
         }
         owned.deinit(self.alloc);
         return null;
+    }
+
+    noinline fn findOtherTree(self: *const Router, method: []const u8) ?*RouteNode {
+        const other_trees = self.other_trees orelse return null;
+        return other_trees.get(method);
+    }
+
+    fn addOtherRoute(self: *Router, method: []const u8, path: []const u8, handler_key: []const u8) !void {
+        if (self.other_trees) |other_trees| {
+            if (other_trees.get(method)) |root| return self.addRouteImpl(path, handler_key, root);
+            return self.addNewOtherTree(other_trees, method, path, handler_key);
+        }
+
+        const other_trees = try self.alloc.create(std.StringHashMap(*RouteNode));
+        other_trees.* = std.StringHashMap(*RouteNode).init(self.alloc);
+        var map_owned = true;
+        errdefer if (map_owned) {
+            other_trees.deinit();
+            self.alloc.destroy(other_trees);
+        };
+
+        try self.addNewOtherTree(other_trees, method, path, handler_key);
+        self.other_trees = other_trees;
+        map_owned = false;
+    }
+
+    fn addNewOtherTree(
+        self: *Router,
+        other_trees: *std.StringHashMap(*RouteNode),
+        method: []const u8,
+        path: []const u8,
+        handler_key: []const u8,
+    ) !void {
+
+        const method_key = try self.alloc.dupe(u8, method);
+        var key_owned = true;
+        errdefer if (key_owned) self.alloc.free(method_key);
+
+        const root = try self.alloc.create(RouteNode);
+        root.* = RouteNode.initEmpty();
+        var root_owned = true;
+        errdefer if (root_owned) {
+            root.deinitRecursive(self.alloc);
+            self.alloc.destroy(root);
+        };
+
+        try self.addRouteImpl(path, handler_key, root);
+        try other_trees.putNoClobber(method_key, root);
+        key_owned = false;
+        root_owned = false;
     }
 
     // ── addRoute internals ──────────────────────────────────────────────
@@ -188,8 +272,17 @@ pub const Router = struct {
             if (node.param_child == null) {
                 const child = try self.alloc.create(RouteNode);
                 child.* = RouteNode.initEmpty();
+                var child_owned = true;
+                errdefer if (child_owned) {
+                    child.deinitRecursive(self.alloc);
+                    self.alloc.destroy(child);
+                };
+
                 child.param_name = try self.alloc.dupe(u8, param_name);
+                try self.addRouteImpl(rest_trimmed, handler_key, child);
                 node.param_child = child;
+                child_owned = false;
+                return;
             }
             return self.addRouteImpl(rest_trimmed, handler_key, node.param_child.?);
         }
@@ -197,14 +290,21 @@ pub const Router = struct {
         // Check for wildcard: *name
         if (path[0] == '*') {
             const param_name = if (path.len > 1) path[1..] else "wildcard";
-            const child = if (node.wildcard_child) |wc| wc else blk: {
-                const c = try self.alloc.create(RouteNode);
-                c.* = RouteNode.initEmpty();
-                c.param_name = try self.alloc.dupe(u8, param_name);
-                node.wildcard_child = c;
-                break :blk c;
+            if (node.wildcard_child) |child| return self.setHandler(child, handler_key);
+
+            const child = try self.alloc.create(RouteNode);
+            child.* = RouteNode.initEmpty();
+            var child_owned = true;
+            errdefer if (child_owned) {
+                child.deinitRecursive(self.alloc);
+                self.alloc.destroy(child);
             };
-            return self.setHandler(child, handler_key);
+
+            child.param_name = try self.alloc.dupe(u8, param_name);
+            try self.setHandler(child, handler_key);
+            node.wildcard_child = child;
+            child_owned = false;
+            return;
         }
 
         // Static path — find longest common prefix with existing children
@@ -227,24 +327,41 @@ pub const Router = struct {
             // Partial match — split the existing node
             const split_child = try self.alloc.create(RouteNode);
             split_child.* = RouteNode.initEmpty();
+            var split_owned = true;
+            errdefer if (split_owned) {
+                split_child.deinitRecursive(self.alloc);
+                self.alloc.destroy(split_child);
+            };
+
             split_child.path = try self.alloc.dupe(u8, path[0..common_len]);
 
-            // Shorten the existing child's path
             const old_path = child.path;
-            child.path = try self.alloc.dupe(u8, old_path[common_len..]);
-            self.alloc.free(old_path);
+            const shortened_path = try self.alloc.dupe(u8, old_path[common_len..]);
+            var shortened_path_owned = true;
+            errdefer if (shortened_path_owned) self.alloc.free(shortened_path);
 
-            // Move existing child under split node
-            try split_child.addChild(self.alloc, child);
-
-            // Replace in parent
-            node.children_list[idx] = split_child;
-            node.indices[idx] = split_child.path[0];
-
-            // Insert new path remainder
+            // Build the new branch off-tree. The existing child is attached only
+            // after every fallible allocation for the new route has succeeded.
             const rest = path[common_len..];
             const rest_trimmed = if (rest.len > 0 and rest[0] == '/') rest[1..] else rest;
             try self.addRouteImpl(rest_trimmed, handler_key, split_child);
+            try split_child.addChildWithFirstByte(self.alloc, child, shortened_path[0]);
+
+            // Preserve the existing branch's priority ordering when both sides
+            // of the split are static children.
+            const old_idx = split_child.children_list.len - 1;
+            if (old_idx > 0) {
+                std.mem.swap(*RouteNode, &split_child.children_list[0], &split_child.children_list[old_idx]);
+                std.mem.swap(u8, &split_child.indices[0], &split_child.indices[old_idx]);
+            }
+
+            // Commit: no fallible work remains beyond this point.
+            child.path = shortened_path;
+            shortened_path_owned = false;
+            self.alloc.free(old_path);
+            node.children_list[idx] = split_child;
+            node.indices[idx] = split_child.path[0];
+            split_owned = false;
             return;
         }
 
@@ -256,22 +373,29 @@ pub const Router = struct {
 
         const child = try self.alloc.create(RouteNode);
         child.* = RouteNode.initEmpty();
+        var child_owned = true;
+        errdefer if (child_owned) {
+            child.deinitRecursive(self.alloc);
+            self.alloc.destroy(child);
+        };
+
         child.path = try self.alloc.dupe(u8, segment);
 
-        try node.addChild(self.alloc, child);
-
         if (rest_trimmed.len == 0 and rest.len == 0) {
-            return self.setHandler(child, handler_key);
+            try self.setHandler(child, handler_key);
+        } else {
+            try self.addRouteImpl(rest_trimmed, handler_key, child);
         }
 
-        try self.addRouteImpl(rest_trimmed, handler_key, child);
+        try node.addChild(self.alloc, child);
+        child_owned = false;
     }
 
     fn setHandler(self: *Router, node: *RouteNode, handler_key: []const u8) !void {
-        if (node.handler_key) |old| {
-            self.alloc.free(old);
-        }
-        node.handler_key = try self.alloc.dupe(u8, handler_key);
+        const new_handler = try self.alloc.dupe(u8, handler_key);
+        const old_handler = node.handler_key;
+        node.handler_key = new_handler;
+        if (old_handler) |old| self.alloc.free(old);
     }
 
     fn incrementChildPrio(_: *Router, node: *RouteNode, idx: usize) void {
@@ -356,8 +480,11 @@ pub const Router = struct {
                             check = check[seg_end + 1 ..];
                         }
                         const joined = self.alloc.dupe(u8, remaining) catch return null;
+                        owned.append(self.alloc, joined) catch {
+                            self.alloc.free(joined);
+                            return null;
+                        };
                         params.put(pname, joined);
-                        owned.append(self.alloc, joined) catch return null;
                         return hk;
                     }
                 }
@@ -436,9 +563,13 @@ const RouteNode = struct {
     }
 
     fn addChild(self: *RouteNode, alloc: Allocator, child: *RouteNode) !void {
+        const first_byte = if (child.path.len > 0) child.path[0] else 0;
+        return self.addChildWithFirstByte(alloc, child, first_byte);
+    }
+
+    fn addChildWithFirstByte(self: *RouteNode, alloc: Allocator, child: *RouteNode, first_byte: u8) !void {
         const old_len = self.indices.len;
         const new_len = old_len + 1;
-        const first_byte = if (child.path.len > 0) child.path[0] else 0;
 
         // Allocate both arrays before mutating self — prevents inconsistent
         // node state (indices.len != children_list.len) on OOM.
@@ -484,6 +615,151 @@ const RouteNode = struct {
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
+fn expectRouteHandler(r: *const Router, method: []const u8, path: []const u8, expected: []const u8) !void {
+    var match = r.findRoute(method, path) orelse return error.TestExpectedRoute;
+    defer match.deinit();
+    try std.testing.expectEqualStrings(expected, match.handler_key);
+}
+
+fn checkFirstCustomMethodAllocationFailure(alloc: Allocator) !void {
+    var r = Router.init(alloc);
+    defer r.deinit();
+
+    try r.addRoute("GET", "/", "GET /");
+    r.addRoute("TRACE", "/", "TRACE /") catch |err| {
+        if (err != error.OutOfMemory) return err;
+        try expectRouteHandler(&r, "GET", "/", "GET /");
+        try std.testing.expect(r.findRoute("TRACE", "/") == null);
+        return error.OutOfMemory;
+    };
+
+    try expectRouteHandler(&r, "GET", "/", "GET /");
+    try expectRouteHandler(&r, "TRACE", "/", "TRACE /");
+}
+
+fn checkSubsequentCustomMethodAllocationFailure(alloc: Allocator) !void {
+    var r = Router.init(alloc);
+    defer r.deinit();
+
+    try r.addRoute("GET", "/", "GET /");
+    try r.addRoute("TRACE", "/", "TRACE /");
+    r.addRoute("CONNECT", "/", "CONNECT /") catch |err| {
+        if (err != error.OutOfMemory) return err;
+        try expectRouteHandler(&r, "GET", "/", "GET /");
+        try expectRouteHandler(&r, "TRACE", "/", "TRACE /");
+        try std.testing.expect(r.findRoute("CONNECT", "/") == null);
+        return error.OutOfMemory;
+    };
+
+    try expectRouteHandler(&r, "GET", "/", "GET /");
+    try expectRouteHandler(&r, "TRACE", "/", "TRACE /");
+    try expectRouteHandler(&r, "CONNECT", "/", "CONNECT /");
+}
+
+const RouteAllocationScenario = enum {
+    static_param,
+    param_child,
+    wildcard_child,
+    partial_split,
+    duplicate_replacement,
+};
+
+fn expectRouteMiss(r: *const Router, method: []const u8, path: []const u8) !void {
+    if (r.findRoute(method, path)) |match_value| {
+        var match = match_value;
+        defer match.deinit();
+        return error.TestUnexpectedRoute;
+    }
+}
+
+fn verifyRouteAllocationScenario(r: *const Router, scenario: RouteAllocationScenario, inserted: bool) !void {
+    try expectRouteHandler(r, "GET", "/", "GET /");
+
+    switch (scenario) {
+        .static_param => {
+            if (!inserted) return expectRouteMiss(r, "TRACE", "/diagnostics/42");
+            var match = r.findRoute("TRACE", "/diagnostics/42") orelse return error.TestExpectedRoute;
+            defer match.deinit();
+            try std.testing.expectEqualStrings("TRACE /diagnostics/{id}", match.handler_key);
+            try std.testing.expectEqualStrings("42", match.params.get("id").?);
+        },
+        .param_child => {
+            try expectRouteHandler(r, "TRACE", "/diagnostics", "TRACE diagnostics");
+            if (inserted)
+                try expectRouteHandler(r, "TRACE", "/diagnostics/42", "TRACE diagnostic id")
+            else
+                try expectRouteMiss(r, "TRACE", "/diagnostics/42");
+        },
+        .wildcard_child => {
+            try expectRouteHandler(r, "TRACE", "/files", "TRACE files");
+            const root = r.findOtherTree("TRACE") orelse return error.TestExpectedRoute;
+            const files_idx = root.findChildIndex('f') orelse return error.TestExpectedRoute;
+            const files = root.children_list[files_idx];
+            try std.testing.expectEqualStrings("files", files.path);
+            if (inserted) {
+                const wildcard = files.wildcard_child orelse return error.TestExpectedRoute;
+                try std.testing.expectEqualStrings("TRACE files wildcard", wildcard.handler_key.?);
+            } else {
+                try std.testing.expect(files.wildcard_child == null);
+            }
+        },
+        .partial_split => {
+            try expectRouteHandler(r, "TRACE", "/diagnostics", "TRACE diagnostics");
+            if (inserted)
+                try expectRouteHandler(r, "TRACE", "/diagram", "TRACE diagram")
+            else
+                try expectRouteMiss(r, "TRACE", "/diagram");
+        },
+        .duplicate_replacement => {
+            try expectRouteHandler(
+                r,
+                "TRACE",
+                "/diagnostics",
+                if (inserted) "TRACE replacement" else "TRACE original",
+            );
+        },
+    }
+}
+
+fn checkRouteInsertionAllocationFailure(alloc: Allocator, scenario: RouteAllocationScenario) !void {
+    var r = Router.init(alloc);
+    defer r.deinit();
+
+    try r.addRoute("GET", "/", "GET /");
+
+    switch (scenario) {
+        .static_param => {},
+        .param_child, .partial_split => try r.addRoute("TRACE", "/diagnostics", "TRACE diagnostics"),
+        .wildcard_child => try r.addRoute("TRACE", "/files", "TRACE files"),
+        .duplicate_replacement => try r.addRoute("TRACE", "/diagnostics", "TRACE original"),
+    }
+
+    const insertion = switch (scenario) {
+        .static_param => r.addRoute("TRACE", "/diagnostics/{id}", "TRACE /diagnostics/{id}"),
+        .param_child => r.addRoute("TRACE", "/diagnostics/{id}", "TRACE diagnostic id"),
+        .wildcard_child => r.addRoute("TRACE", "/files/*path", "TRACE files wildcard"),
+        .partial_split => r.addRoute("TRACE", "/diagram", "TRACE diagram"),
+        .duplicate_replacement => r.addRoute("TRACE", "/diagnostics", "TRACE replacement"),
+    };
+
+    insertion catch |err| {
+        if (err != error.OutOfMemory) return err;
+        try verifyRouteAllocationScenario(&r, scenario, false);
+        return error.OutOfMemory;
+    };
+    try verifyRouteAllocationScenario(&r, scenario, true);
+}
+
+fn checkWildcardLookupAllocationFailure(alloc: Allocator) !void {
+    var r = Router.init(alloc);
+    defer r.deinit();
+
+    try r.addRoute("GET", "/files/*path", "GET /files/*path");
+    var match = r.findRoute("GET", "/files/docs/readme.txt") orelse return error.OutOfMemory;
+    defer match.deinit();
+    try std.testing.expectEqualStrings("docs/readme.txt", match.params.get("path").?);
+}
+
 test "static routes" {
     const alloc = std.testing.allocator;
     var r = Router.init(alloc);
@@ -514,6 +790,75 @@ test "multiple methods on same path" {
 
     const m3 = r.findRoute("DELETE", "/items");
     try std.testing.expect(m3 == null);
+}
+
+test "custom methods on the same path stay isolated" {
+    const alloc = std.testing.allocator;
+    var r = Router.init(alloc);
+    defer r.deinit();
+
+    try r.addRoute("TRACE", "/diagnostics", "TRACE /diagnostics");
+    try r.addRoute("CONNECT", "/diagnostics", "CONNECT /diagnostics");
+    try r.addRoute("trace", "/diagnostics", "trace /diagnostics");
+
+    var transient_method = [_]u8{ 'P', 'R', 'O', 'P', 'F', 'I', 'N', 'D' };
+    try r.addRoute(transient_method[0..], "/diagnostics", "PROPFIND /diagnostics");
+    @memset(transient_method[0..], 'X');
+
+    var trace = r.findRoute("TRACE", "/diagnostics").?;
+    defer trace.deinit();
+    try std.testing.expectEqualStrings("TRACE /diagnostics", trace.handler_key);
+
+    var connect = r.findRoute("CONNECT", "/diagnostics").?;
+    defer connect.deinit();
+    try std.testing.expectEqualStrings("CONNECT /diagnostics", connect.handler_key);
+
+    var lowercase_trace = r.findRoute("trace", "/diagnostics").?;
+    defer lowercase_trace.deinit();
+    try std.testing.expectEqualStrings("trace /diagnostics", lowercase_trace.handler_key);
+
+    var propfind = r.findRoute("PROPFIND", "/diagnostics").?;
+    defer propfind.deinit();
+    try std.testing.expectEqualStrings("PROPFIND /diagnostics", propfind.handler_key);
+
+    try std.testing.expect(r.findRoute("Trace", "/diagnostics") == null);
+    try std.testing.expect(r.findRoute("MKCOL", "/diagnostics") == null);
+}
+
+test "common methods keep the custom method map lazy" {
+    const alloc = std.testing.allocator;
+    var r = Router.init(alloc);
+    defer r.deinit();
+
+    try r.addRoute("GET", "/health", "GET /health");
+    try std.testing.expect(r.other_trees == null);
+    try std.testing.expect(r.findRoute("PROPFIND", "/health") == null);
+    try std.testing.expect(r.other_trees == null);
+}
+
+test "custom method insertion is allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkFirstCustomMethodAllocationFailure,
+        .{},
+    );
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkSubsequentCustomMethodAllocationFailure,
+        .{},
+    );
+    inline for (std.meta.tags(RouteAllocationScenario)) |scenario| {
+        try std.testing.checkAllAllocationFailures(
+            std.testing.allocator,
+            checkRouteInsertionAllocationFailure,
+            .{scenario},
+        );
+    }
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkWildcardLookupAllocationFailure,
+        .{},
+    );
 }
 
 test "parameterized routes" {
@@ -610,7 +955,9 @@ fn fuzz_findRoute(_: void, smith: *std.testing.Smith) anyerror!void {
     if (input.len == 0) return;
 
     // First byte selects the HTTP method
-    const methods = [_][]const u8{ "GET", "POST", "PUT", "DELETE", "PATCH", "" };
+    const methods = [_][]const u8{
+        "GET", "POST", "PUT", "DELETE", "PATCH", "TRACE", "CONNECT", "PROPFIND", "trace", "Trace", "",
+    };
     const method = methods[input[0] % methods.len];
     // Remainder is the path (may be empty, may be garbage)
     const path = if (input.len > 1) input[1..] else "/";
@@ -628,6 +975,9 @@ fn fuzz_findRoute(_: void, smith: *std.testing.Smith) anyerror!void {
     r.addRoute("GET",    "/items/{cat}/{id}",  "GET /items/{cat}/{id}") catch return;
     r.addRoute("GET",    "/files/*",           "GET /files/*")          catch return;
     r.addRoute("GET",    "/health",            "GET /health")           catch return;
+    r.addRoute("TRACE",  "/diagnostics",       "TRACE /diagnostics")    catch return;
+    r.addRoute("CONNECT", "/diagnostics",      "CONNECT /diagnostics")  catch return;
+    r.addRoute("trace",  "/diagnostics",       "trace /diagnostics")    catch return;
 
     // Invariant: findRoute must never panic regardless of method or path content
     if (r.findRoute(method, path)) |match_c| {
