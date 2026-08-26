@@ -84,6 +84,29 @@ def ws_server():
             await ws.send_text("hello")
             await ws.close(code=1001, reason="going away")
 
+        @app.websocket("/ws-metadata")
+        async def metadata_handler(ws: WebSocket):
+            await ws.accept()
+            scope_headers = {{
+                name.decode("latin-1"): value.decode("latin-1")
+                for name, value in ws.scope["headers"]
+            }}
+            await ws.send_json({{
+                "headers": ws.headers,
+                "query_params": ws.query_params,
+                "path_params": ws.path_params,
+                "scope": {{
+                    "type": ws.scope["type"],
+                    "scheme": ws.scope["scheme"],
+                    "path": ws.scope["path"],
+                    "raw_path": ws.scope["raw_path"].decode("utf-8"),
+                    "query_string": ws.scope["query_string"].decode("ascii"),
+                    "headers": scope_headers,
+                    "path_params": ws.scope["path_params"],
+                }},
+            }})
+            await ws.close()
+
         if __name__ == "__main__":
             app.run(host="127.0.0.1", port={PORT})
         """
@@ -185,6 +208,74 @@ async def test_ws_python_server_close(ws_server: str) -> None:
         # Next recv raises ConnectionClosedOK because server closed cleanly.
         with pytest.raises(websockets.exceptions.ConnectionClosed):
             await ws.recv()
+
+
+@pytest.mark.asyncio
+async def test_ws_python_request_metadata(ws_server: str) -> None:
+    """The real Zig bridge preserves the upgrade request's metadata."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", PORT)
+    try:
+        key = "dGhlIHNhbXBsZSBub25jZQ=="
+        query = "repo=codedb&tag=one&tag=two&empty="
+        request = (
+            f"GET /ws-metadata?{query} HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{PORT}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: keep-alive, Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "X-CodeDB-Tenant: alpha\r\n"
+            "X-Trace-ID: trace-196\r\n"
+            "\r\n"
+        )
+        writer.write(request.encode("ascii"))
+        await writer.drain()
+
+        status = await reader.readline()
+        assert b"101 Switching Protocols" in status
+        while await reader.readline() not in (b"\r\n", b"", b"\n"):
+            pass
+
+        frame_header = await reader.readexactly(2)
+        assert frame_header[0] == 0x81  # FIN + text
+        payload_len = frame_header[1] & 0x7F
+        if payload_len == 126:
+            payload_len = int.from_bytes(await reader.readexactly(2), "big")
+        elif payload_len == 127:
+            payload_len = int.from_bytes(await reader.readexactly(8), "big")
+        metadata = json.loads(await reader.readexactly(payload_len))
+
+        assert metadata["headers"]["x-codedb-tenant"] == "alpha"
+        assert metadata["headers"]["x-trace-id"] == "trace-196"
+        assert metadata["query_params"] == {
+            "repo": "codedb",
+            "tag": "two",
+            "empty": "",
+        }
+        assert metadata["path_params"] == {}
+        assert metadata["scope"] == {
+            "type": "websocket",
+            "scheme": "ws",
+            "path": "/ws-metadata",
+            "raw_path": "/ws-metadata",
+            "query_string": query,
+            "headers": {
+                "host": f"127.0.0.1:{PORT}",
+                "upgrade": "websocket",
+                "connection": "keep-alive, Upgrade",
+                "sec-websocket-key": key,
+                "sec-websocket-version": "13",
+                "x-codedb-tenant": "alpha",
+                "x-trace-id": "trace-196",
+            },
+            "path_params": {},
+        }
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
 
 
 # ── Routing edge cases ──

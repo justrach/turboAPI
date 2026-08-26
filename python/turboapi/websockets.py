@@ -18,6 +18,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import parse_qsl
 
 
 class WebSocketDisconnect(Exception):
@@ -56,9 +57,40 @@ class WebSocket:
         # When set, send/receive go through FFI instead of queues.
         self._zig_conn: Any = None
         self.client_state = "connecting"
-        self.path_params: dict[str, Any] = {}
-        self.query_params: dict[str, str] = {}
-        self.headers: dict[str, str] = {}
+        self.path_params: dict[str, Any] = dict(self.scope.get("path_params") or {})
+        self.query_params: dict[str, str] = self._scope_query_params()
+        self.headers: dict[str, str] = self._scope_headers()
+
+    def _scope_query_params(self) -> dict[str, str]:
+        """Decode the ASGI-style raw query string into a convenience mapping.
+
+        ``dict`` deliberately preserves the class's existing public type: when
+        a key is repeated, the last value wins. The unmodified bytes remain in
+        ``scope["query_string"]`` for callers that need every value.
+        """
+        raw_query = self.scope.get("query_string", b"")
+        if isinstance(raw_query, bytes):
+            raw_query = raw_query.decode("ascii", errors="replace")
+        elif not isinstance(raw_query, str):
+            raw_query = str(raw_query)
+        return dict(parse_qsl(raw_query, keep_blank_values=True))
+
+    def _scope_headers(self) -> dict[str, str]:
+        """Normalize ASGI-style header pairs for case-insensitive lookup."""
+        raw_headers = self.scope.get("headers") or []
+        items = raw_headers.items() if isinstance(raw_headers, dict) else raw_headers
+        headers: dict[str, str] = {}
+        for name, value in items:
+            if isinstance(name, bytes):
+                name = name.decode("latin-1")
+            else:
+                name = str(name)
+            if isinstance(value, bytes):
+                value = value.decode("latin-1")
+            else:
+                value = str(value)
+            headers[name.lower()] = value
+        return headers
 
     @property
     def _is_zig_backed(self) -> bool:

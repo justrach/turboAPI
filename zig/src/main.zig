@@ -134,7 +134,7 @@ const bootstrap_code: [*:0]const u8 =
     \\    def add_websocket_route(self, path, handler):
     \\        _m._server_add_websocket_route(path, handler)
     \\
-    \\def _ws_invoke_handler(handler, conn_capsule, path):
+    \\def _ws_invoke_handler(handler, conn_capsule, path, query_string, headers, path_params):
     \\    """Entry point Zig calls when a WS connection is upgraded.
     \\    Builds a WebSocket Python object wrapping the Zig connection capsule
     \\    and runs the user's async handler to completion."""
@@ -150,7 +150,15 @@ const bootstrap_code: [*:0]const u8 =
     \\                self._zig_conn = None
     \\                self._accepted = False
     \\                self._closed = False
-    \\    ws = WebSocket(scope={"path": path, "type": "websocket"})
+    \\    ws = WebSocket(scope={
+    \\        "type": "websocket",
+    \\        "scheme": "ws",
+    \\        "path": path,
+    \\        "raw_path": path.encode("utf-8"),
+    \\        "query_string": query_string,
+    \\        "headers": [(name.lower(), value) for name, value in headers],
+    \\        "path_params": path_params,
+    \\    })
     \\    ws._zig_conn = conn_capsule
     \\    # Handshake already completed by Zig before this helper runs.
     \\    ws._accepted = True
