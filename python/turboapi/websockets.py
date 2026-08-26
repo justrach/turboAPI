@@ -194,14 +194,21 @@ def _validate_close(code: int, reason: str | None) -> None:
         raise ValueError("WebSocket close reason exceeds 123 UTF-8 bytes")
 
 
+_TURBONET_MODULE: Any = None
+
+
 def _turbonet():
     """Lazy import of the compiled module — keeps in-memory mode working
     even if turbonet hasn't been built (e.g. during unit tests)."""
+    global _TURBONET_MODULE
+    if _TURBONET_MODULE is not None:
+        return _TURBONET_MODULE
     try:
         from turboapi import turbonet  # type: ignore
     except ImportError:
         return None
-    return turbonet
+    _TURBONET_MODULE = turbonet
+    return _TURBONET_MODULE
 
 
 class WebSocket:
@@ -442,7 +449,7 @@ class WebSocket:
                     or size > self._queue_bytes
                     or self._zig_inbound_bytes > self._queue_bytes - size
                 ):
-                    await self._abort_transport(1013, "inbound backpressure")
+                    self._abort_transport(1013, "inbound backpressure")
                     self._queue_disconnect(1013, "inbound backpressure")
                     return
                 self._zig_inbound_bytes += size
@@ -451,7 +458,7 @@ class WebSocket:
             raise
         except Exception:
             if not self._closed:
-                await self._abort_transport(1011, "reader failure")
+                self._abort_transport(1011, "reader failure")
                 self._queue_disconnect(1011, "reader failure")
 
     def _ensure_writer_task(self, *, deadline: float | None = None) -> None:
@@ -476,11 +483,11 @@ class WebSocket:
         try:
             await asyncio.wait_for(asyncio.shield(writer), self._write_timeout_s)
         except Exception:
-            await self._abort_transport(1013, "write timeout")
+            self._abort_transport(1013, "write timeout")
             writer.cancel()
             await asyncio.gather(writer, return_exceptions=True)
 
-    async def _abort_transport(self, code: int, reason: str) -> None:
+    def _abort_transport(self, code: int, reason: str) -> None:
         self._closed = True
         self._closing_requested = True
         self.client_state = "disconnected"
@@ -516,7 +523,7 @@ class WebSocket:
     async def _zig_writer_loop(self) -> None:
         t = _turbonet()
         if t is None or self._zig_conn is None:
-            await self._abort_transport(1011, "turbonet unavailable")
+            self._abort_transport(1011, "turbonet unavailable")
             return
         try:
             while self._zig_conn is not None:
@@ -535,11 +542,11 @@ class WebSocket:
                     self._wait_fd(writable=True), timeout=remaining
                 )
         except Exception:
-            await self._abort_transport(1013, "write timeout")
+            self._abort_transport(1013, "write timeout")
         finally:
             self._zig_write_deadline = None
 
-    async def _enqueue_zig_send(self, kind: str, data: Any) -> None:
+    def _enqueue_zig_send(self, kind: str, data: Any) -> None:
         self._bind_native_loop()
         if self._closed or self._closing_requested:
             raise RuntimeError("WebSocket is not connected")
@@ -554,7 +561,7 @@ class WebSocket:
                 else t._ws_send_bytes(self._zig_conn, data)
             )
         except BufferError:
-            await self._abort_transport(1013, "outbound backpressure")
+            self._abort_transport(1013, "outbound backpressure")
             raise RuntimeError("WebSocket outbound queue exceeded its bounded capacity")
         if pending:
             self._ensure_writer_task(deadline=deadline)
@@ -581,7 +588,7 @@ class WebSocket:
                             if self._closed:
                                 return
                     except Exception:
-                        await self._abort_transport(1013, "close failed")
+                        self._abort_transport(1013, "close failed")
                         return
                 self._closed = True
                 self.client_state = "disconnected"
@@ -626,7 +633,7 @@ class WebSocket:
         if not self._accepted or self._closed:
             raise RuntimeError("WebSocket is not connected")
         if self._is_zig_backed:
-            await self._enqueue_zig_send("text", data)
+            self._enqueue_zig_send("text", data)
         else:
             await self._send_queue.put({"type": "text", "data": data})
 
@@ -635,7 +642,7 @@ class WebSocket:
         if not self._accepted or self._closed:
             raise RuntimeError("WebSocket is not connected")
         if self._is_zig_backed:
-            await self._enqueue_zig_send("bytes", bytes(data))
+            self._enqueue_zig_send("bytes", bytes(data))
         else:
             await self._send_queue.put({"type": "bytes", "data": data})
 
@@ -684,16 +691,30 @@ class WebSocket:
         t = _turbonet()
         if t is None or self._zig_conn is None:
             raise RuntimeError("turbonet not available")
+        current_task = asyncio.current_task()
+        if (
+            current_task is self._handler_task
+            and self._zig_control_task is None
+            and not self._nonblocking_transport
+            and self._zig_inbound.empty()
+        ):
+            type_str, data = t._ws_recv_blocking(self._zig_conn)
+            if type_str == "disconnect":
+                code, reason = data
+                self._closed = True
+                self._closing_requested = True
+                self.client_state = "disconnected"
+                self._zig_disconnect = WebSocketDisconnect(code, reason or None)
+                raise self._zig_disconnect
+            return type_str, data
         async with self._receive_lock:
             await self._cancel_control_task()
             if (
-                asyncio.current_task() is self._handler_task
+                current_task is self._handler_task
                 and not self._nonblocking_transport
                 and self._zig_inbound.empty()
             ):
-                type_str, data, pending = t._ws_recv_blocking(self._zig_conn)
-                if pending:
-                    self._ensure_writer_task()
+                type_str, data = t._ws_recv_blocking(self._zig_conn)
                 if type_str == "disconnect":
                     code, reason = data
                     self._closed = True

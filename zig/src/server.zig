@@ -3225,7 +3225,7 @@ fn invokeHelper(
 // Python-facing primitives, exposed via main.zig method table:
 //   _server_add_websocket_route(path, handler)
 //   _ws_recv(capsule) -> (type_str, data, write_pending) | None
-//   _ws_recv_blocking(capsule) -> (type_str, data, false)
+//   _ws_recv_blocking(capsule) -> (type_str, data)
 //   _ws_send_text(capsule, str)
 //   _ws_send_bytes(capsule, bytes)
 //   _ws_close(capsule, code, reason)
@@ -3398,23 +3398,20 @@ pub fn ws_recv_blocking(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.Py
     const save = py.PyEval_SaveThread();
     const msg = wsReadNextMessage(conn);
     py.PyEval_RestoreThread(save);
-    const pending_obj = c.PyBool_FromLong(0) orelse return null;
-    defer c.Py_DecRef(pending_obj);
-
     switch (msg) {
         .text => |text| {
             const kind = py.newString("text") orelse return null;
             defer c.Py_DecRef(kind);
             const data = py.newString(text) orelse return null;
             defer c.Py_DecRef(data);
-            return c.PyTuple_Pack(3, kind, data, pending_obj);
+            return c.PyTuple_Pack(2, kind, data);
         },
         .binary => |bytes| {
             const kind = py.newString("bytes") orelse return null;
             defer c.Py_DecRef(kind);
             const data = py.newBytes(bytes) orelse return null;
             defer c.Py_DecRef(data);
-            return c.PyTuple_Pack(3, kind, data, pending_obj);
+            return c.PyTuple_Pack(2, kind, data);
         },
         .closed => {
             const kind = py.newString("disconnect") orelse return null;
@@ -3425,7 +3422,7 @@ pub fn ws_recv_blocking(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.Py
             defer c.Py_DecRef(reason);
             const close_data = c.PyTuple_Pack(2, code, reason) orelse return null;
             defer c.Py_DecRef(close_data);
-            return c.PyTuple_Pack(3, kind, close_data, pending_obj);
+            return c.PyTuple_Pack(2, kind, close_data);
         },
         .protocol_error => {
             const kind = py.newString("disconnect") orelse return null;
@@ -3436,7 +3433,7 @@ pub fn ws_recv_blocking(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.Py
             defer c.Py_DecRef(reason);
             const close_data = c.PyTuple_Pack(2, code, reason) orelse return null;
             defer c.Py_DecRef(close_data);
-            return c.PyTuple_Pack(3, kind, close_data, pending_obj);
+            return c.PyTuple_Pack(2, kind, close_data);
         },
     }
 }
@@ -3462,7 +3459,7 @@ pub fn ws_send_text(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
             c.PyErr_SetString(c.PyExc_RuntimeError, "ws write failed");
         return null;
     };
-    return c.PyBool_FromLong(if (pending) 1 else 0);
+    return if (pending) c.PyBool_FromLong(1) else py.pyNone();
 }
 
 pub fn ws_send_bytes(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
@@ -3486,7 +3483,7 @@ pub fn ws_send_bytes(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObj
             c.PyErr_SetString(c.PyExc_RuntimeError, "ws write failed");
         return null;
     };
-    return c.PyBool_FromLong(if (pending) 1 else 0);
+    return if (pending) c.PyBool_FromLong(1) else py.pyNone();
 }
 
 pub fn ws_close(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
