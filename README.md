@@ -49,9 +49,9 @@
 >   deployments should still use a reverse proxy with stricter limits
 > - **No configurable max body size** — hardcoded 16MB cap
 > - **Zig-native WebSocket support is available but still alpha** — routes are
->   exact-match, each connection currently consumes an HTTP worker, and the 101
->   upgrade happens before Python handler code. Enforce authentication at an edge
->   proxy such as Cloudflare Access; handler checks can only close an upgraded socket.
+>   exact-match and each connection currently consumes an HTTP worker. A synchronous
+>   route guard can reject Authorization or Origin policy before the 101; keep an
+>   authenticating edge such as Cloudflare Access as the outer security boundary.
 > - **Free-threaded Python 3.14t** is itself relatively new — some C extensions may not be thread-safe
 >
 > See [SECURITY.md](SECURITY.md) for the full threat model and deployment recommendations.
@@ -460,7 +460,7 @@ python3.14t app.py
 | Zig-side JSON→Python dict (no json.loads) | ✅ |
 | Large body support (up to 16MB) | ✅ |
 | Python 3.14t free-threaded | ✅ |
-| WebSocket support | ✅ Alpha (exact routes; use edge auth) |
+| WebSocket support | ✅ Alpha (exact routes; pre-upgrade guards + edge auth) |
 | HTTP/2 + TLS via reverse proxy | ✅ |
 | HTTP/3 + QUIC via reverse proxy | ✅ |
 | Native HTTP/2 + TLS | 🔧 Future runtime work |

@@ -84,6 +84,7 @@ class TurboAPI(Router):
         self._lifespan = lifespan
         self._mounts: dict[str, Any] = {}
         self._websocket_routes: dict[str, Callable] = {}
+        self._websocket_guards: dict[str, Callable] = {}
         self._exception_handlers: dict[type, Callable] = {}
         self._openapi_schema: dict | None = None
 
@@ -191,7 +192,7 @@ class TurboAPI(Router):
 
             self.get(route_path)(_make_handler())
 
-    def websocket(self, path: str):
+    def websocket(self, path: str, *, guard: Callable | None = None):
         """Register a WebSocket endpoint.
 
         Usage:
@@ -200,9 +201,25 @@ class TurboAPI(Router):
                 await websocket.accept()
                 data = await websocket.receive_text()
                 await websocket.send_text(f"Echo: {data}")
+
+        ``guard`` is a synchronous pre-upgrade policy callback. It receives a
+        ``WebSocketUpgradeRequest`` and must explicitly return ``True`` to
+        allow the HTTP 101 response, or ``WebSocketUpgradeRejection`` to select
+        a bounded HTTP denial status. Exceptions and invalid results fail
+        closed with 403.
         """
+        if guard is not None and not callable(guard):
+            raise TypeError("WebSocket guard must be callable")
+
         def decorator(func: Callable):
+            missing = object()
+            previous_handler = self._websocket_routes.get(path, missing)
+            previous_guard = self._websocket_guards.get(path, missing)
             self._websocket_routes[path] = func
+            if guard is None:
+                self._websocket_guards.pop(path, None)
+            else:
+                self._websocket_guards[path] = guard
             # Register with the Zig server if it's running. The decorator may
             # be invoked at module-import time (before app.run()) — in that
             # case we keep _websocket_routes around and register lazily on
@@ -211,13 +228,32 @@ class TurboAPI(Router):
             # (useful in tests).
             try:
                 import importlib.util
-
-                if importlib.util.find_spec("turboapi.turbonet") is not None:
-                    srv = getattr(self, "_turbonet_server", None)
-                    if srv is not None and hasattr(srv, "add_websocket_route"):
-                        srv.add_websocket_route(path, func)
             except ImportError:
-                pass
+                return func
+
+            try:
+                if importlib.util.find_spec("turboapi.turbonet") is not None:
+                    srv = getattr(self, "_turbonet_server", None) or getattr(
+                        self, "zig_server", None
+                    )
+                    if srv is not None and hasattr(srv, "add_websocket_route"):
+                        if guard is None:
+                            srv.add_websocket_route(path, func)
+                        else:
+                            srv.add_websocket_route(path, func, guard)
+            except BaseException:
+                # Native registration is transactional. Mirror that guarantee
+                # in Python so a failed live replacement does not leave the
+                # application dictionaries disagreeing with the native map.
+                if previous_handler is missing:
+                    self._websocket_routes.pop(path, None)
+                else:
+                    self._websocket_routes[path] = previous_handler
+                if previous_guard is missing:
+                    self._websocket_guards.pop(path, None)
+                else:
+                    self._websocket_guards[path] = previous_guard
+                raise
             return func
 
         return decorator
@@ -467,7 +503,11 @@ class TurboAPI(Router):
             # Register WebSocket routes registered via @app.websocket(...)
             for ws_path, ws_handler in self._websocket_routes.items():
                 if hasattr(server, "add_websocket_route"):
-                    server.add_websocket_route(ws_path, ws_handler)
+                    ws_guard = self._websocket_guards.get(ws_path)
+                    if ws_guard is None:
+                        server.add_websocket_route(ws_path, ws_handler)
+                    else:
+                        server.add_websocket_route(ws_path, ws_handler, ws_guard)
 
             print("\n[SERVER] Starting Zig server...")
             server.run()

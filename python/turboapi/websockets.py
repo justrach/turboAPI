@@ -15,8 +15,11 @@ they're in.
 """
 
 import asyncio
+import inspect
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import parse_qsl
 
@@ -27,6 +30,116 @@ class WebSocketDisconnect(Exception):
     def __init__(self, code: int = 1000, reason: str | None = None):
         self.code = code
         self.reason = reason
+
+
+@dataclass(frozen=True, slots=True)
+class WebSocketUpgradeRequest:
+    """Read-only metadata exposed to a native pre-upgrade route guard.
+
+    Header names are normalized to lowercase and repeated query parameters use
+    the last value, matching :class:`WebSocket`'s post-upgrade convenience
+    mappings. ``query_string`` preserves the original bytes for policies that
+    need to distinguish repeated or blank values.
+    """
+
+    path: str
+    headers: Mapping[str, str]
+    query_params: Mapping[str, str]
+    query_string: bytes
+
+
+_SAFE_WEBSOCKET_REJECTION_STATUSES = frozenset({400, 401, 403, 404, 429, 500, 503})
+
+
+@dataclass(frozen=True, slots=True)
+class WebSocketUpgradeRejection:
+    """Status-only pre-upgrade rejection.
+
+    TurboAPI deliberately does not accept an application-supplied response
+    body here: an empty bounded response cannot accidentally reflect bearer
+    credentials or other request metadata.
+    """
+
+    status_code: int = 403
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.status_code, bool)
+            or not isinstance(self.status_code, int)
+            or self.status_code not in _SAFE_WEBSOCKET_REJECTION_STATUSES
+        ):
+            allowed = ", ".join(str(status) for status in sorted(_SAFE_WEBSOCKET_REJECTION_STATUSES))
+            raise ValueError(f"WebSocket guard rejection status must be one of: {allowed}")
+
+
+WebSocketUpgradeGuard = Callable[
+    [WebSocketUpgradeRequest], bool | WebSocketUpgradeRejection
+]
+
+
+def _upgrade_request_from_raw(
+    path: str,
+    query_string: bytes | str,
+    headers: list[tuple[bytes | str, bytes | str]],
+) -> WebSocketUpgradeRequest:
+    """Build the public guard request from the Zig core's borrowed metadata."""
+    if isinstance(query_string, bytes):
+        raw_query = query_string
+        decoded_query = query_string.decode("ascii", errors="replace")
+    else:
+        decoded_query = str(query_string)
+        raw_query = decoded_query.encode("ascii", errors="replace")
+
+    normalized_headers: dict[str, str] = {}
+    for name, value in headers:
+        if isinstance(name, bytes):
+            decoded_name = name.decode("latin-1")
+        else:
+            decoded_name = str(name)
+        if isinstance(value, bytes):
+            decoded_value = value.decode("latin-1")
+        else:
+            decoded_value = str(value)
+        normalized_headers[decoded_name.lower()] = decoded_value
+
+    query_params = (
+        dict(parse_qsl(decoded_query, keep_blank_values=True)) if decoded_query else {}
+    )
+    return WebSocketUpgradeRequest(
+        path=str(path),
+        headers=MappingProxyType(normalized_headers),
+        query_params=MappingProxyType(query_params),
+        query_string=raw_query,
+    )
+
+
+def _evaluate_websocket_upgrade_guard(
+    guard: WebSocketUpgradeGuard,
+    path: str,
+    query_string: bytes | str,
+    headers: list[tuple[bytes | str, bytes | str]],
+) -> int:
+    """Return 0 to allow or a bounded HTTP status to reject.
+
+    Only the literal ``True`` allows an upgrade. Exceptions, invalid return
+    values, and asynchronous guards fail closed with 403 and are intentionally
+    not logged, because exception text can contain request credentials.
+    """
+    try:
+        request = _upgrade_request_from_raw(path, query_string, headers)
+        result = guard(request)
+        if result is True:
+            return 0
+        if isinstance(result, WebSocketUpgradeRejection):
+            return result.status_code
+        if inspect.isawaitable(result):
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
+            return 403
+        return 403
+    except BaseException:
+        return 403
 
 
 def _turbonet():
@@ -241,6 +354,12 @@ class WebSocket:
 class WebSocketRoute:
     """Represents a registered WebSocket route."""
 
-    def __init__(self, path: str, handler: Callable):
+    def __init__(
+        self,
+        path: str,
+        handler: Callable,
+        guard: WebSocketUpgradeGuard | None = None,
+    ):
         self.path = path
         self.handler = handler
+        self.guard = guard

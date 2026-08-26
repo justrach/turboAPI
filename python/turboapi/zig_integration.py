@@ -1168,7 +1168,11 @@ class ZigIntegratedTurboAPI(TurboAPI):
                 # Register WebSocket routes registered via @app.websocket(...).
                 if hasattr(self.zig_server, "add_websocket_route"):
                     for ws_path, ws_handler in self._websocket_routes.items():
-                        self.zig_server.add_websocket_route(ws_path, ws_handler)
+                        ws_guard = self._websocket_guards.get(ws_path)
+                        if ws_guard is None:
+                            self.zig_server.add_websocket_route(ws_path, ws_handler)
+                        else:
+                            self.zig_server.add_websocket_route(ws_path, ws_handler, ws_guard)
                         print(f"   WebSocket route: {ws_path}")
 
                 # Start the actual Zig server

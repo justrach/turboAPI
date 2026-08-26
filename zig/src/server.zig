@@ -1339,6 +1339,48 @@ fn findHeader(headers: []const HeaderPair, name: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Security-sensitive WebSocket headers must be unambiguous. Reject repeated
+/// values rather than inheriting first-value/last-value behavior that can differ
+/// between the edge, the native core, and an application guard.
+fn hasDuplicateWebSocketSecurityHeader(headers: []const HeaderPair) bool {
+    var authorization_seen = false;
+    var origin_seen = false;
+    var key_seen = false;
+    var version_seen = false;
+
+    for (headers) |header| {
+        const seen = if (std.ascii.eqlIgnoreCase(header.name, "authorization"))
+            &authorization_seen
+        else if (std.ascii.eqlIgnoreCase(header.name, "origin"))
+            &origin_seen
+        else if (std.ascii.eqlIgnoreCase(header.name, "sec-websocket-key"))
+            &key_seen
+        else if (std.ascii.eqlIgnoreCase(header.name, "sec-websocket-version"))
+            &version_seen
+        else
+            continue;
+        if (seen.*) return true;
+        seen.* = true;
+    }
+    return false;
+}
+
+test "WebSocket security header duplicates are case-insensitive" {
+    const unique = [_]HeaderPair{
+        .{ .name = "Authorization", .value = "Bearer one" },
+        .{ .name = "Origin", .value = "https://example.test" },
+        .{ .name = "Sec-WebSocket-Key", .value = "key" },
+        .{ .name = "Sec-WebSocket-Version", .value = "13" },
+    };
+    try std.testing.expect(!hasDuplicateWebSocketSecurityHeader(&unique));
+
+    const duplicate = [_]HeaderPair{
+        .{ .name = "authorization", .value = "Bearer one" },
+        .{ .name = "AUTHORIZATION", .value = "Bearer two" },
+    };
+    try std.testing.expect(hasDuplicateWebSocketSecurityHeader(&duplicate));
+}
+
 /// Case-insensitive substring search in a comma-separated header value.
 /// e.g. value = "keep-alive, Upgrade" + needle = "upgrade" → true.
 fn headerContainsToken(value: []const u8, token: []const u8) bool {
@@ -1387,6 +1429,11 @@ fn tryWebSocketUpgrade(
     // Past this point we're confident it's a WS upgrade attempt. Any further
     // failures send 400/426 and consume the connection.
 
+    if (hasDuplicateWebSocketSecurityHeader(headers.items)) {
+        sendUpgradeError(stream, 400, "Bad Request");
+        return .handled;
+    }
+
     const conn_h = findHeader(headers.items, "connection") orelse {
         sendUpgradeError(stream, 400, "Bad Request");
         return .handled;
@@ -1414,11 +1461,29 @@ fn tryWebSocketUpgrade(
     };
     const key = std.mem.trim(u8, key_h, " \t");
 
-    // Route check: is this path a registered WS endpoint? V1 hardcodes /ws-echo;
-    // Phase 4 will look up python_ws_routes here.
-    if (!isWebSocketPath(path)) {
-        sendUpgradeError(stream, 404, "Not Found");
-        return .handled;
+    // Route lookup and any application policy must run after the RFC 6455
+    // request has been validated, but before capacity admission and the 101.
+    // This keeps rejected sockets out of the active-WebSocket budget.
+    var route_snapshot: ?WebSocketRouteEntry = null;
+    defer {
+        if (route_snapshot) |route| releaseWebSocketRoute(route, tstate);
+    }
+    if (!std.mem.eql(u8, path, ECHO_PATH)) {
+        route_snapshot = retainWebSocketRoute(path, tstate) catch {
+            sendUpgradeError(stream, 500, "Internal Server Error");
+            return .handled;
+        };
+        const route = route_snapshot orelse {
+            sendUpgradeError(stream, 404, "Not Found");
+            return .handled;
+        };
+        if (route.guard) |guard| {
+            const rejection = runWebSocketUpgradeGuard(guard, path, query_string, headers.items, tstate);
+            if (rejection != 0) {
+                sendWebSocketGuardRejection(stream, rejection);
+                return .handled;
+            }
+        }
     }
 
     // Admission must happen before the 101 response. Every accepted WebSocket
@@ -1444,27 +1509,59 @@ fn tryWebSocketUpgrade(
     streamWriteAll(stream, resp_buf[0..resp_len]) catch return .handled;
 
     // Run the connection.
-    runWebSocketConnection(stream, path, query_string, headers.items, tstate) catch |err| {
+    runWebSocketConnection(stream, path, query_string, headers.items, route_snapshot, tstate) catch |err| {
         logger.warn("[WS] connection ended with error: {}", .{err});
     };
     return .handled;
 }
 
-fn isWebSocketPath(path: []const u8) bool {
-    // V1: hardcoded echo route. Phase 4 replaces with a lookup in a Python-
-    // populated route map.
-    if (std.mem.eql(u8, path, ECHO_PATH)) return true;
-    if (getWebSocketRoutes().contains(path)) return true;
-    return false;
+const WebSocketRouteEntry = struct {
+    handler: *c.PyObject,
+    guard: ?*c.PyObject = null,
+};
+
+var ws_routes_map: ?std.StringHashMap(WebSocketRouteEntry) = null;
+var ws_routes_lock: std.atomic.Mutex = .unlocked;
+
+fn lockWebSocketRoutes() void {
+    while (!ws_routes_lock.tryLock()) std.atomic.spinLoopHint();
 }
 
-var ws_routes_map: ?std.StringHashMap(*c.PyObject) = null;
+fn unlockWebSocketRoutes() void {
+    ws_routes_lock.unlock();
+}
 
-fn getWebSocketRoutes() *std.StringHashMap(*c.PyObject) {
+/// The caller must hold ws_routes_lock.
+fn getWebSocketRoutes() *std.StringHashMap(WebSocketRouteEntry) {
     if (ws_routes_map == null) {
-        ws_routes_map = std.StringHashMap(*c.PyObject).init(allocator);
+        ws_routes_map = std.StringHashMap(WebSocketRouteEntry).init(allocator);
     }
     return &ws_routes_map.?;
+}
+
+/// Take an owned route snapshot while both the Python thread state and route
+/// lock are held. The lock is released before any guard/handler callback.
+fn retainWebSocketRoute(path: []const u8, tstate: ?*anyopaque) error{PythonThreadUnavailable}!?WebSocketRouteEntry {
+    const thread_state = tstate orelse return error.PythonThreadUnavailable;
+    py.PyEval_AcquireThread(thread_state);
+    defer py.PyEval_ReleaseThread(thread_state);
+
+    lockWebSocketRoutes();
+    defer unlockWebSocketRoutes();
+    const route = getWebSocketRoutes().get(path) orelse return null;
+    c.Py_IncRef(route.handler);
+    if (route.guard) |guard| c.Py_IncRef(guard);
+    return route;
+}
+
+/// Release a snapshot outside the route lock with an attached Python thread
+/// state so finalizers cannot run while native route-map state is locked.
+fn releaseWebSocketRoute(route: WebSocketRouteEntry, tstate: ?*anyopaque) void {
+    const thread_state = tstate orelse return;
+    py.PyEval_AcquireThread(thread_state);
+    defer py.PyEval_ReleaseThread(thread_state);
+    c.Py_DecRef(route.handler);
+    if (route.guard) |guard| c.Py_DecRef(guard);
 }
 
 /// Drive a live WebSocket connection. Reads frames, dispatches by opcode,
@@ -1603,6 +1700,7 @@ fn runWebSocketConnection(
     path: []const u8,
     query_string: []const u8,
     headers: []const HeaderPair,
+    route_snapshot: ?WebSocketRouteEntry,
     tstate: ?*anyopaque,
 ) !void {
     var conn = WsConn{ .stream = stream };
@@ -1613,12 +1711,12 @@ fn runWebSocketConnection(
         return;
     }
 
-    const handler = getWebSocketRoutes().get(path) orelse {
+    const route = route_snapshot orelse {
         conn.sendClose(1011, "no handler");
         return;
     };
 
-    runPythonHandler(&conn, handler, path, query_string, headers, tstate);
+    runPythonHandler(&conn, route.handler, path, query_string, headers, tstate);
 }
 
 fn runEchoLoop(conn: *WsConn) void {
@@ -1708,6 +1806,110 @@ fn websocketHeadersToPyList(headers: []const HeaderPair) ?*c.PyObject {
     return list;
 }
 
+fn normalizeWebSocketGuardStatus(raw_status: c_long) u16 {
+    return switch (raw_status) {
+        0 => 0,
+        400, 401, 403, 404, 429, 500, 503 => @intCast(raw_status),
+        else => 403,
+    };
+}
+
+/// Invoke a synchronous Python policy before sending the WebSocket 101.
+/// Every failure is reduced to a status-only 403 and Python exception text is
+/// deliberately cleared, never printed, because it can contain credentials.
+fn runWebSocketUpgradeGuard(
+    guard: *c.PyObject,
+    path: []const u8,
+    query_string: []const u8,
+    headers: []const HeaderPair,
+    tstate: ?*anyopaque,
+) u16 {
+    const thread_state = tstate orelse return 403;
+    py.PyEval_AcquireThread(thread_state);
+    defer py.PyEval_ReleaseThread(thread_state);
+
+    const turbonet_mod = c.PyImport_ImportModule("turboapi.turbonet") orelse blk: {
+        c.PyErr_Clear();
+        break :blk c.PyImport_ImportModule("turbonet") orelse {
+            c.PyErr_Clear();
+            return 403;
+        };
+    };
+    defer c.Py_DecRef(turbonet_mod);
+
+    const helper = c.PyObject_GetAttrString(turbonet_mod, "_ws_invoke_guard") orelse {
+        c.PyErr_Clear();
+        return 403;
+    };
+    defer c.Py_DecRef(helper);
+
+    const py_path = py.newString(path) orelse {
+        c.PyErr_Clear();
+        return 403;
+    };
+    defer c.Py_DecRef(py_path);
+    const py_query_string = py.newBytes(query_string) orelse {
+        c.PyErr_Clear();
+        return 403;
+    };
+    defer c.Py_DecRef(py_query_string);
+    const py_headers = websocketHeadersToPyList(headers) orelse {
+        c.PyErr_Clear();
+        return 403;
+    };
+    defer c.Py_DecRef(py_headers);
+
+    const args = c.PyTuple_Pack(4, guard, py_path, py_query_string, py_headers) orelse {
+        c.PyErr_Clear();
+        return 403;
+    };
+    defer c.Py_DecRef(args);
+
+    const result = c.PyObject_Call(helper, args, null) orelse {
+        c.PyErr_Clear();
+        return 403;
+    };
+    defer c.Py_DecRef(result);
+
+    const raw_status = c.PyLong_AsLong(result);
+    if (c.PyErr_Occurred() != null) {
+        c.PyErr_Clear();
+        return 403;
+    }
+    return normalizeWebSocketGuardStatus(raw_status);
+}
+
+/// Send a bounded, status-only denial. The lack of an application body and
+/// fixed headers prevents authorization/request metadata from being reflected.
+fn sendWebSocketGuardRejection(stream: std.Io.net.Stream, raw_status: u16) void {
+    const normalized = normalizeWebSocketGuardStatus(raw_status);
+    const status = if (normalized == 0) @as(u16, 403) else normalized;
+    const known_reason = statusText(status);
+    const reason = if (std.mem.eql(u8, known_reason, "Unknown")) "Rejected" else known_reason;
+    var buf: [320]u8 = undefined;
+    const auth_header = if (status == 401) "WWW-Authenticate: Bearer\r\n" else "";
+    const response = std.fmt.bufPrint(
+        &buf,
+        "HTTP/1.1 {d} {s}\r\n{s}Cache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        .{ status, reason, auth_header },
+    ) catch return;
+    streamWriteAll(stream, response) catch {};
+}
+
+test "WebSocket guard statuses are fail-closed and bounded" {
+    try std.testing.expectEqual(@as(u16, 0), normalizeWebSocketGuardStatus(0));
+    try std.testing.expectEqual(@as(u16, 401), normalizeWebSocketGuardStatus(401));
+    try std.testing.expectEqual(@as(u16, 403), normalizeWebSocketGuardStatus(403));
+    try std.testing.expectEqual(@as(u16, 404), normalizeWebSocketGuardStatus(404));
+    try std.testing.expectEqual(@as(u16, 429), normalizeWebSocketGuardStatus(429));
+    try std.testing.expectEqual(@as(u16, 500), normalizeWebSocketGuardStatus(500));
+    try std.testing.expectEqual(@as(u16, 503), normalizeWebSocketGuardStatus(503));
+    try std.testing.expectEqual(@as(u16, 403), normalizeWebSocketGuardStatus(-1));
+    try std.testing.expectEqual(@as(u16, 403), normalizeWebSocketGuardStatus(200));
+    try std.testing.expectEqual(@as(u16, 403), normalizeWebSocketGuardStatus(418));
+    try std.testing.expectEqual(@as(u16, 403), normalizeWebSocketGuardStatus(600));
+}
+
 fn invokeHelper(
     mod: *c.PyObject,
     handler: *c.PyObject,
@@ -1787,20 +1989,57 @@ inline fn capsuleToConn(capsule_obj: ?*c.PyObject) ?*WsConn {
 pub fn server_add_websocket_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var path: [*c]const u8 = null;
     var handler: ?*c.PyObject = null;
-    if (c.PyArg_ParseTuple(args, "sO", &path, &handler) == 0) return null;
+    var guard: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "sO|O", &path, &handler, &guard) == 0) return null;
+    if (c.PyCallable_Check(handler) == 0) {
+        py.setError("WebSocket handler must be callable", .{});
+        return null;
+    }
+    const guard_obj = if (guard) |value| if (py.isNone(value)) null else value else null;
+    if (guard_obj) |value| {
+        if (c.PyCallable_Check(value) == 0) {
+            py.setError("WebSocket guard must be callable", .{});
+            return null;
+        }
+    }
     const path_s = std.mem.span(path);
     const path_owned = allocator.dupe(u8, path_s) catch {
         py.setError("ws route alloc failed", .{});
         return null;
     };
     c.Py_IncRef(handler.?);
+    if (guard_obj) |value| c.Py_IncRef(value);
+    const entry = WebSocketRouteEntry{ .handler = handler.?, .guard = guard_obj };
 
+    lockWebSocketRoutes();
     var ws_routes = getWebSocketRoutes();
-    if (ws_routes.fetchPut(path_owned, handler.?) catch null) |old| {
-        // Replacing an existing route — free the old key + decref old handler.
+    const route_slot = ws_routes.getOrPut(path_owned) catch {
+        unlockWebSocketRoutes();
         allocator.free(path_owned);
-        c.Py_DecRef(old.value);
-        _ = ws_routes.put(old.key, handler.?) catch {};
+        c.Py_DecRef(entry.handler);
+        if (entry.guard) |value| c.Py_DecRef(value);
+        py.setError("WebSocket route registration failed", .{});
+        return null;
+    };
+    var replaced_entry: ?WebSocketRouteEntry = null;
+    var duplicate_path: ?[]u8 = null;
+    if (route_slot.found_existing) {
+        // Swap atomically while retaining the map's existing owned key.
+        duplicate_path = path_owned;
+        replaced_entry = route_slot.value_ptr.*;
+        route_slot.value_ptr.* = entry;
+    } else {
+        // The allocation has succeeded and assigning the value cannot fail.
+        route_slot.value_ptr.* = entry;
+    }
+    unlockWebSocketRoutes();
+
+    // Free/decref only after unlocking: Py_DecRef can run arbitrary Python
+    // finalizers, and allocator work should not extend the critical section.
+    if (duplicate_path) |owned_path| allocator.free(owned_path);
+    if (replaced_entry) |old_entry| {
+        c.Py_DecRef(old_entry.handler);
+        if (old_entry.guard) |old_guard| c.Py_DecRef(old_guard);
     }
     return py.pyNone();
 }

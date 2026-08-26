@@ -131,8 +131,21 @@ const bootstrap_code: [*:0]const u8 =
     \\        _m._db_configure(conn_string, pool_size)
     \\    def add_db_route(self, method, path, op, table, pk_column, pk_param, columns):
     \\        _m._db_add_route(method, path, op, table, pk_column or "", pk_param or "", columns or "")
-    \\    def add_websocket_route(self, path, handler):
-    \\        _m._server_add_websocket_route(path, handler)
+    \\    def add_websocket_route(self, path, handler, guard=None):
+    \\        _m._server_add_websocket_route(path, handler, guard)
+    \\
+    \\def _ws_invoke_guard(guard, path, query_string, headers):
+    \\    """Return 0 to allow or an HTTP status to reject before upgrade.
+    \\    The policy helper is deliberately fail-closed and does not log
+    \\    exceptions because their text can contain authorization metadata."""
+    \\    try:
+    \\        from turboapi.websockets import _evaluate_websocket_upgrade_guard
+    \\        return _evaluate_websocket_upgrade_guard(
+    \\            guard, path, query_string, headers
+    \\        )
+    \\    except BaseException:
+    \\        return 403
+    \\_m._ws_invoke_guard = _ws_invoke_guard
     \\
     \\def _ws_invoke_handler(handler, conn_capsule, path, query_string, headers, path_params):
     \\    """Entry point Zig calls when a WS connection is upgraded.
