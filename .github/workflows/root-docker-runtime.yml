@@ -1,0 +1,50 @@
+name: Root Docker Runtime
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - pyproject.toml
+      - scripts/verify_optimized_runtime.py
+      - tests/test_optimized_runtime.py
+      - .github/workflows/root-docker-runtime.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-build:
+    name: optimized 3.14t (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build native root image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: turboapi-root-runtime:${{ matrix.arch }}
+          cache-from: type=gha,scope=root-runtime-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=root-runtime-${{ matrix.arch }}
+
+      - name: Verify image architecture and runtime contract
+        run: |
+          test "$(docker image inspect turboapi-root-runtime:${{ matrix.arch }} --format '{{.Architecture}}')" = "${{ matrix.arch }}"
+          docker run --rm turboapi-root-runtime:${{ matrix.arch }} \
+            python3 scripts/verify_optimized_runtime.py \
+              --expect-version 3.14.7 \
+              --require-native
