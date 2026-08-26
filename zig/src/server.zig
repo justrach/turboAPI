@@ -212,6 +212,64 @@ fn parseHandlerType(s: []const u8) HandlerType {
     return handler_type_map.get(s) orelse .enhanced;
 }
 
+const CachedResponse = struct {
+    status_code: u16,
+    content_type: []const u8,
+    body: []const u8,
+    extra_headers: []const u8,
+
+    fn create(status_code: u16, content_type: []const u8, body: []const u8, extra_headers: []const u8) ?*CachedResponse {
+        return createWithAllocator(allocator, status_code, content_type, body, extra_headers) catch null;
+    }
+
+    fn createWithAllocator(
+        cache_allocator: std.mem.Allocator,
+        status_code: u16,
+        content_type: []const u8,
+        body: []const u8,
+        extra_headers: []const u8,
+    ) !*CachedResponse {
+        const result = try cache_allocator.create(CachedResponse);
+        errdefer cache_allocator.destroy(result);
+
+        const content_type_owned = try cache_allocator.dupe(u8, content_type);
+        errdefer cache_allocator.free(content_type_owned);
+        const body_owned = if (body.len > 0) try cache_allocator.dupe(u8, body) else "";
+        errdefer if (body_owned.len > 0) cache_allocator.free(body_owned);
+        const extra_headers_owned = if (extra_headers.len > 0) try cache_allocator.dupe(u8, extra_headers) else "";
+        errdefer if (extra_headers_owned.len > 0) cache_allocator.free(extra_headers_owned);
+
+        result.* = .{
+            .status_code = status_code,
+            .content_type = content_type_owned,
+            .body = body_owned,
+            .extra_headers = extra_headers_owned,
+        };
+        return result;
+    }
+
+    fn destroy(self: *CachedResponse) void {
+        self.destroyWithAllocator(allocator);
+    }
+
+    fn destroyWithAllocator(self: *CachedResponse, cache_allocator: std.mem.Allocator) void {
+        cache_allocator.free(self.content_type);
+        if (self.body.len > 0) cache_allocator.free(self.body);
+        if (self.extra_headers.len > 0) cache_allocator.free(self.extra_headers);
+        cache_allocator.destroy(self);
+    }
+
+    fn send(self: *const CachedResponse, stream: std.Io.net.Stream) void {
+        if (self.status_code == 200 and self.extra_headers.len == 0 and std.mem.eql(u8, self.content_type, "application/json")) {
+            sendCachedJsonBody(stream, self.body);
+        } else if (self.extra_headers.len == 0) {
+            sendResponse(stream, self.status_code, self.content_type, self.body);
+        } else {
+            sendResponseWithExtraHeaders(stream, self.status_code, self.content_type, self.body, self.extra_headers);
+        }
+    }
+};
+
 const HandlerEntry = struct {
     handler: *c.PyObject,
     handler_type: []const u8,
@@ -223,8 +281,7 @@ const HandlerEntry = struct {
     // Vectorcall dispatch: ordered param metadata parsed at registration time
     param_meta: [MAX_PARAMS]ParamMeta = undefined,
     param_count: usize = 0,
-    cached_body_ptr: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
-    cached_body_len: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    cached_response_ptr: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 };
 
 const HeaderPair = struct {
@@ -291,7 +348,7 @@ const StaticRouteEntry = struct {
 var routes: ?std.StringHashMap(HandlerEntry) = null;
 var native_routes: ?std.StringHashMap(NativeHandlerEntry) = null;
 var static_routes: ?std.StringHashMap(StaticRouteEntry) = null;
-var response_cache: ?std.StringHashMap([]const u8) = null;
+var response_cache: ?std.StringHashMap(*CachedResponse) = null;
 var response_cache_lock: std.Io.Mutex = .init;
 var response_cache_count: usize = 0;
 const MAX_CACHE_ENTRIES: usize = 10_000; // bounded to prevent OOM via unique paths
@@ -395,73 +452,72 @@ fn getStaticRoutes() *std.StringHashMap(StaticRouteEntry) {
     return &static_routes.?;
 }
 
-fn getResponseCache() *std.StringHashMap([]const u8) {
+fn getResponseCache() *std.StringHashMap(*CachedResponse) {
     if (response_cache == null) {
-        response_cache = std.StringHashMap([]const u8).init(allocator);
+        response_cache = std.StringHashMap(*CachedResponse).init(allocator);
     }
     return &response_cache.?;
 }
 
-fn getCachedResponse(key: []const u8) ?[]const u8 {
+fn getCachedResponse(key: []const u8) ?*const CachedResponse {
     response_cache_lock.lockUncancelable(runtime.io);
     defer response_cache_lock.unlock(runtime.io);
     if (response_cache == null) return null;
     return response_cache.?.get(key);
 }
 
-/// Cache a pre-rendered response, respecting MAX_CACHE_ENTRIES to prevent OOM.
-fn cacheResponse(key: []const u8, rendered: []const u8) void {
+/// Cache an owned response, respecting MAX_CACHE_ENTRIES to prevent OOM.
+fn cacheResponse(key: []const u8, cached_response: *CachedResponse) void {
     response_cache_lock.lockUncancelable(runtime.io);
     defer response_cache_lock.unlock(runtime.io);
 
     if (response_cache_count >= MAX_CACHE_ENTRIES) {
-        allocator.free(rendered);
+        cached_response.destroy();
         return;
     }
 
-    const key_dupe = allocator.dupe(u8, key) catch return;
+    const key_dupe = allocator.dupe(u8, key) catch {
+        cached_response.destroy();
+        return;
+    };
     const cache = getResponseCache();
     const gop = cache.getOrPut(key_dupe) catch {
-        allocator.free(rendered);
+        cached_response.destroy();
         allocator.free(key_dupe);
         return;
     };
 
     if (gop.found_existing) {
-        allocator.free(rendered);
+        cached_response.destroy();
         allocator.free(key_dupe);
         return;
     }
 
-    gop.value_ptr.* = rendered;
+    gop.value_ptr.* = cached_response;
     response_cache_count += 1;
 }
 
-fn getCachedEntryBody(entry: *const HandlerEntry) ?[]const u8 {
-    const ptr_val = entry.cached_body_ptr.load(.acquire);
+fn getCachedEntryResponse(entry: *const HandlerEntry) ?*const CachedResponse {
+    const ptr_val = entry.cached_response_ptr.load(.acquire);
     if (ptr_val == 0) return null;
-
-    const len = entry.cached_body_len.load(.acquire);
-    const ptr: [*]const u8 = @ptrFromInt(ptr_val);
-    return ptr[0..len];
+    return @ptrFromInt(ptr_val);
 }
 
-fn cacheEntryBody(entry: *HandlerEntry, rendered: []const u8) void {
+fn cacheEntryResponse(entry: *HandlerEntry, cached_response: *CachedResponse) void {
     response_cache_lock.lockUncancelable(runtime.io);
     defer response_cache_lock.unlock(runtime.io);
 
-    if (entry.cached_body_ptr.load(.monotonic) != 0) {
-        allocator.free(rendered);
+    if (entry.cached_response_ptr.load(.monotonic) != 0) {
+        cached_response.destroy();
         return;
     }
 
     if (response_cache_count >= MAX_CACHE_ENTRIES) {
-        allocator.free(rendered);
+        cached_response.destroy();
         return;
     }
 
-    entry.cached_body_len.store(rendered.len, .release);
-    entry.cached_body_ptr.store(@intFromPtr(rendered.ptr), .release);
+    entry.cached_response_ptr.store(@intFromPtr(cached_response), .release);
     response_cache_count += 1;
 }
 
@@ -902,8 +958,8 @@ pub fn server_add_middleware(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.
 }
 
 // ── Response cache for noargs handlers ──────────────────────────────────────
-// After the first Python call, the pre-rendered response bytes are cached.
-// Subsequent calls serve from cache — zero Python, zero GIL, single writeAll.
+// After the first Python call, immutable status/header/body metadata is cached.
+// Subsequent calls serve from cache with a fresh Date — zero Python, zero GIL.
 
 pub fn server_enable_response_cache(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     // Check if response cache is disabled via env var
@@ -3801,8 +3857,8 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     switch (entry.handler_tag) {
         .simple_sync_noargs => {
             if (cache_noargs_responses) {
-                if (getCachedEntryBody(entry_ptr)) |cached| {
-                    sendCachedJsonBody(stream, cached);
+                if (getCachedEntryResponse(entry_ptr)) |cached| {
+                    cached.send(stream);
                     return;
                 }
                 callPythonNoArgsEntryCaching(tstate, entry_ptr, stream);
@@ -3821,7 +3877,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
                 else
                     std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch path;
                 if (getCachedResponse(cache_key)) |cached| {
-                    sendCachedJsonBody(stream, cached);
+                    cached.send(stream);
                     return;
                 }
                 callPythonVectorcallCaching(tstate, entry, query_string, &match.params, stream, cache_key);
@@ -3834,8 +3890,8 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
             const eager = entry.handler_tag == .simple_async_eager;
             if (cache_noargs_responses) {
                 if (entry.param_count == 0) {
-                    if (getCachedEntryBody(entry_ptr)) |cached| {
-                        sendCachedJsonBody(stream, cached);
+                    if (getCachedEntryResponse(entry_ptr)) |cached| {
+                        cached.send(stream);
                         return;
                     }
                     callPythonAsyncNoArgs(tstate, entry, stream, entry_ptr, eager);
@@ -3846,7 +3902,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
                     else
                         std.fmt.bufPrint(&cache_key_buf, "{s} {s}", .{ method, path }) catch path;
                     if (getCachedResponse(cache_key)) |cached| {
-                        sendCachedJsonBody(stream, cached);
+                        cached.send(stream);
                         return;
                     }
                     callPythonAsyncVectorcall(tstate, entry, query_string, &match.params, stream, cache_key, eager);
@@ -4062,93 +4118,193 @@ fn ffiError() FfiResponse {
 }
 
 // ── Tuple ABI helper ─────────────────────────────────────────────────────────
-// Python fast handlers return (status_code, content_type, body_str).
-// Unpack and send — no dict key lookups, no hash computation.
+// Python fast handlers retain the original three-item tuple ABI for ordinary
+// responses.  Response objects with application headers append a fourth item:
+// a flat tuple of name/value strings.  Keeping that extension optional avoids
+// any Python allocation on the common headerless route.
 
-fn sendTupleResponse(stream: std.Io.net.Stream, result: *c.PyObject) void {
-    const sc_obj = py.PyTuple_GetItem(result, 0) orelse {
-        sendResponse(stream, 500, "application/json", "{\"error\":\"bad tuple[0]\"}");
-        return;
-    };
-    const ct_obj = py.PyTuple_GetItem(result, 1) orelse {
-        sendResponse(stream, 500, "application/json", "{\"error\":\"bad tuple[1]\"}");
-        return;
-    };
-    const body_obj = py.PyTuple_GetItem(result, 2) orelse {
-        sendResponse(stream, 500, "application/json", "{\"error\":\"bad tuple[2]\"}");
-        return;
-    };
+const MAX_RESPONSE_HEADER_PAIRS: usize = 128;
+const MAX_RESPONSE_HEADER_BYTES: usize = 16 * 1024;
 
-    const status_code: u16 = @intCast(c.PyLong_AsLong(sc_obj));
-    const ct_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(ct_obj) orelse "application/json";
-    const content_type = std.mem.span(ct_cstr);
+fn isResponseHeaderToken(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |ch| switch (ch) {
+        'a'...'z', 'A'...'Z', '0'...'9', '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => {},
+        else => return false,
+    };
+    return true;
+}
 
-    if (c.PyUnicode_Check(body_obj) != 0) {
-        if (c.PyUnicode_AsUTF8(body_obj)) |cs| {
-            sendResponse(stream, status_code, content_type, std.mem.span(cs));
-            return;
-        }
-    } else if (c.PyBytes_Check(body_obj) != 0) {
-        var size: c.Py_ssize_t = 0;
-        var buf: [*c]u8 = undefined;
-        if (c.PyBytes_AsStringAndSize(body_obj, @ptrCast(&buf), &size) == 0) {
-            sendResponse(stream, status_code, content_type, buf[0..@intCast(size)]);
-            return;
+fn isSafeResponseHeaderValue(value: []const u8) bool {
+    for (value) |ch| {
+        if (ch == '\t') continue;
+        if (ch < 0x20 or ch == 0x7f) return false;
+    }
+    return true;
+}
+
+fn isZigOwnedResponseHeader(name: []const u8) bool {
+    const owned = [_][]const u8{
+        "connection",
+        "content-length",
+        "content-type",
+        "date",
+        "keep-alive",
+        "server",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    };
+    for (owned) |candidate| {
+        if (std.ascii.eqlIgnoreCase(name, candidate)) return true;
+    }
+    return false;
+}
+
+fn renderTupleExtraHeaders(result: *c.PyObject) ?[]u8 {
+    const headers_obj = py.PyTuple_GetItem(result, 3) orelse return null;
+    if (c.PyTuple_Check(headers_obj) == 0) return null;
+
+    const item_count_signed = c.PyTuple_Size(headers_obj);
+    if (item_count_signed <= 0 or @mod(item_count_signed, 2) != 0) return null;
+    const pair_count = @min(@as(usize, @intCast(@divExact(item_count_signed, 2))), MAX_RESPONSE_HEADER_PAIRS);
+
+    var rendered: std.ArrayList(u8) = .empty;
+    defer rendered.deinit(allocator);
+    for (0..pair_count) |pair_index| {
+        const name_obj = py.PyTuple_GetItem(headers_obj, @intCast(pair_index * 2)) orelse continue;
+        const value_obj = py.PyTuple_GetItem(headers_obj, @intCast(pair_index * 2 + 1)) orelse continue;
+
+        var name_len: c.Py_ssize_t = 0;
+        const name_ptr = c.PyUnicode_AsUTF8AndSize(name_obj, &name_len) orelse {
+            c.PyErr_Clear();
+            continue;
+        };
+        var value_len: c.Py_ssize_t = 0;
+        const value_ptr = c.PyUnicode_AsUTF8AndSize(value_obj, &value_len) orelse {
+            c.PyErr_Clear();
+            continue;
+        };
+        if (name_len < 0 or value_len < 0) continue;
+        const name = name_ptr[0..@intCast(name_len)];
+        const value = value_ptr[0..@intCast(value_len)];
+        if (!isResponseHeaderToken(name) or !isSafeResponseHeaderValue(value) or isZigOwnedResponseHeader(name)) continue;
+
+        const required = 2 + name.len + 2 + value.len;
+        if (rendered.items.len + required > MAX_RESPONSE_HEADER_BYTES) break;
+        rendered.appendSlice(allocator, "\r\n") catch return null;
+        rendered.appendSlice(allocator, name) catch return null;
+        rendered.appendSlice(allocator, ": ") catch return null;
+        rendered.appendSlice(allocator, value) catch return null;
+    }
+
+    if (rendered.items.len == 0) {
+        return null;
+    }
+    return rendered.toOwnedSlice(allocator) catch null;
+}
+
+const TupleResponse = struct {
+    status_code: u16,
+    content_type: []const u8,
+    body: []const u8,
+    extra_headers: ?[]u8,
+
+    fn deinit(self: TupleResponse) void {
+        if (self.extra_headers) |headers| allocator.free(headers);
+    }
+
+    fn send(self: TupleResponse, stream: std.Io.net.Stream) void {
+        if (self.extra_headers) |headers| {
+            sendResponseWithExtraHeaders(stream, self.status_code, self.content_type, self.body, headers);
+        } else {
+            sendResponse(stream, self.status_code, self.content_type, self.body);
         }
     }
-    sendResponse(stream, 500, "application/json", "{\"error\":\"bad tuple body\"}");
+
+    fn cloneForCache(self: TupleResponse) ?*CachedResponse {
+        return CachedResponse.create(self.status_code, self.content_type, self.body, self.extra_headers orelse "");
+    }
+};
+
+fn extractTupleResponse(result: *c.PyObject) ?TupleResponse {
+    if (c.PyTuple_Check(result) == 0) return null;
+    const tuple_size = c.PyTuple_Size(result);
+    if (tuple_size < 3) return null;
+    const sc_obj = py.PyTuple_GetItem(result, 0) orelse return null;
+    const ct_obj = py.PyTuple_GetItem(result, 1) orelse return null;
+    const body_obj = py.PyTuple_GetItem(result, 2) orelse return null;
+
+    const status_long = c.PyLong_AsLong(sc_obj);
+    if (status_long < 100 or status_long > 599) {
+        c.PyErr_Clear();
+        return null;
+    }
+
+    var content_type_len: c.Py_ssize_t = 0;
+    const content_type_ptr = c.PyUnicode_AsUTF8AndSize(ct_obj, &content_type_len) orelse {
+        c.PyErr_Clear();
+        return null;
+    };
+    if (content_type_len <= 0) return null;
+    const content_type = content_type_ptr[0..@intCast(content_type_len)];
+    if (!isSafeResponseHeaderValue(content_type)) return null;
+
+    var body: []const u8 = "";
+    if (c.PyUnicode_Check(body_obj) != 0) {
+        var body_len: c.Py_ssize_t = 0;
+        const body_ptr = c.PyUnicode_AsUTF8AndSize(body_obj, &body_len) orelse {
+            c.PyErr_Clear();
+            return null;
+        };
+        if (body_len < 0) return null;
+        body = body_ptr[0..@intCast(body_len)];
+    } else if (c.PyBytes_Check(body_obj) != 0) {
+        var body_len: c.Py_ssize_t = 0;
+        var body_ptr: [*c]u8 = undefined;
+        if (c.PyBytes_AsStringAndSize(body_obj, @ptrCast(&body_ptr), &body_len) != 0 or body_len < 0) {
+            c.PyErr_Clear();
+            return null;
+        }
+        body = body_ptr[0..@intCast(body_len)];
+    } else return null;
+
+    return .{
+        .status_code = @intCast(status_long),
+        .content_type = content_type,
+        .body = body,
+        .extra_headers = if (tuple_size >= 4) renderTupleExtraHeaders(result) else null,
+    };
+}
+
+fn sendTupleResponse(stream: std.Io.net.Stream, result: *c.PyObject) void {
+    const response = extractTupleResponse(result) orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"bad response tuple\"}");
+        return;
+    };
+    defer response.deinit();
+    response.send(stream);
 }
 
 fn sendTupleResponseAndCache(stream: std.Io.net.Stream, result: *c.PyObject, cache_key: []const u8) void {
-    const sc_obj = py.PyTuple_GetItem(result, 0) orelse return;
-    const ct_obj = py.PyTuple_GetItem(result, 1) orelse return;
-    const body_obj = py.PyTuple_GetItem(result, 2) orelse return;
-
-    const status_code: u16 = @intCast(c.PyLong_AsLong(sc_obj));
-    const ct_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(ct_obj) orelse "application/json";
-    const content_type = std.mem.span(ct_cstr);
-
-    var body_slice: []const u8 = "";
-    if (c.PyUnicode_Check(body_obj) != 0) {
-        if (c.PyUnicode_AsUTF8(body_obj)) |cs| body_slice = std.mem.span(cs);
-    } else if (c.PyBytes_Check(body_obj) != 0) {
-        var size: c.Py_ssize_t = 0;
-        var buf: [*c]u8 = undefined;
-        if (c.PyBytes_AsStringAndSize(body_obj, @ptrCast(&buf), &size) == 0) {
-            body_slice = buf[0..@intCast(size)];
-        }
-    }
-
-    sendResponse(stream, status_code, content_type, body_slice);
-
-    const body_dupe = allocator.dupe(u8, body_slice) catch return;
-    cacheResponse(cache_key, body_dupe);
+    const response = extractTupleResponse(result) orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"bad response tuple\"}");
+        return;
+    };
+    defer response.deinit();
+    response.send(stream);
+    if (response.cloneForCache()) |cached| cacheResponse(cache_key, cached);
 }
 
 fn sendTupleResponseAndCacheEntry(stream: std.Io.net.Stream, result: *c.PyObject, entry: *HandlerEntry) void {
-    const sc_obj = py.PyTuple_GetItem(result, 0) orelse return;
-    const ct_obj = py.PyTuple_GetItem(result, 1) orelse return;
-    const body_obj = py.PyTuple_GetItem(result, 2) orelse return;
-
-    const status_code: u16 = @intCast(c.PyLong_AsLong(sc_obj));
-    const ct_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(ct_obj) orelse "application/json";
-    const content_type = std.mem.span(ct_cstr);
-
-    var body_slice: []const u8 = "";
-    if (c.PyUnicode_Check(body_obj) != 0) {
-        if (c.PyUnicode_AsUTF8(body_obj)) |cs| body_slice = std.mem.span(cs);
-    } else if (c.PyBytes_Check(body_obj) != 0) {
-        var size: c.Py_ssize_t = 0;
-        var buf: [*c]u8 = undefined;
-        if (c.PyBytes_AsStringAndSize(body_obj, @ptrCast(&buf), &size) == 0) {
-            body_slice = buf[0..@intCast(size)];
-        }
-    }
-
-    sendResponse(stream, status_code, content_type, body_slice);
-
-    const body_dupe = allocator.dupe(u8, body_slice) catch return;
-    cacheEntryBody(entry, body_dupe);
+    const response = extractTupleResponse(result) orelse {
+        sendResponse(stream, 500, "application/json", "{\"error\":\"bad response tuple\"}");
+        return;
+    };
+    defer response.deinit();
+    response.send(stream);
+    if (response.cloneForCache()) |cached| cacheEntryResponse(entry, cached);
 }
 
 // ── simple_sync_noargs: PyObject_CallNoArgs — no tuple/dict construction ─────
@@ -4379,7 +4535,7 @@ fn callPythonAsyncVectorcall(
     }
 }
 
-/// Like callPythonVectorcall but caches the pre-rendered response keyed by full path.
+/// Like callPythonVectorcall but caches the complete response keyed by full path.
 fn callPythonVectorcallCaching(
     tstate: ?*anyopaque,
     entry: HandlerEntry,
@@ -4443,35 +4599,11 @@ fn callPythonVectorcallCaching(
     };
     defer c.Py_DecRef(result);
 
-    // Extract tuple and send + cache
-    const sc_obj = py.PyTuple_GetItem(result, 0) orelse return;
-    const ct_obj = py.PyTuple_GetItem(result, 1) orelse return;
-    const body_obj = py.PyTuple_GetItem(result, 2) orelse return;
-
-    const status_code: u16 = @intCast(c.PyLong_AsLong(sc_obj));
-    const ct_cstr: [*c]const u8 = c.PyUnicode_AsUTF8(ct_obj) orelse "application/json";
-    const content_type = std.mem.span(ct_cstr);
-
-    var body_slice: []const u8 = "";
-    if (c.PyUnicode_Check(body_obj) != 0) {
-        if (c.PyUnicode_AsUTF8(body_obj)) |cs| body_slice = std.mem.span(cs);
-    } else if (c.PyBytes_Check(body_obj) != 0) {
-        var size: c.Py_ssize_t = 0;
-        var buf: [*c]u8 = undefined;
-        if (c.PyBytes_AsStringAndSize(body_obj, @ptrCast(&buf), &size) == 0) {
-            body_slice = buf[0..@intCast(size)];
-        }
-    }
-
-    sendResponse(stream, status_code, content_type, body_slice);
-
-    // Cache body only (sendResponse adds fresh Date headers on each hit)
-    const body_dupe = allocator.dupe(u8, body_slice) catch return;
-    cacheResponse(cache_key, body_dupe);
+    sendTupleResponseAndCache(stream, result, cache_key);
 }
 
 // ── Fast Python handler dispatch (simple_sync/body_sync) ─────────────────────
-// Calls Python with kwargs dict, unpacks 3-tuple response — zero extra allocs.
+// Calls Python with kwargs dict and unpacks the tuple response ABI.
 
 fn setPathParamsKwarg(kwargs: *c.PyObject, params: *const router_mod.RouteParams) bool {
     if (params.len == 0) return true;
@@ -4554,7 +4686,7 @@ fn callPythonHandlerDirect(tstate: ?*anyopaque, entry: HandlerEntry, query_strin
     };
     defer c.Py_DecRef(result);
 
-    // Unpack (status_code, content_type, body_str) 3-tuple
+    // Unpack the three-item ABI or its optional application-header extension.
     sendTupleResponse(stream, result);
 }
 
@@ -5059,6 +5191,41 @@ fn statusText(status: u16) []const u8 {
 /// Zero-alloc response writer.  Header + body are concatenated into a stack
 /// buffer for a single write syscall (most API responses are <4KB).
 /// Falls back to two writes only for large responses.
+fn sendResponseWithExtraHeaders(
+    stream: std.Io.net.Stream,
+    status: u16,
+    content_type: []const u8,
+    body: []const u8,
+    extra_headers: []const u8,
+) void {
+    const date_str = currentHttpDate();
+    const cors = cors_headers;
+    var header_buf: [512]u8 = undefined;
+    const header = std.fmt.bufPrint(
+        &header_buf,
+        "HTTP/1.1 {d} {s}\r\nServer: TurboAPI\r\nDate: {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive",
+        .{ status, statusText(status), date_str, content_type, body.len },
+    ) catch return;
+
+    const trailer = "\r\n\r\n";
+    const total = header.len + cors.len + extra_headers.len + trailer.len + body.len;
+    if (total <= 4096) {
+        var resp_buf: [4096]u8 = undefined;
+        var pos: usize = 0;
+        for ([_][]const u8{ header, cors, extra_headers, trailer, body }) |part| {
+            @memcpy(resp_buf[pos .. pos + part.len], part);
+            pos += part.len;
+        }
+        streamWriteAll(stream, resp_buf[0..pos]) catch return;
+    } else {
+        streamWriteAll(stream, header) catch return;
+        if (cors.len > 0) streamWriteAll(stream, cors) catch return;
+        streamWriteAll(stream, extra_headers) catch return;
+        streamWriteAll(stream, trailer) catch return;
+        if (body.len > 0) streamWriteAll(stream, body) catch return;
+    }
+}
+
 pub fn sendResponse(stream: std.Io.net.Stream, status: u16, content_type: []const u8, body: []const u8) void {
     // TFB requires Server + Date headers
     const date_str = currentHttpDate();
@@ -5130,12 +5297,29 @@ const CacheThreadCtx = struct {
     iterations: usize,
 };
 
+fn checkCachedResponseAllocationFailure(test_allocator: std.mem.Allocator) !void {
+    const response = try CachedResponse.createWithAllocator(
+        test_allocator,
+        201,
+        "application/json",
+        "{\"ok\":true}",
+        "\r\nCache-Control: no-store",
+    );
+    defer response.destroyWithAllocator(test_allocator);
+    try std.testing.expectEqual(@as(u16, 201), response.status_code);
+    try std.testing.expectEqualStrings("application/json", response.content_type);
+    try std.testing.expectEqualStrings("{\"ok\":true}", response.body);
+    try std.testing.expectEqualStrings("\r\nCache-Control: no-store", response.extra_headers);
+}
+
 fn cacheThreadWorker(ctx: *const CacheThreadCtx) void {
     for (0..ctx.iterations) |_| {
-        const rendered = allocator.dupe(u8, ctx.body) catch return;
-        cacheResponse(ctx.key, rendered);
+        const response = CachedResponse.create(201, "application/json", ctx.body, "\r\nCache-Control: no-store") orelse return;
+        cacheResponse(ctx.key, response);
         const cached = getCachedResponse(ctx.key) orelse continue;
-        std.debug.assert(std.mem.eql(u8, cached, ctx.body));
+        std.debug.assert(cached.status_code == 201);
+        std.debug.assert(std.mem.eql(u8, cached.body, ctx.body));
+        std.debug.assert(std.mem.eql(u8, cached.extra_headers, "\r\nCache-Control: no-store"));
     }
 }
 
@@ -5165,6 +5349,32 @@ test "websocket close code validation excludes reserved and out-of-range values"
     try std.testing.expect(!isValidWebSocketCloseCode(5000));
 }
 
+test "response header validation rejects splitting and framing overrides" {
+    try std.testing.expect(isResponseHeaderToken("Cache-Control"));
+    try std.testing.expect(isResponseHeaderToken("X_Code-Policy"));
+    try std.testing.expect(!isResponseHeaderToken("X-Bad\r\nInjected"));
+    try std.testing.expect(!isResponseHeaderToken("X Bad"));
+
+    try std.testing.expect(isSafeResponseHeaderValue("private, no-store"));
+    try std.testing.expect(isSafeResponseHeaderValue("value\tparameter"));
+    try std.testing.expect(!isSafeResponseHeaderValue("safe\r\nX-Injected: value"));
+    try std.testing.expect(!isSafeResponseHeaderValue("value\x7f"));
+
+    try std.testing.expect(isZigOwnedResponseHeader("Content-Length"));
+    try std.testing.expect(isZigOwnedResponseHeader("TRANSFER-ENCODING"));
+    try std.testing.expect(isZigOwnedResponseHeader("Keep-Alive"));
+    try std.testing.expect(isZigOwnedResponseHeader("Trailer"));
+    try std.testing.expect(!isZigOwnedResponseHeader("Cache-Control"));
+}
+
+test "cached response construction is allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkCachedResponseAllocationFailure,
+        .{},
+    );
+}
+
 test "response cache is safe under concurrent access" {
     // std.Io.Mutex requires an initialized runtime.io — set up a minimal threaded runtime.
     runtime.initForTest(std.heap.c_allocator, .{ .async_limit = .nothing });
@@ -5187,8 +5397,13 @@ test "response cache is safe under concurrent access" {
     for (threads) |thread| thread.join();
 
     try std.testing.expectEqual(@as(usize, 2), response_cache_count);
-    try std.testing.expectEqualStrings("{\"item_id\":1}", getCachedResponse("GET /items/1").?);
-    try std.testing.expectEqualStrings("{\"item_id\":2}", getCachedResponse("GET /items/2").?);
+    const first = getCachedResponse("GET /items/1").?;
+    const second = getCachedResponse("GET /items/2").?;
+    try std.testing.expectEqual(@as(u16, 201), first.status_code);
+    try std.testing.expectEqualStrings("application/json", first.content_type);
+    try std.testing.expectEqualStrings("{\"item_id\":1}", first.body);
+    try std.testing.expectEqualStrings("\r\nCache-Control: no-store", first.extra_headers);
+    try std.testing.expectEqualStrings("{\"item_id\":2}", second.body);
 }
 
 test "websocket read buffer grows past inline capacity without losing bytes" {

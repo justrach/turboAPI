@@ -24,6 +24,7 @@ from turboapi.request_handler import (
     create_fast_handler,
     create_fast_model_handler,
 )
+from turboapi.responses import JSONResponse
 from turboapi.zig_integration import classify_handler
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -110,6 +111,36 @@ def test_fast_handler_returns_tuple_for_noargs():
     assert isinstance(result, tuple) and len(result) == 3
     assert result[0] == 200
     assert "ping" in result[2]
+
+
+def test_fast_handler_response_headers_extend_tuple_abi_only_when_needed():
+    """Application headers use the optional fourth ABI field."""
+
+    def with_headers():
+        return JSONResponse(
+            {"ok": True},
+            status_code=201,
+            headers={"cache-control": "no-store", "x-test": "present"},
+        )
+
+    result = create_fast_handler(with_headers, FakeRoute("GET"))()
+    assert result[:3] == (201, "application/json", b'{"ok":true}')
+    assert result[3] == (
+        "cache-control",
+        "no-store",
+        "x-test",
+        "present",
+    )
+
+
+def test_headerless_response_keeps_three_item_tuple_abi():
+    """Existing native consumers still receive the original ABI."""
+
+    def without_headers():
+        return JSONResponse({"ok": True}, status_code=201)
+
+    result = create_fast_handler(without_headers, FakeRoute("GET"))()
+    assert result == (201, "application/json", b'{"ok":true}')
 
 
 def test_fast_handler_returns_tuple_with_path_param():

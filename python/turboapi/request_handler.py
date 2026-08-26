@@ -1250,7 +1250,7 @@ def create_pos_handler(original_handler):
 
     Zig assembles args from path/query params and calls this positionally —
     zero **kwargs dict, zero parse_qs, zero call_kwargs allocation.
-    Returns (status_code, content_type, body) 3-tuple for sendTupleResponse.
+    Returns the three-item tuple ABI, optionally extended with Response headers.
     """
     import json as _json
 
@@ -1262,10 +1262,7 @@ def create_pos_handler(original_handler):
         try:
             result = original_handler(*args)
             if isinstance(result, _Response):
-                body = (
-                    result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
-                )
-                return (result.status_code, result.media_type or "application/json", body)
+                return result._native_tuple()
             if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
@@ -1291,10 +1288,7 @@ def create_async_pos_handler(original_handler):
         try:
             result = await original_handler(*args)
             if isinstance(result, _Response):
-                body = (
-                    result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
-                )
-                return (result.status_code, result.media_type or "application/json", body)
+                return result._native_tuple()
             if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:
@@ -1311,8 +1305,8 @@ def create_async_pos_handler(original_handler):
 def create_fast_handler(original_handler, route_definition):
     """Create a minimal-overhead handler for simple sync routes.
 
-    Returns a 3-tuple (status_code, content_type, body_str) so Zig can unpack
-    via PyTuple_GET_ITEM — eliminates 3x PyDict_GetItemString per request.
+    Returns the three-item tuple ABI, optionally extended with Response headers,
+    so Zig can unpack via tuple indexing without response-dict lookups.
     """
     import json as _json
 
@@ -1345,13 +1339,7 @@ def create_fast_handler(original_handler, route_definition):
             try:
                 result = original_handler()
                 if isinstance(result, _Response):
-                    ct = result.media_type or "application/json"
-                    body = (
-                        result.body
-                        if isinstance(result.body, bytes)
-                        else result.body.encode("utf-8")
-                    )
-                    return (result.status_code, ct, body)
+                    return result._native_tuple()
                 if isinstance(result, tuple) and len(result) == 2:
                     return (result[1], "application/json", _dumps(result[0]))
                 if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
@@ -1403,11 +1391,7 @@ def create_fast_handler(original_handler, route_definition):
             result = original_handler(**call_kwargs)
 
             if isinstance(result, _Response):
-                ct = result.media_type or "application/json"
-                body = (
-                    result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
-                )
-                return (result.status_code, ct, body)
+                return result._native_tuple()
 
             if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
@@ -1512,11 +1496,7 @@ def create_fast_async_handler(original_handler, route_definition, eager: bool = 
             result = await original_handler(**call_kwargs)
 
             if isinstance(result, _Response):
-                ct = result.media_type or "application/json"
-                body = (
-                    result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
-                )
-                return (result.status_code, ct, body)
+                return result._native_tuple()
 
             if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
@@ -1537,13 +1517,14 @@ def create_fast_model_handler(original_handler, model_class, param_name):
     """Create a minimal handler for model_sync routes.
 
     Zig has already validated the JSON body against the schema.
-    Returns a 3-tuple (status_code, content_type, body_str) for tuple ABI.
+    Returns the three-item tuple ABI, optionally extended with Response headers.
     """
     import json as _json
 
     _loads = _json.loads
     _dumps = _json.dumps
     _returns_md = _returns_model(original_handler)
+    from turboapi.responses import Response as _Response
 
     def _model_class_with_dhi_compat():
         """Use a route-local subclass for dhi versions that omit untyped lists."""
@@ -1612,6 +1593,8 @@ def create_fast_model_handler(original_handler, model_class, param_name):
             model = handler_model_class(**data)
             result = original_handler(**{param_name: model})
 
+            if isinstance(result, _Response):
+                return result._native_tuple()
             if _returns_md or (_returns_md is None and hasattr(result, "model_dump")):
                 result = result.model_dump()
             if isinstance(result, tuple) and len(result) == 2:

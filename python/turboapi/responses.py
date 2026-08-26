@@ -52,6 +52,26 @@ class Response:
                 return self.body.decode("utf-8")
         return self._content
 
+    def _native_tuple(self) -> tuple:
+        """Return TurboAPI's private native response ABI.
+
+        Headerless responses keep the original three-item tuple so ordinary
+        hot routes pay no extra allocation.  Responses with application
+        headers append a flat tuple of name/value pairs; the Zig boundary
+        validates every pair before writing it to the wire.
+        """
+        body = self.body if isinstance(self.body, bytes) else self.body.encode("utf-8")
+        base = (self.status_code, self.media_type or "application/json", body)
+        if not self.headers:
+            return base
+
+        flat_headers: list[str] = []
+        for name, value in self.headers.items():
+            values = value if isinstance(value, (list, tuple)) else (value,)
+            for item in values:
+                flat_headers.extend((str(name), str(item)))
+        return (*base, tuple(flat_headers))
+
     def set_cookie(
         self,
         key: str,
