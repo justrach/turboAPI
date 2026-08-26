@@ -123,13 +123,19 @@ jobs:
       - name: Build turbonet extension
         run: python zig/build_turbonet.py --install --release
 
-      - name: Install deps
+      - name: Create benchmark environment
         run: |
-          pip install -e .
-          pip install uv fastapi pydantic
+          pip install uv
+          uv venv --python 3.14t .venv
+          uv pip install --python .venv/bin/python -e . fastapi httpx2 pydantic
+
+      - name: Verify benchmark imports
+        run: |
+          uv run --no-sync --python .venv/bin/python python -c \
+            "import dhi, fastapi, pydantic, turboapi; from fastapi.testclient import TestClient; print('benchmark imports ok')"
 
       - name: Run FastAPI comparison
-        run: uv run --python 3.14t python benchmarks/bench_throughput.py
+        run: uv run --no-sync --python .venv/bin/python python benchmarks/bench_throughput.py
 
       - name: Upload comparison results
         if: always()

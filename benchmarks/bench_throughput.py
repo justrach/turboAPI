@@ -5,8 +5,12 @@ Request Throughput Benchmark: TurboAPI vs FastAPI
 Measures requests per second using test clients.
 """
 
+import json
+import os
+import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 # Import frameworks
 try:
@@ -28,6 +32,8 @@ except ImportError:
 # Import validation libraries for models
 import dhi
 import pydantic
+
+RESULTS_FILE = Path(os.environ.get("BENCH_RESULTS_FILE", "/tmp/bench_results.json"))
 
 
 @dataclass
@@ -227,6 +233,19 @@ def main():
     print()
     print("Note: Test client benchmarks measure framework overhead.")
     print("Real-world HTTP benchmarks may show different results.")
+
+    payload = {
+        "schema_version": 1,
+        "benchmark": "turboapi-vs-fastapi-testclient",
+        "python_version": sys.version,
+        "dhi_version": dhi.__version__,
+        "pydantic_version": pydantic.__version__,
+        "iterations_per_endpoint": ITERATIONS,
+        "average_speedup": avg_speedup,
+        "results": [asdict(result) for result in results],
+    }
+    RESULTS_FILE.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    print(f"Results written to {RESULTS_FILE}")
 
 
 if __name__ == "__main__":
