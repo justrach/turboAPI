@@ -72,6 +72,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
     steps:
       - uses: actions/checkout@v4
@@ -128,3 +129,10 @@ jobs:
           git commit -m "release: v${VERSION}"
           git tag "v${VERSION}"
           git push && git push --tags
+
+      - name: Dispatch tag build and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.bump.outputs.version }}"
+          gh workflow run build-and-release.yml --ref "v${VERSION}"
