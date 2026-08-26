@@ -727,6 +727,18 @@ class TestOpenAPI:
 
 
 class TestWebSocket:
+    def test_websocket_transport_env_limits_are_hard_capped(self, monkeypatch):
+        from turboapi.websockets import _bounded_int_env
+
+        monkeypatch.setenv("TURBO_TEST_WS_BOUND", str(1 << 62))
+        assert _bounded_int_env("TURBO_TEST_WS_BOUND", 64, 1, 1024) == 1024
+        monkeypatch.setenv("TURBO_TEST_WS_BOUND", "0")
+        assert _bounded_int_env("TURBO_TEST_WS_BOUND", 64, 1, 1024) == 1
+        monkeypatch.setenv("TURBO_TEST_WS_BOUND", "invalid")
+        assert _bounded_int_env("TURBO_TEST_WS_BOUND", 64, 1, 1024) == 64
+        monkeypatch.setenv("TURBO_WS_QUEUE_MESSAGES", "3")
+        assert WebSocket()._zig_inbound.maxsize == 3
+
     def test_websocket_decorator(self):
         app = TurboAPI(title="WSTest")
 
@@ -760,6 +772,17 @@ class TestWebSocket:
         sent = await ws._send_queue.get()
         assert sent["type"] == "text"
         assert json.loads(sent["data"]) == {"key": "value"}
+
+    @pytest.mark.asyncio
+    async def test_websocket_rejects_invalid_close_code_and_oversized_reason(self):
+        ws = WebSocket()
+        await ws.accept()
+        with pytest.raises(ValueError, match="close code"):
+            await ws.close(code=1005)
+        with pytest.raises(ValueError, match="123 UTF-8 bytes"):
+            await ws.close(code=1000, reason="x" * 124)
+        with pytest.raises(ValueError, match="valid UTF-8"):
+            await ws.close(code=1000, reason="\ud800")
 
     def test_websocket_scope_metadata(self):
         ws = WebSocket(

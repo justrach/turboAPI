@@ -1,9 +1,9 @@
 """Real-core regression coverage for native connection capacity.
 
-TurboAPI currently gives an upgraded WebSocket exclusive use of one connection
-worker for its lifetime.  This test intentionally uses a four-worker server,
-caps WebSockets at three, and verifies that the fourth upgrade is rejected
-before ``101 Switching Protocols`` while the reserved worker still serves HTTP.
+TurboAPI transfers upgraded WebSockets to an isolated, bounded worker pool.
+This test intentionally uses one ordinary HTTP worker and three WebSocket
+workers, verifies that the fourth upgrade is rejected before ``101 Switching
+Protocols``, and proves HTTP remains responsive under the saturated WS load.
 
 The native HTTP core also keeps a worker attached to each persistent connection.
 The pool-ceiling regression starts 256 workers and proves that all 256 requested
@@ -58,8 +58,8 @@ def capped_ws_server():
     env = os.environ.copy()
     env.update(
         {
-            "TURBO_THREAD_POOL_SIZE": "4",
-            "TURBO_HTTP_WORKER_RESERVE": "1",
+            "TURBO_THREAD_POOL_SIZE": "1",
+            "TURBO_WS_WORKER_POOL_SIZE": "3",
             "TURBO_MAX_WEBSOCKETS": "3",
         }
     )
@@ -85,6 +85,152 @@ def capped_ws_server():
 
     yield f"127.0.0.1:{port}"
 
+    proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+@pytest.fixture
+def backpressure_ws_server():
+    port = _free_port()
+    script = textwrap.dedent(
+        f"""
+        import asyncio
+
+        from turboapi import TurboAPI
+        from turboapi.websockets import WebSocket, WebSocketDisconnect
+
+        app = TurboAPI(title="ws-backpressure-e2e", version="0.0.1")
+
+        @app.get("/ping")
+        def ping():
+            return {{"ok": True}}
+
+        @app.websocket("/ws-slow-reader")
+        async def slow_reader(ws: WebSocket):
+            await ws.accept()
+            payload = b"x" * (256 * 1024)
+            await asyncio.gather(
+                *(ws.send_bytes(payload) for _ in range(32)),
+                return_exceptions=True,
+            )
+
+        @app.websocket("/ws-inbound-overload")
+        async def inbound_overload(ws: WebSocket):
+            await ws.accept()
+            await asyncio.sleep(0.2)
+            try:
+                await ws.receive_text()
+            except WebSocketDisconnect:
+                pass
+
+        @app.websocket("/ws-idle")
+        async def idle_socket(ws: WebSocket):
+            await ws.accept()
+            await asyncio.sleep(0.35)
+            await ws.send_text("still-alive")
+            await ws.close()
+
+        if __name__ == "__main__":
+            app.run(host="127.0.0.1", port={port})
+        """
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "TURBO_THREAD_POOL_SIZE": "1",
+            "TURBO_WS_WORKER_POOL_SIZE": "2",
+            "TURBO_MAX_WEBSOCKETS": "2",
+            "TURBO_WS_QUEUE_MESSAGES": "4",
+            "TURBO_WS_QUEUE_BYTES": str(1024 * 1024),
+            "TURBO_HTTP_HEADER_TIMEOUT_MS": "100",
+        }
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                break
+        except OSError:
+            if proc.poll() is not None:
+                raise RuntimeError(f"backpressure server exited with {proc.returncode}")
+            time.sleep(0.05)
+    else:
+        proc.terminate()
+        raise TimeoutError(f"backpressure server did not start on {port}")
+
+    yield f"127.0.0.1:{port}", proc
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+@pytest.fixture
+def blocked_write_ws_server():
+    port = _free_port()
+    script = textwrap.dedent(
+        f"""
+        from turboapi import TurboAPI
+        from turboapi.websockets import WebSocket
+
+        app = TurboAPI(title="ws-blocked-write", version="0.0.1")
+
+        @app.get("/ping")
+        def ping():
+            return {{"ok": True}}
+
+        @app.websocket("/ws-one-blocked-write")
+        async def one_blocked_write(ws: WebSocket):
+            await ws.accept()
+            await ws.send_bytes(b"x" * (16 * 1024 * 1024))
+            await ws.close()
+
+        if __name__ == "__main__":
+            app.run(host="127.0.0.1", port={port})
+        """
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "TURBO_THREAD_POOL_SIZE": "1",
+            "TURBO_WS_WORKER_POOL_SIZE": "1",
+            "TURBO_MAX_WEBSOCKETS": "1",
+            "TURBO_WS_QUEUE_BYTES": str(16 * 1024 * 1024),
+            "TURBO_WS_WRITE_TIMEOUT_MS": "100",
+        }
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                break
+        except OSError:
+            if proc.poll() is not None:
+                raise RuntimeError(f"blocked-write server exited with {proc.returncode}")
+            time.sleep(0.05)
+    else:
+        proc.terminate()
+        raise TimeoutError(f"blocked-write server did not start on {port}")
+    yield f"127.0.0.1:{port}", proc
     proc.terminate()
     try:
         proc.wait(timeout=3)
@@ -223,12 +369,12 @@ def _wait_for_log(
     )
 
 
-def _upgrade(server: str) -> tuple[socket.socket, int]:
+def _upgrade(server: str, path: str = "/ws-echo") -> tuple[socket.socket, int]:
     host, port_text = server.rsplit(":", 1)
     client = socket.create_connection((host, int(port_text)), timeout=1.0)
     key = base64.b64encode(b"turbo-capacity-1").decode("ascii")
     request = (
-        "GET /ws-echo HTTP/1.1\r\n"
+        f"GET {path} HTTP/1.1\r\n"
         f"Host: {server}\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
@@ -250,6 +396,13 @@ def _upgrade(server: str) -> tuple[socket.socket, int]:
     return client, status
 
 
+def _rss_kib(pid: int) -> int:
+    output = subprocess.check_output(
+        ["ps", "-o", "rss=", "-p", str(pid)], text=True
+    ).strip()
+    return int(output)
+
+
 def _close_websocket(client: socket.socket) -> None:
     # Masked close frame with status 1000. Waiting for the peer close makes the
     # worker's deferred active-count cleanup deterministic before reconnect.
@@ -265,7 +418,14 @@ def _close_websocket(client: socket.socket) -> None:
         client.close()
 
 
-def test_websocket_cap_preserves_http_worker_and_reuses_slot(capped_ws_server: str) -> None:
+def _masked_text_frame(payload: bytes) -> bytes:
+    assert len(payload) <= 125
+    mask = b"\x11\x22\x33\x44"
+    masked = bytes(byte ^ mask[index & 3] for index, byte in enumerate(payload))
+    return bytes((0x81, 0x80 | len(payload))) + mask + masked
+
+
+def test_websocket_pool_isolates_http_and_reuses_slot(capped_ws_server: str) -> None:
     clients: list[socket.socket] = []
     try:
         for _ in range(3):
@@ -277,8 +437,8 @@ def test_websocket_cap_preserves_http_worker_and_reuses_slot(capped_ws_server: s
         rejected.close()
         assert status == 503
 
-        # The WebSockets are all deliberately idle here.  HTTP must still have
-        # a worker available instead of waiting behind those long-lived sockets.
+        # The WebSockets are all deliberately idle here. The sole HTTP worker
+        # remains available because upgraded sockets have transferred pools.
         assert _http_ping(capped_ws_server) == {"ok": True}
 
         _close_websocket(clients.pop())
@@ -290,6 +450,98 @@ def test_websocket_cap_preserves_http_worker_and_reuses_slot(capped_ws_server: s
     finally:
         for client in clients:
             _close_websocket(client)
+
+
+def test_slow_reader_is_bounded_and_http_remains_responsive(
+    backpressure_ws_server,
+) -> None:
+    server, proc = backpressure_ws_server
+    rss_before = _rss_kib(proc.pid)
+    clients = []
+    try:
+        # Two connections simultaneously saturate their bounded native output
+        # queues. Emergency abort does not wait behind a blocked writer, so
+        # both transports still shed promptly instead of deadlocking.
+        for _ in range(2):
+            client, status = _upgrade(server, "/ws-slow-reader")
+            assert status == 101
+            clients.append(client)
+
+        # Do not read while the application attempts 8 MiB of concurrent
+        # output. The 1 MiB/4-message queue must fail closed without retaining
+        # all payloads or occupying the ordinary HTTP worker.
+        time.sleep(0.15)
+        started = time.monotonic()
+        for _ in range(20):
+            assert _http_ping(server) == {"ok": True}
+        assert time.monotonic() - started < 2.0
+
+        rss_after = _rss_kib(proc.pid)
+        assert rss_after - rss_before < 64 * 1024
+
+        for client in clients:
+            client.settimeout(2.0)
+            received = 0
+            while True:
+                chunk = client.recv(64 * 1024)
+                if not chunk:
+                    break
+                received += len(chunk)
+                assert received < 8 * 1024 * 1024
+    finally:
+        for client in clients:
+            client.close()
+
+
+def test_inbound_queue_overload_closes_with_try_again_later(
+    backpressure_ws_server,
+) -> None:
+    server, _proc = backpressure_ws_server
+    client, status = _upgrade(server, "/ws-inbound-overload")
+    assert status == 101
+    try:
+        client.sendall(b"".join(_masked_text_frame(f"m{index}".encode()) for index in range(16)))
+        client.settimeout(2.0)
+        response = client.recv(512)
+        assert response and response[0] & 0x0F == 0x08
+        payload_len = response[1] & 0x7F
+        assert payload_len >= 2
+        assert int.from_bytes(response[2:4], "big") == 1013
+    finally:
+        client.close()
+
+
+def test_websocket_idle_survives_http_header_timeout(backpressure_ws_server) -> None:
+    server, _proc = backpressure_ws_server
+    client, status = _upgrade(server, "/ws-idle")
+    assert status == 101
+    try:
+        client.settimeout(2.0)
+        header = client.recv(2)
+        assert header == b"\x81\x0b"
+        assert client.recv(11) == b"still-alive"
+    finally:
+        client.close()
+
+
+def test_single_blocked_write_has_deadline_and_releases_slot(
+    blocked_write_ws_server,
+) -> None:
+    server, proc = blocked_write_ws_server
+    rss_before = _rss_kib(proc.pid)
+    client, status = _upgrade(server, "/ws-one-blocked-write")
+    assert status == 101
+    try:
+        # The client intentionally never reads the 16 MiB frame. Both the
+        # blocking fast path and readiness-driven flush share the 100 ms bound.
+        time.sleep(0.5)
+        assert _http_ping(server) == {"ok": True}
+        replacement, replacement_status = _upgrade(server, "/ws-one-blocked-write")
+        replacement.close()
+        assert replacement_status == 101
+        assert _rss_kib(proc.pid) - rss_before < 64 * 1024
+    finally:
+        client.close()
 
 
 def test_requested_pool256_serves_256_persistent_clients(pool256_server) -> None:

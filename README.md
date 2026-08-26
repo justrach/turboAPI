@@ -49,16 +49,18 @@
 >   deployments should still use a reverse proxy with stricter limits
 > - **No configurable max body size** — hardcoded 16MB cap
 > - **Zig-native WebSocket support is available but still alpha** — routes are
->   exact-match and each connection currently consumes an HTTP worker. A synchronous
->   route guard can reject Authorization or Origin policy before the 101; keep an
->   authenticating edge such as Cloudflare Access as the outer security boundary.
+>   exact-match. A synchronous route guard can reject Authorization or Origin
+>   policy before the 101; the post-upgrade handler cannot. Accepted connections
+>   transfer to a bounded dedicated pool with bounded duplex queues, so they do
+>   not retain HTTP workers. Keep an authenticating edge such as Cloudflare
+>   Access as the outer security boundary.
 > - **Free-threaded Python 3.14t** is itself relatively new — some C extensions may not be thread-safe
 >
 > See [SECURITY.md](SECURITY.md) for the full threat model and deployment recommendations.
 
 | What works today                                       | What's in progress                       |
 |--------------------------------------------------------|------------------------------------------|
-| ~140k req/s on uncached HTTP routes (~16x FastAPI)     | Evented WebSocket scaling/backpressure   |
+| ~140k req/s on uncached HTTP routes (~16x FastAPI)     | Higher-density evented WebSocket scaling |
 | FastAPI-compatible route decorators                    | Native HTTP/2, HTTP/3/QUIC, and TLS     |
 | Zig HTTP server with 24-thread pool + keep-alive       | Cloudflare Workers WASM target           |
 | Zig-native JSON schema validation (dhi)                | Fiber-based concurrency (via [zag](https://github.com/justrach/zag))  |
@@ -70,7 +72,7 @@
 | Full security stack (OAuth2, Bearer, API Key)          |                                          |
 | Python 3.14t free-threaded support                     |                                          |
 | Native FFI handlers (C/Zig, no Python at all)          |                                          |
-| Zig-native WebSocket transport (alpha)                 |                                          |
+| Bounded full-duplex WebSocket isolation (alpha)        |                                          |
 | Fuzz-tested HTTP parser, router, validator             |                                          |
 
 ---

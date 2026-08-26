@@ -3,7 +3,8 @@
 TurboAPI's Zig HTTP runtime implements the RFC 6455 upgrade, text and binary
 frames, ping/pong, close handling, fragmentation, and live Python handler
 wiring. The transport is usable but remains alpha: native WebSocket routes are
-exact-match and each long-lived connection currently occupies one HTTP worker.
+exact-match, and each accepted connection transfers to one worker in a
+separate bounded WebSocket pool rather than retaining an HTTP worker.
 
 The native runtime can invoke a synchronous route guard before the HTTP 101
 handshake. The guard can inspect request metadata and allow the upgrade or
@@ -215,8 +216,20 @@ The Zig HTTP core handles real WebSocket connections. Current limitations are:
 - native WebSocket routes use exact path matching; path parameters are not resolved yet;
 - guards are synchronous; database or network-backed authorization should be
   performed at the edge rather than blocking a native connection worker;
-- every live WebSocket currently occupies one HTTP worker;
+- every live WebSocket occupies one worker in a separate bounded WebSocket
+  pool; it does not retain an ordinary HTTP worker;
+- Python handlers use a direct sequential fast path, descriptor readiness for
+  concurrent I/O, and bounded inbound/outbound queues; overload closes with
+  code 1013 when possible;
+- the connection object and its child tasks must remain on the handler's event
+  loop; cross-thread use is rejected before the native capsule is touched, and
+  a retained object becomes inert when the handler scope ends;
 - subprotocol negotiation and `permessage-deflate` are not implemented.
+
+Queue occupancy is available as `websocket.transport_metrics`. It contains
+only message/byte counts and configured limits, never message payloads. See
+[Performance Tuning](./PERFORMANCE_TUNING.md#websocket-isolation-and-backpressure)
+for the worker and queue environment variables.
 
 ## Performance Tips
 

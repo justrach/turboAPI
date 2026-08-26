@@ -958,14 +958,23 @@ fn renderResponse(status: u16, content_type: []const u8, body: []const u8) ?[]co
 // default remains conservative; TURBO_THREAD_POOL_SIZE controls active workers.
 const MAX_POOL_SIZE = 512;
 const DEFAULT_POOL_SIZE = 24;
-const DEFAULT_HTTP_WORKER_RESERVE = 4;
+const DEFAULT_WS_POOL_SIZE = 24;
+const MAX_WS_QUEUE_MESSAGES = 1024;
+const MAX_WS_QUEUE_BYTES = 16 * 1024 * 1024;
+const DEFAULT_WS_QUEUE_MESSAGES = 64;
+const DEFAULT_WS_QUEUE_BYTES = 16 * 1024 * 1024;
 
-/// WebSockets currently consume one connection worker for their full lifetime.
-/// Keep their admission count below the pool size so ordinary HTTP always has
-/// workers left. This is containment for the blocking connection model, not an
-/// evented-WebSocket implementation.
+var ws_queue_message_limit: usize = DEFAULT_WS_QUEUE_MESSAGES;
+var ws_queue_byte_limit: usize = DEFAULT_WS_QUEUE_BYTES;
+var ws_write_timeout_ms: usize = 5000;
+var http_header_timeout_ms: usize = 30000;
+
+/// WebSockets use a dedicated pool, so a long-lived socket never occupies an
+/// ordinary HTTP worker. Admission remains bounded to the WebSocket pool size;
+/// this also bounds the number of per-connection Python event loops and reader
+/// tasks regardless of client behavior.
 const WebSocketCapacity = struct {
-    http_worker_reserve: usize,
+    worker_count: usize,
     max_active: usize,
 };
 
@@ -977,24 +986,18 @@ fn readUsizeEnv(name: [*:0]const u8, fallback: usize) usize {
     return std.fmt.parseInt(usize, std.mem.span(ptr), 10) catch fallback;
 }
 
-fn clampWebSocketCapacity(worker_count: usize, requested_reserve: usize, requested_max: usize) WebSocketCapacity {
-    if (worker_count == 0) return .{ .http_worker_reserve = 0, .max_active = 0 };
-
-    // A zero reserve would allow WebSockets to occupy every worker, so clamp
-    // it to at least one. Oversized values safely disable WebSocket admission.
-    const reserve = @min(worker_count, @max(@as(usize, 1), requested_reserve));
-    const available = worker_count - reserve;
+fn clampWebSocketCapacity(worker_count: usize, requested_max: usize) WebSocketCapacity {
+    if (worker_count == 0) return .{ .worker_count = 0, .max_active = 0 };
     return .{
-        .http_worker_reserve = reserve,
-        .max_active = @min(requested_max, available),
+        .worker_count = worker_count,
+        .max_active = @min(requested_max, worker_count),
     };
 }
 
-fn webSocketCapacity(worker_count: usize) WebSocketCapacity {
-    const requested_reserve = readUsizeEnv("TURBO_HTTP_WORKER_RESERVE", DEFAULT_HTTP_WORKER_RESERVE);
-    const available_after_default_reserve = worker_count -| @min(worker_count, @max(@as(usize, 1), requested_reserve));
-    const requested_max = readUsizeEnv("TURBO_MAX_WEBSOCKETS", available_after_default_reserve);
-    return clampWebSocketCapacity(worker_count, requested_reserve, requested_max);
+fn webSocketCapacity() WebSocketCapacity {
+    const worker_count = @min(readUsizeEnv("TURBO_WS_WORKER_POOL_SIZE", DEFAULT_WS_POOL_SIZE), MAX_POOL_SIZE);
+    const requested_max = readUsizeEnv("TURBO_MAX_WEBSOCKETS", worker_count);
+    return clampWebSocketCapacity(worker_count, requested_max);
 }
 
 fn tryAcquireWebSocketSlot() bool {
@@ -1082,6 +1085,67 @@ const ConnectionPool = struct {
 
 var pool: ConnectionPool = undefined;
 
+const WebSocketPool = struct {
+    queue: Queue,
+    threads: [MAX_POOL_SIZE]std.Thread = undefined,
+    thread_count: usize = 0,
+
+    const Queue = struct {
+        // Admission is capped at MAX_POOL_SIZE, so this queue can never grow
+        // without bound even if all WS workers are momentarily between jobs.
+        items: [MAX_POOL_SIZE]WebSocketJob = undefined,
+        head: usize = 0,
+        tail: usize = 0,
+        count: usize = 0,
+        mutex: std.Io.Mutex = .init,
+        not_empty: std.Io.Condition = .init,
+
+        fn push(self: *Queue, job: WebSocketJob) void {
+            self.mutex.lockUncancelable(runtime.io);
+            defer self.mutex.unlock(runtime.io);
+            std.debug.assert(self.count < self.items.len);
+            self.items[self.tail] = job;
+            self.tail = (self.tail + 1) % self.items.len;
+            self.count += 1;
+            self.not_empty.signal(runtime.io);
+        }
+
+        fn pop(self: *Queue) WebSocketJob {
+            self.mutex.lockUncancelable(runtime.io);
+            defer self.mutex.unlock(runtime.io);
+            while (self.count == 0) self.not_empty.waitUncancelable(runtime.io, &self.mutex);
+            const job = self.items[self.head];
+            self.head = (self.head + 1) % self.items.len;
+            self.count -= 1;
+            return job;
+        }
+    };
+
+    fn init(self: *WebSocketPool, thread_count: usize) void {
+        self.queue = .{};
+        self.thread_count = @min(thread_count, MAX_POOL_SIZE);
+        for (0..self.thread_count) |i| {
+            self.threads[i] = std.Thread.spawn(.{}, workerLoop, .{&self.queue}) catch @panic("websocket thread spawn");
+        }
+    }
+
+    fn workerLoop(queue: *Queue) void {
+        const tstate = py.PyThreadState_New(py_interp) orelse @panic("PyThreadState_New failed");
+        defer {
+            py.PyEval_AcquireThread(tstate);
+            py.PyThreadState_Clear(tstate);
+            py.PyThreadState_DeleteCurrent();
+        }
+        while (true) {
+            var job = queue.pop();
+            job.run(tstate);
+            job.deinit(tstate);
+        }
+    }
+};
+
+var ws_pool: WebSocketPool = undefined;
+
 pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     // Initialize the shared Io runtime (no extra async threads — our ConnectionPool
     // manages workers via std.Thread.spawn to hook per-worker PyThreadState lifecycle).
@@ -1115,21 +1179,25 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
         if (thread_count == 0) thread_count = DEFAULT_POOL_SIZE;
     }
 
-    // Configure WebSocket admission before workers can receive connections.
-    // `ConnectionPool.init` also caps at MAX_POOL_SIZE, so use that same
-    // effective count when deriving the HTTP reserve.
+    // Configure both independently bounded pools before either can receive a
+    // connection. Neither pool may exceed its static storage ceiling.
     const effective_thread_count = @min(thread_count, MAX_POOL_SIZE);
-    const ws_capacity = webSocketCapacity(effective_thread_count);
+    const ws_capacity = webSocketCapacity();
+    ws_queue_message_limit = @min(@max(@as(usize, 1), readUsizeEnv("TURBO_WS_QUEUE_MESSAGES", DEFAULT_WS_QUEUE_MESSAGES)), MAX_WS_QUEUE_MESSAGES);
+    ws_queue_byte_limit = @min(@max(@as(usize, 1), readUsizeEnv("TURBO_WS_QUEUE_BYTES", DEFAULT_WS_QUEUE_BYTES)), MAX_WS_QUEUE_BYTES);
+    ws_write_timeout_ms = @min(@max(@as(usize, 100), readUsizeEnv("TURBO_WS_WRITE_TIMEOUT_MS", 5000)), 30000);
+    http_header_timeout_ms = @min(@max(@as(usize, 100), readUsizeEnv("TURBO_HTTP_HEADER_TIMEOUT_MS", 30000)), 30000);
     active_websockets.store(0, .release);
     max_active_websockets.store(ws_capacity.max_active, .release);
 
     // Start thread pool (workers create their tstates after this point,
     // but py_interp is set before SaveThread so there's no race).
+    ws_pool.init(ws_capacity.worker_count);
     pool.init(effective_thread_count);
 
     logger.info("TurboNet-Zig server listening on {s}:{d}", .{ server_host, server_port });
     logger.info("Zig HTTP core active – {d}-thread pool, per-worker tstate!", .{pool.thread_count});
-    logger.info("WebSocket containment – max active={d}, reserved HTTP workers={d}", .{ ws_capacity.max_active, ws_capacity.http_worker_reserve });
+    logger.info("WebSocket isolation – {d}-thread dedicated pool, max active={d}", .{ ws_capacity.worker_count, ws_capacity.max_active });
 
     // Release the GIL — workers acquire it per-request via AcquireThread.
     const save = py.PyEval_SaveThread();
@@ -1167,6 +1235,85 @@ fn parseHeaders(request_data: []const u8, first_line_end: usize, header_end_pos:
     return headers;
 }
 
+/// The upgrade path must fail closed if header storage cannot be completed;
+/// silently dropping a duplicate Authorization, Origin, Host, key, or version
+/// header would make edge/core policy interpretation ambiguous.
+const WebSocketHeaderParseError = error{ OutOfMemory, Malformed };
+
+fn isHttpTokenChar(byte: u8) bool {
+    if (std.ascii.isAlphanumeric(byte)) return true;
+    return switch (byte) {
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
+        else => false,
+    };
+}
+
+fn parseWebSocketHeaders(
+    request_data: []const u8,
+    first_line_end: usize,
+    header_end_pos: usize,
+) WebSocketHeaderParseError!HeaderList {
+    return parseWebSocketHeadersWithAllocator(allocator, request_data, first_line_end, header_end_pos);
+}
+
+fn parseWebSocketHeadersWithAllocator(
+    header_allocator: std.mem.Allocator,
+    request_data: []const u8,
+    first_line_end: usize,
+    header_end_pos: usize,
+) WebSocketHeaderParseError!HeaderList {
+    var headers: HeaderList = .empty;
+    errdefer headers.deinit(header_allocator);
+    var pos = first_line_end + 2;
+    while (pos < header_end_pos) {
+        const line_end = std.mem.indexOfPos(u8, request_data, pos, "\r\n") orelse header_end_pos;
+        const line = request_data[pos..line_end];
+        pos = line_end + 2;
+        if (line.len == 0) break;
+
+        // RFC 9110 field names are tokens. Reject obs-fold, whitespace before
+        // the colon, and malformed lines so a proxy and the authorization
+        // guard cannot interpret the same bytes differently.
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.Malformed;
+        const name = line[0..colon];
+        if (name.len == 0) return error.Malformed;
+        for (name) |byte| if (!isHttpTokenChar(byte)) return error.Malformed;
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        for (value) |byte| {
+            if ((byte < 0x20 and byte != '\t') or byte == 0x7f)
+                return error.Malformed;
+        }
+        headers.append(header_allocator, .{ .name = name, .value = value }) catch return error.OutOfMemory;
+    }
+    return headers;
+}
+
+fn allocateTestWebSocketHeaders(header_allocator: std.mem.Allocator) !void {
+    const request = "GET /ws HTTP/1.1\r\nHost: example.test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    const first_line_end = std.mem.indexOf(u8, request, "\r\n").?;
+    const header_end = std.mem.indexOf(u8, request, "\r\n\r\n").?;
+    var headers = try parseWebSocketHeadersWithAllocator(header_allocator, request, first_line_end, header_end);
+    headers.deinit(header_allocator);
+}
+
+test "WebSocket header parsing cleans allocation failures" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        allocateTestWebSocketHeaders,
+        .{},
+    );
+}
+
+test "WebSocket header parsing rejects ambiguous malformed lines" {
+    const request = "GET /ws HTTP/1.1\r\nHost : example.test\r\n Upgrade: websocket\r\n\r\n";
+    const first_line_end = std.mem.indexOf(u8, request, "\r\n").?;
+    const header_end = std.mem.indexOf(u8, request, "\r\n\r\n").?;
+    try std.testing.expectError(
+        error.Malformed,
+        parseWebSocketHeadersWithAllocator(std.testing.allocator, request, first_line_end, header_end),
+    );
+}
+
 /// SIMD-accelerated search for the HTTP header-end sentinel "\r\n\r\n".
 /// Scans 16 bytes at a time looking for '\r' candidates, then scalar-verifies
 /// each hit. Roughly 4× faster than std.mem.indexOf for typical 300-2000 byte
@@ -1202,32 +1349,152 @@ inline fn findHeaderEnd(buf: []const u8) ?usize {
 }
 
 fn handleConnection(stream: std.Io.net.Stream, tstate: ?*anyopaque) void {
-    defer stream.close(runtime.io);
+    var owns_stream = true;
+    defer if (owns_stream) stream.close(runtime.io);
 
     // Slowloris protection: if client sends nothing for 30s, read() times out
     // and the worker is freed. No kqueue needed — just a socket option.
-    const timeout = std.posix.timeval{ .sec = 30, .usec = 0 };
+    const timeout = std.posix.timeval{
+        .sec = @intCast(http_header_timeout_ms / 1000),
+        .usec = @intCast((http_header_timeout_ms % 1000) * 1000),
+    };
     std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
     while (true) {
-        handleOneRequest(stream, tstate) catch return;
+        handleOneRequest(stream, tstate) catch |err| switch (err) {
+            error.ConnectionTransferred => {
+                owns_stream = false;
+                return;
+            },
+            else => return,
+        };
     }
 }
 
 // ── WebSocket runtime ──────────────────────────────────────────────────────
 //
-// Connection model: each accepted TCP connection runs in the same thread as
-// the HTTP request handler. When `handleOneRequest` detects a valid WebSocket
-// upgrade request, it dispatches into `runWebSocketConnection` which loops
-// reading + writing frames until close. The HTTP thread is "consumed" by the
-// WebSocket for the life of the connection — this is the simplest viable
-// model and matches what FastAPI/Starlette do.
+// Connection model: the HTTP worker validates the RFC 6455 upgrade, copies the
+// bounded request metadata, writes 101, and transfers socket ownership to the
+// dedicated WebSocket pool. Ordinary HTTP capacity is therefore independent
+// of long-lived socket count.
 
 const ECHO_PATH = "/ws-echo";
 
+const WebSocketJob = struct {
+    stream: std.Io.net.Stream,
+    path: []u8,
+    query_string: []u8,
+    headers: []HeaderPair,
+    route_snapshot: ?WebSocketRouteEntry,
+
+    fn init(
+        stream: std.Io.net.Stream,
+        path: []const u8,
+        query_string: []const u8,
+        headers: []const HeaderPair,
+        route_snapshot: ?WebSocketRouteEntry,
+    ) !WebSocketJob {
+        return initWithAllocator(allocator, stream, path, query_string, headers, route_snapshot);
+    }
+
+    fn initWithAllocator(
+        job_allocator: std.mem.Allocator,
+        stream: std.Io.net.Stream,
+        path: []const u8,
+        query_string: []const u8,
+        headers: []const HeaderPair,
+        route_snapshot: ?WebSocketRouteEntry,
+    ) !WebSocketJob {
+        const owned_path = try job_allocator.dupe(u8, path);
+        errdefer job_allocator.free(owned_path);
+        const owned_query = try job_allocator.dupe(u8, query_string);
+        errdefer job_allocator.free(owned_query);
+        const owned_headers = try job_allocator.alloc(HeaderPair, headers.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (owned_headers[0..initialized]) |header| {
+                job_allocator.free(header.name);
+                job_allocator.free(header.value);
+            }
+            job_allocator.free(owned_headers);
+        }
+        for (headers, 0..) |header, i| {
+            const name = try job_allocator.dupe(u8, header.name);
+            errdefer job_allocator.free(name);
+            const value = try job_allocator.dupe(u8, header.value);
+            owned_headers[i] = .{ .name = name, .value = value };
+            initialized += 1;
+        }
+        return .{
+            .stream = stream,
+            .path = owned_path,
+            .query_string = owned_query,
+            .headers = owned_headers,
+            .route_snapshot = route_snapshot,
+        };
+    }
+
+    fn deinitMetadata(self: *WebSocketJob) void {
+        self.deinitMetadataWithAllocator(allocator);
+    }
+
+    fn deinitMetadataWithAllocator(self: *WebSocketJob, job_allocator: std.mem.Allocator) void {
+        job_allocator.free(self.path);
+        job_allocator.free(self.query_string);
+        for (self.headers) |header| {
+            job_allocator.free(header.name);
+            job_allocator.free(header.value);
+        }
+        job_allocator.free(self.headers);
+    }
+
+    fn run(self: *WebSocketJob, tstate: ?*anyopaque) void {
+        runWebSocketConnection(self.stream, self.path, self.query_string, self.headers, self.route_snapshot, tstate) catch |err| {
+            logger.warn("[WS] connection ended with error: {}", .{err});
+        };
+    }
+
+    fn deinit(self: *WebSocketJob, tstate: ?*anyopaque) void {
+        self.stream.close(runtime.io);
+        self.deinitMetadata();
+        if (self.route_snapshot) |route| releaseWebSocketRoute(route, tstate);
+        releaseWebSocketSlot();
+    }
+};
+
+fn allocateTestWebSocketJob(job_allocator: std.mem.Allocator) !void {
+    const headers = [_]HeaderPair{
+        .{ .name = "authorization", .value = "Bearer allocation-test" },
+        .{ .name = "origin", .value = "https://example.test" },
+    };
+    var job = try WebSocketJob.initWithAllocator(
+        job_allocator,
+        undefined,
+        "/ws",
+        "tenant=alpha",
+        &headers,
+        null,
+    );
+    job.deinitMetadataWithAllocator(job_allocator);
+}
+
+test "WebSocket queued metadata cleans every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        allocateTestWebSocketJob,
+        .{},
+    );
+}
+
+const PendingWsFrame = struct {
+    bytes: []u8,
+    offset: usize,
+    budget_bytes: usize,
+};
+
 /// Per-connection state for a live WebSocket. Allocated on the stack of
-/// `runWebSocketConnection`. The Python FFI layer (Phase 4) will get an
-/// opaque pointer to this struct.
+/// `runWebSocketConnection`; Python receives only a short-lived opaque capsule
+/// whose name is invalidated before this stack frame ends.
 pub const WsConn = struct {
     stream: std.Io.net.Stream,
     /// Read buffer for incoming frames. Sized for typical messages; large
@@ -1242,8 +1509,31 @@ pub const WsConn = struct {
     fragment_buf: std.ArrayListUnmanaged(u8) = .empty,
     fragment_opcode: ws.Opcode = .continuation,
     fragment_active: bool = false,
-    /// True once we've seen a client close frame and replied with our own.
-    closing: bool = false,
+    /// True once either side begins closing. Atomic because a retained
+    /// WebSocket object can be used from another free-threaded Python thread.
+    closing: std.atomic.Value(bool) = .init(false),
+    /// Serialize close-handshake initiation. `closing` gives senders a cheap
+    /// atomic fast-fail, while this lock ensures an idempotent second close
+    /// cannot observe `closing=true` before the first close frame is ordered.
+    close_mutex: std.Io.Mutex = .init,
+    /// RFC 6455 frames must never interleave on the wire. This covers data
+    /// sends, ping/pong replies, and close frames across all calling threads.
+    write_mutex: std.Io.Mutex = .init,
+    /// Nonblocking Python handlers retain partially-written frames here. The
+    /// fixed ring bounds metadata, while queue bytes are capped independently.
+    pending_frames: [MAX_WS_QUEUE_MESSAGES]PendingWsFrame = undefined,
+    pending_head: usize = 0,
+    pending_tail: usize = 0,
+    pending_count: usize = 0,
+    pending_bytes: usize = 0,
+    frame_allocator: std.mem.Allocator = allocator,
+    nonblocking: bool = false,
+    peer_close_code: u16 = 1006,
+    peer_close_reason: [123]u8 = undefined,
+    peer_close_reason_len: usize = 0,
+    local_close_code: u16 = 1002,
+    local_close_reason: [123]u8 = undefined,
+    local_close_reason_len: usize = 0,
 
     pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
     const MAX_WIRE_FRAME: usize = MAX_MESSAGE + 14; // 10-byte length + 4-byte mask
@@ -1251,6 +1541,7 @@ pub const WsConn = struct {
     fn deinit(self: *WsConn) void {
         if (self.read_overflow) |o| allocator.free(o);
         self.fragment_buf.deinit(allocator);
+        self.discardPendingFrames();
     }
 
     fn readStorage(self: *WsConn) []u8 {
@@ -1272,15 +1563,28 @@ pub const WsConn = struct {
         return true;
     }
 
-    /// Read more bytes into the active buffer, appending. Returns false if
-    /// the peer closed or the bounded buffer cannot grow further.
-    fn fillRead(self: *WsConn) bool {
-        if (!self.ensureReadSpace()) return false;
+    const FillResult = enum { progress, would_block, closed, failed };
+
+    /// Read more bytes into the active buffer, appending.
+    fn fillRead(self: *WsConn) FillResult {
+        if (!self.ensureReadSpace()) return .failed;
         const storage = self.readStorage();
-        const n = posix.read(self.stream.socket.handle, storage[self.read_len..]) catch return false;
-        if (n == 0) return false;
+        const n = posix.read(self.stream.socket.handle, storage[self.read_len..]) catch return .failed;
+        if (n == 0) return .closed;
         self.read_len += n;
-        return true;
+        return .progress;
+    }
+
+    fn fillReadNonblocking(self: *WsConn) FillResult {
+        if (!self.ensureReadSpace()) return .failed;
+        const storage = self.readStorage();
+        const amount = posix.read(self.stream.socket.handle, storage[self.read_len..]) catch |err| switch (err) {
+            error.WouldBlock => return .would_block,
+            else => return .failed,
+        };
+        if (amount == 0) return .closed;
+        self.read_len += amount;
+        return .progress;
     }
 
     fn consumeRead(self: *WsConn, n: usize) void {
@@ -1293,8 +1597,170 @@ pub const WsConn = struct {
         self.read_len -= n;
     }
 
-    /// Write a complete server-to-client frame to the socket.
-    pub fn writeFrame(self: *WsConn, fin: bool, opcode: ws.Opcode, payload: []const u8) !void {
+    fn setNonblocking(self: *WsConn) !void {
+        const result = posix.system.fcntl(self.stream.socket.handle, posix.F.GETFL, @as(usize, 0));
+        if (posix.errno(result) != .SUCCESS) return error.SocketFlags;
+        const flags: usize = @intCast(result);
+        const nonblocking = flags | (@as(usize, 1) << @bitOffsetOf(posix.O, "NONBLOCK"));
+        if (posix.errno(posix.system.fcntl(self.stream.socket.handle, posix.F.SETFL, nonblocking)) != .SUCCESS)
+            return error.SocketFlags;
+        self.nonblocking = true;
+    }
+
+    fn writeSome(self: *WsConn, bytes: []const u8) !usize {
+        while (true) {
+            const written = write(self.stream.socket.handle, bytes.ptr, bytes.len);
+            if (written > 0) return @intCast(written);
+            if (written == 0) return error.BrokenPipe;
+            switch (posix.errno(written)) {
+                .INTR => continue,
+                .AGAIN => return error.WouldBlock,
+                else => return error.BrokenPipe,
+            }
+        }
+    }
+
+    fn discardPendingFrames(self: *WsConn) void {
+        while (self.pending_count > 0) {
+            const frame = self.pending_frames[self.pending_head];
+            self.frame_allocator.free(frame.bytes);
+            self.pending_head = (self.pending_head + 1) % MAX_WS_QUEUE_MESSAGES;
+            self.pending_count -= 1;
+        }
+        self.pending_tail = self.pending_head;
+        self.pending_bytes = 0;
+    }
+
+    fn hasPendingFrames(self: *WsConn) bool {
+        self.write_mutex.lockUncancelable(runtime.io);
+        defer self.write_mutex.unlock(runtime.io);
+        return self.pending_count > 0;
+    }
+
+    fn queueOwnedFrame(self: *WsConn, bytes: []u8, offset: usize, budget_bytes: usize) !void {
+        errdefer self.frame_allocator.free(bytes);
+        if (self.pending_count >= ws_queue_message_limit or
+            budget_bytes > ws_queue_byte_limit or
+            self.pending_bytes > ws_queue_byte_limit - budget_bytes)
+            return error.Backpressure;
+        self.pending_frames[self.pending_tail] = .{
+            .bytes = bytes,
+            .offset = offset,
+            .budget_bytes = budget_bytes,
+        };
+        self.pending_tail = (self.pending_tail + 1) % MAX_WS_QUEUE_MESSAGES;
+        self.pending_count += 1;
+        self.pending_bytes += budget_bytes;
+    }
+
+    fn encodeOwnedFrame(self: *WsConn, fin: bool, opcode: ws.Opcode, payload: []const u8) ![]u8 {
+        const header_len: usize = if (payload.len <= 125) 2 else if (payload.len <= 0xFFFF) 4 else 10;
+        const bytes = self.frame_allocator.alloc(u8, payload.len + header_len) catch return error.OutOfMemory;
+        errdefer self.frame_allocator.free(bytes);
+        _ = try ws.writeServerFrame(bytes, fin, opcode, payload);
+        return bytes;
+    }
+
+    /// Attempt a nonblocking ordered write. Returns true when bytes remain in
+    /// the bounded native queue and the event loop must watch for writability.
+    fn writeFrameNonblocking(self: *WsConn, opcode: ws.Opcode, payload: []const u8) !bool {
+        // The configured byte budget covers application payloads. RFC control
+        // frames are independently capped at 125 bytes and still consume a
+        // message slot, so a very small data budget cannot disable close/pong.
+        const budget_bytes = if (opcode.isControl()) 0 else payload.len;
+        if (budget_bytes > ws_queue_byte_limit) return error.Backpressure;
+        self.write_mutex.lockUncancelable(runtime.io);
+        defer self.write_mutex.unlock(runtime.io);
+        // Once a close handshake starts, nothing may be ordered after the
+        // close frame. The close opcode itself is allowed because callers set
+        // `closing` atomically before they acquire the write lock.
+        if (opcode != .close and self.closing.load(.acquire))
+            return error.ConnectionClosed;
+
+        if (self.pending_count > 0) {
+            const owned = try self.encodeOwnedFrame(true, opcode, payload);
+            try self.queueOwnedFrame(owned, 0, budget_bytes);
+            return true;
+        }
+
+        if (payload.len <= 8192) {
+            var stack: [8192 + 10]u8 = undefined;
+            const used = try ws.writeServerFrame(&stack, true, opcode, payload);
+            const sent = self.writeSome(stack[0..used]) catch |err| switch (err) {
+                error.WouldBlock => 0,
+                else => return err,
+            };
+            if (sent == used) return false;
+            const remaining = self.frame_allocator.dupe(u8, stack[sent..used]) catch return error.OutOfMemory;
+            try self.queueOwnedFrame(remaining, 0, budget_bytes);
+            return true;
+        }
+
+        const owned = try self.encodeOwnedFrame(true, opcode, payload);
+        const sent = self.writeSome(owned) catch |err| switch (err) {
+            error.WouldBlock => 0,
+            else => {
+                self.frame_allocator.free(owned);
+                return err;
+            },
+        };
+        if (sent == owned.len) {
+            self.frame_allocator.free(owned);
+            return false;
+        }
+        try self.queueOwnedFrame(owned, sent, budget_bytes);
+        return true;
+    }
+
+    /// Flush queued bytes without blocking. Returns true once the queue is empty.
+    fn flushPendingFrames(self: *WsConn) !bool {
+        self.write_mutex.lockUncancelable(runtime.io);
+        defer self.write_mutex.unlock(runtime.io);
+        while (self.pending_count > 0) {
+            var frame = &self.pending_frames[self.pending_head];
+            const sent = self.writeSome(frame.bytes[frame.offset..]) catch |err| switch (err) {
+                error.WouldBlock => return false,
+                else => return err,
+            };
+            frame.offset += sent;
+            if (frame.offset < frame.bytes.len) return false;
+            self.pending_bytes -= frame.budget_bytes;
+            self.frame_allocator.free(frame.bytes);
+            self.pending_head = (self.pending_head + 1) % MAX_WS_QUEUE_MESSAGES;
+            self.pending_count -= 1;
+        }
+        return true;
+    }
+
+    fn sendCloseNonblocking(self: *WsConn, code: u16, reason: []const u8, drop_pending: bool) !bool {
+        self.close_mutex.lockUncancelable(runtime.io);
+        defer self.close_mutex.unlock(runtime.io);
+        if (self.closing.swap(true, .acq_rel)) return self.hasPendingFrames();
+        self.recordLocalClose(code, reason);
+        if (drop_pending) {
+            self.write_mutex.lockUncancelable(runtime.io);
+            self.discardPendingFrames();
+            self.write_mutex.unlock(runtime.io);
+        }
+        var payload: [125]u8 = undefined;
+        std.mem.writeInt(u16, payload[0..2], code, .big);
+        @memcpy(payload[2 .. 2 + reason.len], reason);
+        return self.writeFrameNonblocking(.close, payload[0 .. 2 + reason.len]);
+    }
+
+    fn sendEmptyCloseNonblocking(self: *WsConn, drop_pending: bool) !bool {
+        self.close_mutex.lockUncancelable(runtime.io);
+        defer self.close_mutex.unlock(runtime.io);
+        if (self.closing.swap(true, .acq_rel)) return self.hasPendingFrames();
+        if (drop_pending) {
+            self.write_mutex.lockUncancelable(runtime.io);
+            self.discardPendingFrames();
+            self.write_mutex.unlock(runtime.io);
+        }
+        return self.writeFrameNonblocking(.close, "");
+    }
+
+    fn writeFrameLocked(self: *WsConn, fin: bool, opcode: ws.Opcode, payload: []const u8) !void {
         // Common case: small payload, stack buffer.
         if (payload.len <= 8192) {
             var buf: [8192 + 10]u8 = undefined;
@@ -1310,17 +1776,102 @@ pub const WsConn = struct {
         try streamWriteAll(self.stream, buf[0..n]);
     }
 
+    /// Write a complete server-to-client frame to the socket. The mutex keeps
+    /// application data and reader-generated control frames from interleaving.
+    pub fn writeFrame(self: *WsConn, fin: bool, opcode: ws.Opcode, payload: []const u8) !void {
+        self.write_mutex.lockUncancelable(runtime.io);
+        defer self.write_mutex.unlock(runtime.io);
+        try self.writeFrameLocked(fin, opcode, payload);
+    }
+
     /// Send a close frame with the given code and reason. Marks closing=true.
     /// Caller should typically return shortly after.
     pub fn sendClose(self: *WsConn, code: u16, reason: []const u8) void {
-        if (self.closing) return;
-        self.closing = true;
+        self.close_mutex.lockUncancelable(runtime.io);
+        defer self.close_mutex.unlock(runtime.io);
+        if (self.closing.swap(true, .acq_rel)) return;
+        self.recordLocalClose(code, reason);
         var payload_buf: [128]u8 = undefined;
         const reason_clamped = if (reason.len > 123) reason[0..123] else reason;
         const payload_len = ws.writeClosePayload(&payload_buf, code, reason_clamped) catch return;
         self.writeFrame(true, .close, payload_buf[0..payload_len]) catch return;
     }
+
+    fn recordLocalClose(self: *WsConn, code: u16, reason: []const u8) void {
+        self.local_close_code = code;
+        self.local_close_reason_len = @min(reason.len, self.local_close_reason.len);
+        @memcpy(self.local_close_reason[0..self.local_close_reason_len], reason[0..self.local_close_reason_len]);
+    }
+
+    pub fn sendEmptyClose(self: *WsConn) void {
+        self.close_mutex.lockUncancelable(runtime.io);
+        defer self.close_mutex.unlock(runtime.io);
+        if (self.closing.swap(true, .acq_rel)) return;
+        self.writeFrame(true, .close, "") catch return;
+    }
+
+    /// Overload teardown must never wait behind a slow socket writer. Send a
+    /// close frame only when the write mutex is immediately available, then
+    /// shut down both directions so any blocking reader or writer exits.
+    pub fn abort(self: *WsConn, code: u16, reason: []const u8) void {
+        _ = self.closing.swap(true, .acq_rel);
+        if (self.write_mutex.tryLock()) {
+            self.discardPendingFrames();
+            var payload_buf: [128]u8 = undefined;
+            const reason_clamped = if (reason.len > 123) reason[0..123] else reason;
+            const payload_len = ws.writeClosePayload(&payload_buf, code, reason_clamped) catch 0;
+            var frame_buf: [140]u8 = undefined;
+            const frame_len = ws.writeServerFrame(&frame_buf, true, .close, payload_buf[0..payload_len]) catch 0;
+            const get_flags = posix.system.fcntl(self.stream.socket.handle, posix.F.GETFL, @as(usize, 0));
+            if (posix.errno(get_flags) == .SUCCESS) {
+                const flags: usize = @intCast(get_flags);
+                const nonblocking = flags | (@as(usize, 1) << @bitOffsetOf(posix.O, "NONBLOCK"));
+                if (posix.errno(posix.system.fcntl(self.stream.socket.handle, posix.F.SETFL, nonblocking)) == .SUCCESS) {
+                    // One best-effort nonblocking write. The subsequent
+                    // shutdown is authoritative if the close frame cannot fit.
+                    _ = write(self.stream.socket.handle, frame_buf[0..frame_len].ptr, frame_len);
+                }
+            }
+            self.write_mutex.unlock(runtime.io);
+        }
+        self.stream.shutdown(runtime.io, .both) catch {};
+    }
+
+    pub fn shutdown(self: *WsConn) void {
+        self.closing.store(true, .release);
+        self.stream.shutdown(runtime.io, .both) catch {};
+    }
 };
+
+fn allocateTestOutboundFrame(frame_allocator: std.mem.Allocator) !void {
+    var conn = WsConn{
+        .stream = undefined,
+        .frame_allocator = frame_allocator,
+    };
+    const frame = try conn.encodeOwnedFrame(true, .text, "allocation-test");
+    frame_allocator.free(frame);
+}
+
+test "WebSocket outbound frame handles allocation failure without leaks" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        allocateTestOutboundFrame,
+        .{},
+    );
+}
+
+test "WebSocket backpressure frees rejected frame ownership" {
+    var conn = WsConn{
+        .stream = undefined,
+        .frame_allocator = std.testing.allocator,
+        .pending_count = MAX_WS_QUEUE_MESSAGES,
+    };
+    const owned = try std.testing.allocator.dupe(u8, "rejected-frame");
+    try std.testing.expectError(
+        error.Backpressure,
+        conn.queueOwnedFrame(owned, 0, owned.len),
+    );
+}
 
 /// Result of WS upgrade attempt.
 const WsUpgradeOutcome = enum {
@@ -1329,6 +1880,8 @@ const WsUpgradeOutcome = enum {
     /// Was a WS request and we handled it (whether successfully or with an
     /// error response). Caller should NOT continue normal dispatch.
     handled,
+    /// The dedicated WebSocket pool now owns the stream.
+    transferred,
 };
 
 const HttpRequestLine = struct {
@@ -1457,6 +2010,12 @@ test "WebSocket security header duplicates are case-insensitive" {
         .{ .name = "AUTHORIZATION", .value = "Bearer two" },
     };
     try std.testing.expect(hasDuplicateWebSocketSecurityHeader(&duplicate));
+
+    const duplicate_host = [_]HeaderPair{
+        .{ .name = "Host", .value = "first.example" },
+        .{ .name = "hOsT", .value = "second.example" },
+    };
+    try std.testing.expect(hasDuplicateWebSocketSecurityHeader(&duplicate_host));
 }
 
 /// RFC 6455 section 4.2.1 requires a standard Base64 value that decodes to
@@ -1494,6 +2053,35 @@ fn headerContainsToken(value: []const u8, token: []const u8) bool {
     return false;
 }
 
+/// Allocation-free, case-insensitive header-name probe for the HTTP fast
+/// path. A byte substring search would miss mixed-case spellings such as
+/// `uPgRaDe` even though HTTP field names are case-insensitive.
+fn requestHasHeader(
+    request_data: []const u8,
+    first_line_end: usize,
+    header_end_pos: usize,
+    name: []const u8,
+) bool {
+    var pos = first_line_end + 2;
+    while (pos < header_end_pos) {
+        const line_end = std.mem.indexOfPos(u8, request_data, pos, "\r\n") orelse header_end_pos;
+        const line = request_data[pos..line_end];
+        pos = line_end + 2;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const candidate = std.mem.trim(u8, line[0..colon], " \t");
+        if (std.ascii.eqlIgnoreCase(candidate, name)) return true;
+    }
+    return false;
+}
+
+test "WebSocket upgrade hint accepts mixed-case HTTP field names" {
+    const request = "GET /ws HTTP/1.1\r\nuPgRaDe: websocket\r\nHost: example.test\r\n\r\n";
+    const first_line_end = std.mem.indexOf(u8, request, "\r\n").?;
+    const header_end = std.mem.indexOf(u8, request, "\r\n\r\n").?;
+    try std.testing.expect(requestHasHeader(request, first_line_end, header_end, "upgrade"));
+    try std.testing.expect(!requestHasHeader(request, first_line_end, header_end, "authorization"));
+}
+
 /// Send a minimal HTTP error response on the WebSocket-upgrade path. Used for
 /// malformed upgrade requests (missing key, bad version, etc.).
 fn sendUpgradeError(stream: std.Io.net.Stream, status_code: u16, reason: []const u8) void {
@@ -1517,13 +2105,17 @@ fn tryWebSocketUpgrade(
 ) WsUpgradeOutcome {
     if (!std.mem.eql(u8, method, "GET")) return .not_websocket;
 
-    // Quick check: does the request mention "upgrade" anywhere in headers?
-    // Avoids parsing the full header list for normal GETs.
-    const upgrade_hint = std.mem.indexOfPosLinear(u8, request_head, first_line_end, "Upgrade:") != null or
-        std.mem.indexOfPosLinear(u8, request_head, first_line_end, "upgrade:") != null;
-    if (!upgrade_hint) return .not_websocket;
+    // Avoid allocating a parsed header list for normal GET requests.
+    if (!requestHasHeader(request_head, first_line_end, header_end_pos, "upgrade"))
+        return .not_websocket;
 
-    var headers = parseHeaders(request_head, first_line_end, header_end_pos);
+    var headers = parseWebSocketHeaders(request_head, first_line_end, header_end_pos) catch |err| {
+        switch (err) {
+            error.Malformed => sendUpgradeError(stream, 400, "Bad Request"),
+            error.OutOfMemory => sendUpgradeError(stream, 500, "Internal Server Error"),
+        }
+        return .handled;
+    };
     defer headers.deinit(allocator);
 
     const upgrade_h = findHeader(headers.items, "upgrade") orelse return .not_websocket;
@@ -1602,14 +2194,21 @@ fn tryWebSocketUpgrade(
         }
     }
 
-    // Admission must happen before the 101 response. Every accepted WebSocket
-    // below owns this HTTP worker until close, so reject once the bounded share
-    // is full and release the slot on every subsequent exit path.
+    // Admission and all metadata allocation happen before the 101 response.
+    // Once 101 is visible the dedicated pool must be able to own the stream.
     if (!tryAcquireWebSocketSlot()) {
         sendUpgradeError(stream, 503, "Service Unavailable");
         return .handled;
     }
-    defer releaseWebSocketSlot();
+    var slot_transferred = false;
+    defer if (!slot_transferred) releaseWebSocketSlot();
+
+    var job = WebSocketJob.init(stream, path, query_string, headers.items, route_snapshot) catch {
+        sendUpgradeError(stream, 503, "Service Unavailable");
+        return .handled;
+    };
+    var job_transferred = false;
+    defer if (!job_transferred) job.deinitMetadata();
 
     // Handshake.
     var accept_buf: [ws.ACCEPT_LEN]u8 = undefined;
@@ -1624,11 +2223,24 @@ fn tryWebSocketUpgrade(
     };
     streamWriteAll(stream, resp_buf[0..resp_len]) catch return .handled;
 
-    // Run the connection.
-    runWebSocketConnection(stream, path, query_string, headers.items, route_snapshot, tstate) catch |err| {
-        logger.warn("[WS] connection ended with error: {}", .{err});
+    // The 30-second receive timeout protects only the HTTP header phase. A
+    // valid WebSocket may remain idle indefinitely, so clear it before the
+    // dedicated pool takes ownership.
+    const no_timeout = std.posix.timeval{ .sec = 0, .usec = 0 };
+    std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&no_timeout)) catch {};
+    const write_timeout = std.posix.timeval{
+        .sec = @intCast(ws_write_timeout_ms / 1000),
+        .usec = @intCast((ws_write_timeout_ms % 1000) * 1000),
     };
-    return .handled;
+    std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&write_timeout)) catch {};
+
+    ws_pool.queue.push(job);
+    // The queued job now owns the retained Python route references. They stay
+    // alive across route replacement until this connection's worker exits.
+    route_snapshot = null;
+    job_transferred = true;
+    slot_transferred = true;
+    return .transferred;
 }
 
 const WebSocketRouteEntry = struct {
@@ -1684,7 +2296,6 @@ fn releaseWebSocketRoute(route: WebSocketRouteEntry, tstate: ?*anyopaque) void {
 /// auto-replies to ping with pong, echoes text/binary for /ws-echo, and
 /// completes the close handshake when requested.
 ///
-/// Phase 4: extend this to call into Python via FFI for registered routes.
 /// Outcome of reading the next user-visible WS message. Control frames
 /// (ping/pong/close) are handled internally and never surface as a Message.
 const NextMessage = union(enum) {
@@ -1693,6 +2304,39 @@ const NextMessage = union(enum) {
     closed,
     protocol_error,
 };
+
+const NextNonblockingMessage = union(enum) {
+    text: []const u8,
+    binary: []const u8,
+    would_block,
+    closed,
+    protocol_error,
+};
+
+const PeerCloseValidation = enum { valid, invalid_code, invalid_utf8 };
+
+fn recordPeerClose(conn: *WsConn, payload: []const u8) PeerCloseValidation {
+    if (payload.len == 0) {
+        conn.peer_close_code = 1005;
+        conn.peer_close_reason_len = 0;
+        return .valid;
+    }
+    if (payload.len == 1) return .invalid_code;
+    const code = std.mem.readInt(u16, payload[0..2], .big);
+    if (!isValidWebSocketCloseCode(@intCast(code))) return .invalid_code;
+    const reason = payload[2..];
+    if (!std.unicode.utf8ValidateSlice(reason)) return .invalid_utf8;
+    conn.peer_close_code = code;
+    conn.peer_close_reason_len = reason.len;
+    @memcpy(conn.peer_close_reason[0..reason.len], reason);
+    return .valid;
+}
+
+fn validateTextMessage(conn: *WsConn, payload: []const u8) bool {
+    if (std.unicode.utf8ValidateSlice(payload)) return true;
+    conn.sendClose(1007, "invalid utf-8");
+    return false;
+}
 
 fn canAppendWebSocketFragment(current_len: usize, incoming_len: usize) bool {
     return current_len <= WsConn.MAX_MESSAGE and incoming_len <= WsConn.MAX_MESSAGE - current_len;
@@ -1707,16 +2351,28 @@ fn canAppendWebSocketFragment(current_len: usize, incoming_len: usize) bool {
 /// caller MUST consume the message before the next call (the buffers are
 /// reused).
 fn wsReadNextMessage(conn: *WsConn) NextMessage {
-    while (!conn.closing) {
+    while (!conn.closing.load(.acquire)) {
         if (conn.read_len < 2) {
-            if (!conn.fillRead()) return .closed;
-            continue;
+            switch (conn.fillRead()) {
+                .progress => continue,
+                .closed => return .closed,
+                .failed, .would_block => {
+                    conn.sendClose(1011, "read failure");
+                    return .protocol_error;
+                },
+            }
         }
 
         const frame = ws.parseServerFrame(conn.readStorage()[0..conn.read_len], WsConn.MAX_MESSAGE) catch |err| switch (err) {
             ws.ParseError.Incomplete => {
-                if (!conn.fillRead()) return .closed;
-                continue;
+                switch (conn.fillRead()) {
+                    .progress => continue,
+                    .closed => return .closed,
+                    .failed, .would_block => {
+                        conn.sendClose(1011, "read failure");
+                        return .protocol_error;
+                    },
+                }
             },
             ws.ParseError.PayloadTooLarge => {
                 conn.sendClose(1009, "message too big");
@@ -1737,7 +2393,21 @@ fn wsReadNextMessage(conn: *WsConn) NextMessage {
                 conn.consumeRead(frame.consumed);
             },
             .close => {
-                conn.sendClose(1000, "");
+                switch (recordPeerClose(conn, frame.payload)) {
+                    .valid => {},
+                    .invalid_code => {
+                        conn.sendClose(1002, "invalid close code");
+                        return .protocol_error;
+                    },
+                    .invalid_utf8 => {
+                        conn.sendClose(1007, "invalid utf-8");
+                        return .protocol_error;
+                    },
+                }
+                if (conn.peer_close_code == 1005)
+                    conn.sendEmptyClose()
+                else
+                    conn.sendClose(conn.peer_close_code, conn.peer_close_reason[0..conn.peer_close_reason_len]);
                 conn.consumeRead(frame.consumed);
                 return .closed;
             },
@@ -1755,7 +2425,7 @@ fn wsReadNextMessage(conn: *WsConn) NextMessage {
                     conn.fragment_opcode = frame.opcode;
                     conn.fragment_active = true;
                     conn.fragment_buf.appendSlice(allocator, frame.payload) catch {
-                        conn.sendClose(1009, "fragment too big");
+                        conn.sendClose(1011, "out of memory");
                         return .protocol_error;
                     };
                     conn.consumeRead(frame.consumed);
@@ -1766,10 +2436,13 @@ fn wsReadNextMessage(conn: *WsConn) NextMessage {
                     // We need to return a stable slice. Copy into fragment_buf
                     // so the slice survives the upcoming consumeRead().
                     conn.fragment_buf.clearRetainingCapacity();
-                    conn.fragment_buf.appendSlice(allocator, payload) catch return .protocol_error;
+                    conn.fragment_buf.appendSlice(allocator, payload) catch {
+                        conn.sendClose(1011, "out of memory");
+                        return .protocol_error;
+                    };
                     conn.consumeRead(consumed);
                     return switch (op) {
-                        .text => .{ .text = conn.fragment_buf.items },
+                        .text => if (validateTextMessage(conn, conn.fragment_buf.items)) .{ .text = conn.fragment_buf.items } else .protocol_error,
                         .binary => .{ .binary = conn.fragment_buf.items },
                         else => unreachable,
                     };
@@ -1785,7 +2458,7 @@ fn wsReadNextMessage(conn: *WsConn) NextMessage {
                     return .protocol_error;
                 }
                 conn.fragment_buf.appendSlice(allocator, frame.payload) catch {
-                    conn.sendClose(1009, "fragment too big");
+                    conn.sendClose(1011, "out of memory");
                     return .protocol_error;
                 };
                 const op = conn.fragment_opcode;
@@ -1794,7 +2467,7 @@ fn wsReadNextMessage(conn: *WsConn) NextMessage {
                 if (finalize) {
                     conn.fragment_active = false;
                     return switch (op) {
-                        .text => .{ .text = conn.fragment_buf.items },
+                        .text => if (validateTextMessage(conn, conn.fragment_buf.items)) .{ .text = conn.fragment_buf.items } else .protocol_error,
                         .binary => .{ .binary = conn.fragment_buf.items },
                         else => .protocol_error,
                     };
@@ -1804,6 +2477,107 @@ fn wsReadNextMessage(conn: *WsConn) NextMessage {
                 conn.sendClose(1002, "unsupported opcode");
                 return .protocol_error;
             },
+        }
+    }
+    return .closed;
+}
+
+fn closeNonblocking(conn: *WsConn, code: u16, reason: []const u8) NextNonblockingMessage {
+    _ = conn.sendCloseNonblocking(code, reason, true) catch {};
+    return .protocol_error;
+}
+
+/// Read all currently available bytes without ever blocking the Python event
+/// loop. A caller waits for fd readability and retries on `would_block`.
+fn wsReadNextMessageNonblocking(conn: *WsConn) NextNonblockingMessage {
+    while (!conn.closing.load(.acquire)) {
+        if (conn.read_len < 2) {
+            switch (conn.fillReadNonblocking()) {
+                .progress => continue,
+                .would_block => return .would_block,
+                .closed => return .closed,
+                .failed => return closeNonblocking(conn, 1011, "read failure"),
+            }
+        }
+
+        const frame = ws.parseServerFrame(conn.readStorage()[0..conn.read_len], WsConn.MAX_MESSAGE) catch |err| switch (err) {
+            ws.ParseError.Incomplete => switch (conn.fillReadNonblocking()) {
+                .progress => continue,
+                .would_block => return .would_block,
+                .closed => return .closed,
+                .failed => return closeNonblocking(conn, 1011, "read failure"),
+            },
+            ws.ParseError.PayloadTooLarge => return closeNonblocking(conn, 1009, "message too big"),
+            else => return closeNonblocking(conn, 1002, "protocol error"),
+        };
+
+        switch (frame.opcode) {
+            .ping => {
+                _ = conn.writeFrameNonblocking(.pong, frame.payload) catch
+                    return closeNonblocking(conn, 1013, "control backpressure");
+                conn.consumeRead(frame.consumed);
+            },
+            .pong => conn.consumeRead(frame.consumed),
+            .close => {
+                switch (recordPeerClose(conn, frame.payload)) {
+                    .valid => {},
+                    .invalid_code => return closeNonblocking(conn, 1002, "invalid close code"),
+                    .invalid_utf8 => return closeNonblocking(conn, 1007, "invalid utf-8"),
+                }
+                if (conn.peer_close_code == 1005)
+                    _ = conn.sendEmptyCloseNonblocking(true) catch {}
+                else
+                    _ = conn.sendCloseNonblocking(conn.peer_close_code, conn.peer_close_reason[0..conn.peer_close_reason_len], true) catch {};
+                conn.consumeRead(frame.consumed);
+                return .closed;
+            },
+            .text, .binary => {
+                if (conn.fragment_active)
+                    return closeNonblocking(conn, 1002, "fragment sequence error");
+                if (!frame.fin) {
+                    conn.fragment_buf.clearRetainingCapacity();
+                    if (!canAppendWebSocketFragment(0, frame.payload.len))
+                        return closeNonblocking(conn, 1009, "message too big");
+                    conn.fragment_opcode = frame.opcode;
+                    conn.fragment_active = true;
+                    conn.fragment_buf.appendSlice(allocator, frame.payload) catch
+                        return closeNonblocking(conn, 1011, "out of memory");
+                    conn.consumeRead(frame.consumed);
+                } else {
+                    const op = frame.opcode;
+                    conn.fragment_buf.clearRetainingCapacity();
+                    conn.fragment_buf.appendSlice(allocator, frame.payload) catch
+                        return closeNonblocking(conn, 1011, "out of memory");
+                    conn.consumeRead(frame.consumed);
+                    if (op == .text and !std.unicode.utf8ValidateSlice(conn.fragment_buf.items))
+                        return closeNonblocking(conn, 1007, "invalid utf-8");
+                    return if (op == .text)
+                        .{ .text = conn.fragment_buf.items }
+                    else
+                        .{ .binary = conn.fragment_buf.items };
+                }
+            },
+            .continuation => {
+                if (!conn.fragment_active)
+                    return closeNonblocking(conn, 1002, "unexpected continuation");
+                if (!canAppendWebSocketFragment(conn.fragment_buf.items.len, frame.payload.len))
+                    return closeNonblocking(conn, 1009, "message too big");
+                conn.fragment_buf.appendSlice(allocator, frame.payload) catch
+                    return closeNonblocking(conn, 1011, "out of memory");
+                const op = conn.fragment_opcode;
+                const finalize = frame.fin;
+                conn.consumeRead(frame.consumed);
+                if (finalize) {
+                    conn.fragment_active = false;
+                    if (op == .text and !std.unicode.utf8ValidateSlice(conn.fragment_buf.items))
+                        return closeNonblocking(conn, 1007, "invalid utf-8");
+                    return if (op == .text)
+                        .{ .text = conn.fragment_buf.items }
+                    else
+                        .{ .binary = conn.fragment_buf.items };
+                }
+            },
+            else => return closeNonblocking(conn, 1002, "unsupported opcode"),
         }
     }
     return .closed;
@@ -1836,7 +2610,7 @@ fn runWebSocketConnection(
 }
 
 fn runEchoLoop(conn: *WsConn) void {
-    while (!conn.closing) {
+    while (!conn.closing.load(.acquire)) {
         const msg = wsReadNextMessage(conn);
         switch (msg) {
             .text => |t| conn.writeFrame(true, .text, t) catch return,
@@ -1874,6 +2648,7 @@ fn runPythonHandler(
         return;
     };
     defer c.Py_DecRef(capsule);
+    defer _ = c.PyCapsule_SetName(capsule, "turbonet.WsConn.closed");
 
     // Find the bootstrap-installed helper on the turbonet module:
     // `_ws_invoke_handler(handler, capsule, path, query_string, headers, path_params)`.
@@ -1890,7 +2665,10 @@ fn runPythonHandler(
 
     // Handler returned (or raised). If it didn't close the connection itself,
     // send a clean close now.
-    if (!conn.closing) conn.sendClose(1000, "");
+    if (!conn.closing.load(.acquire)) {
+        _ = conn.sendCloseNonblocking(1000, "", false) catch {};
+        _ = conn.flushPendingFrames() catch false;
+    }
 }
 
 fn websocketHeadersToPyList(headers: []const HeaderPair) ?*c.PyObject {
@@ -2086,15 +2864,27 @@ fn invokeHelper(
 //
 // Python-facing primitives, exposed via main.zig method table:
 //   _server_add_websocket_route(path, handler)
-//   _ws_recv(capsule) -> (type_str, data) | raises WebSocketDisconnect
+//   _ws_recv(capsule) -> (type_str, data, write_pending) | None
+//   _ws_recv_blocking(capsule) -> (type_str, data, false)
 //   _ws_send_text(capsule, str)
 //   _ws_send_bytes(capsule, bytes)
 //   _ws_close(capsule, code, reason)
+//   _ws_abort(capsule, code, reason)
+//   _ws_shutdown(capsule)
 //
-// Each FFI call extracts the WsConn pointer from the capsule, releases the
-// GIL around blocking I/O, then re-acquires before returning a Python value.
+// Each FFI call extracts the WsConn pointer from the capsule. Blocking calls
+// detach the current Python thread state around I/O; readiness calls return
+// immediately on would-block.
 
 const WS_CAPSULE_NAME: [*:0]const u8 = "turbonet.WsConn";
+
+fn isValidWebSocketCloseCode(code: c_int) bool {
+    return switch (code) {
+        1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014 => true,
+        3000...4999 => true,
+        else => false,
+    };
+}
 
 inline fn capsuleToConn(capsule_obj: ?*c.PyObject) ?*WsConn {
     if (capsule_obj == null) return null;
@@ -2160,9 +2950,8 @@ pub fn server_add_websocket_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(
     return py.pyNone();
 }
 
-/// Block reading the next user-visible WS message. Returns a 2-tuple
-/// (type_str, data) where type_str is "text" or "bytes". Raises a Python
-/// RuntimeError on disconnect (Python side translates to WebSocketDisconnect).
+/// Poll the next user-visible WS message without blocking. The third tuple
+/// item tells Python that a control reply left bytes queued for the fd writer.
 pub fn ws_recv(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var capsule_obj: ?*c.PyObject = null;
     if (c.PyArg_ParseTuple(args, "O", &capsule_obj) == 0) return null;
@@ -2171,36 +2960,123 @@ pub fn ws_recv(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
         return null;
     };
 
-    const save = py.PyEval_SaveThread();
-    const msg = wsReadNextMessage(conn);
-    py.PyEval_RestoreThread(save);
+    const msg = wsReadNextMessageNonblocking(conn);
+    const has_pending = conn.hasPendingFrames();
+    const pending_obj = c.PyBool_FromLong(if (has_pending) 1 else 0) orelse return null;
+    defer c.Py_DecRef(pending_obj);
 
     switch (msg) {
         .text => |t| {
             const type_str = py.newString("text") orelse return null;
+            defer c.Py_DecRef(type_str);
             const data = py.newString(t) orelse {
-                c.Py_DecRef(type_str);
                 return null;
             };
-            return c.PyTuple_Pack(2, type_str, data);
+            defer c.Py_DecRef(data);
+            return c.PyTuple_Pack(3, type_str, data, pending_obj);
         },
         .binary => |b| {
             const type_str = py.newString("bytes") orelse return null;
+            defer c.Py_DecRef(type_str);
             const data = py.newBytes(b) orelse {
-                c.Py_DecRef(type_str);
                 return null;
             };
-            return c.PyTuple_Pack(2, type_str, data);
+            defer c.Py_DecRef(data);
+            return c.PyTuple_Pack(3, type_str, data, pending_obj);
         },
         .closed => {
-            // Signal disconnect to Python — RuntimeError, translated by the
-            // Python helper into WebSocketDisconnect.
-            c.PyErr_SetString(c.PyExc_RuntimeError, "websocket disconnect");
-            return null;
+            const type_str = py.newString("disconnect") orelse return null;
+            defer c.Py_DecRef(type_str);
+            const code = c.PyLong_FromLong(conn.peer_close_code) orelse return null;
+            defer c.Py_DecRef(code);
+            const reason = py.newString(conn.peer_close_reason[0..conn.peer_close_reason_len]) orelse return null;
+            defer c.Py_DecRef(reason);
+            const close_data = c.PyTuple_Pack(2, code, reason) orelse return null;
+            defer c.Py_DecRef(close_data);
+            return c.PyTuple_Pack(3, type_str, close_data, pending_obj);
         },
         .protocol_error => {
-            c.PyErr_SetString(c.PyExc_RuntimeError, "websocket protocol error");
-            return null;
+            const type_str = py.newString("disconnect") orelse return null;
+            defer c.Py_DecRef(type_str);
+            const code = c.PyLong_FromLong(conn.local_close_code) orelse return null;
+            defer c.Py_DecRef(code);
+            const reason = py.newString(conn.local_close_reason[0..conn.local_close_reason_len]) orelse return null;
+            defer c.Py_DecRef(reason);
+            const close_data = c.PyTuple_Pack(2, code, reason) orelse return null;
+            defer c.Py_DecRef(close_data);
+            return c.PyTuple_Pack(3, type_str, close_data, pending_obj);
+        },
+        .would_block => {
+            // A ping may have queued a partial pong before the parser reached
+            // would-block. Surface that control-only progress so Python starts
+            // its fd writer; returning None here would leave the pong stranded
+            // until another inbound frame happened to arrive.
+            if (!has_pending) return py.pyNone();
+            const type_str = py.newString("control") orelse return null;
+            defer c.Py_DecRef(type_str);
+            const none = py.pyNone();
+            defer c.Py_DecRef(none);
+            return c.PyTuple_Pack(3, type_str, none, pending_obj);
+        },
+    }
+}
+
+/// Direct sequential-handler hot path. This detaches the worker's Python
+/// thread state while the native socket waits for a complete user message.
+pub fn ws_recv_blocking(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var capsule_obj: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "O", &capsule_obj) == 0) return null;
+    const conn = capsuleToConn(capsule_obj) orelse {
+        py.setError("invalid ws capsule", .{});
+        return null;
+    };
+    if (conn.nonblocking) {
+        c.PyErr_SetString(c.PyExc_RuntimeError, "blocking receive after nonblocking activation");
+        return null;
+    }
+
+    const save = py.PyEval_SaveThread();
+    const msg = wsReadNextMessage(conn);
+    py.PyEval_RestoreThread(save);
+    const pending_obj = c.PyBool_FromLong(0) orelse return null;
+    defer c.Py_DecRef(pending_obj);
+
+    switch (msg) {
+        .text => |text| {
+            const kind = py.newString("text") orelse return null;
+            defer c.Py_DecRef(kind);
+            const data = py.newString(text) orelse return null;
+            defer c.Py_DecRef(data);
+            return c.PyTuple_Pack(3, kind, data, pending_obj);
+        },
+        .binary => |bytes| {
+            const kind = py.newString("bytes") orelse return null;
+            defer c.Py_DecRef(kind);
+            const data = py.newBytes(bytes) orelse return null;
+            defer c.Py_DecRef(data);
+            return c.PyTuple_Pack(3, kind, data, pending_obj);
+        },
+        .closed => {
+            const kind = py.newString("disconnect") orelse return null;
+            defer c.Py_DecRef(kind);
+            const code = c.PyLong_FromLong(conn.peer_close_code) orelse return null;
+            defer c.Py_DecRef(code);
+            const reason = py.newString(conn.peer_close_reason[0..conn.peer_close_reason_len]) orelse return null;
+            defer c.Py_DecRef(reason);
+            const close_data = c.PyTuple_Pack(2, code, reason) orelse return null;
+            defer c.Py_DecRef(close_data);
+            return c.PyTuple_Pack(3, kind, close_data, pending_obj);
+        },
+        .protocol_error => {
+            const kind = py.newString("disconnect") orelse return null;
+            defer c.Py_DecRef(kind);
+            const code = c.PyLong_FromLong(conn.local_close_code) orelse return null;
+            defer c.Py_DecRef(code);
+            const reason = py.newString(conn.local_close_reason[0..conn.local_close_reason_len]) orelse return null;
+            defer c.Py_DecRef(reason);
+            const close_data = c.PyTuple_Pack(2, code, reason) orelse return null;
+            defer c.Py_DecRef(close_data);
+            return c.PyTuple_Pack(3, kind, close_data, pending_obj);
         },
     }
 }
@@ -2216,14 +3092,17 @@ pub fn ws_send_text(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     };
 
     const slice = if (text_len > 0) text[0..@intCast(text_len)] else "";
-    const save = py.PyEval_SaveThread();
-    conn.writeFrame(true, .text, slice) catch {
-        py.PyEval_RestoreThread(save);
-        c.PyErr_SetString(c.PyExc_RuntimeError, "ws write failed");
+    const save = if (!conn.nonblocking) py.PyEval_SaveThread() else null;
+    const write_result = conn.writeFrameNonblocking(.text, slice);
+    if (save) |state| py.PyEval_RestoreThread(state);
+    const pending = write_result catch |err| {
+        if (err == error.Backpressure)
+            c.PyErr_SetString(c.PyExc_BufferError, "websocket outbound queue full")
+        else
+            c.PyErr_SetString(c.PyExc_RuntimeError, "ws write failed");
         return null;
     };
-    py.PyEval_RestoreThread(save);
-    return py.pyNone();
+    return c.PyBool_FromLong(if (pending) 1 else 0);
 }
 
 pub fn ws_send_bytes(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
@@ -2237,14 +3116,17 @@ pub fn ws_send_bytes(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObj
     };
 
     const slice = if (data_len > 0) data[0..@intCast(data_len)] else "";
-    const save = py.PyEval_SaveThread();
-    conn.writeFrame(true, .binary, slice) catch {
-        py.PyEval_RestoreThread(save);
-        c.PyErr_SetString(c.PyExc_RuntimeError, "ws write failed");
+    const save = if (!conn.nonblocking) py.PyEval_SaveThread() else null;
+    const write_result = conn.writeFrameNonblocking(.binary, slice);
+    if (save) |state| py.PyEval_RestoreThread(state);
+    const pending = write_result catch |err| {
+        if (err == error.Backpressure)
+            c.PyErr_SetString(c.PyExc_BufferError, "websocket outbound queue full")
+        else
+            c.PyErr_SetString(c.PyExc_RuntimeError, "ws write failed");
         return null;
     };
-    py.PyEval_RestoreThread(save);
-    return py.pyNone();
+    return c.PyBool_FromLong(if (pending) 1 else 0);
 }
 
 pub fn ws_close(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
@@ -2253,14 +3135,137 @@ pub fn ws_close(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     var reason: [*c]const u8 = null;
     var reason_len: c.Py_ssize_t = 0;
     if (c.PyArg_ParseTuple(args, "Oi|s#", &capsule_obj, &code, &reason, &reason_len) == 0) return null;
+    if (!isValidWebSocketCloseCode(code)) {
+        c.PyErr_SetString(c.PyExc_ValueError, "invalid WebSocket close code");
+        return null;
+    }
+    if (reason_len > 123) {
+        c.PyErr_SetString(c.PyExc_ValueError, "WebSocket close reason exceeds 123 UTF-8 bytes");
+        return null;
+    }
     const conn = capsuleToConn(capsule_obj) orelse {
         py.setError("invalid ws capsule", .{});
         return null;
     };
 
     const reason_slice = if (reason_len > 0 and reason != null) reason[0..@intCast(reason_len)] else "";
+    const save = if (!conn.nonblocking) py.PyEval_SaveThread() else null;
+    const write_result = conn.sendCloseNonblocking(@intCast(code), reason_slice, false);
+    if (save) |state| py.PyEval_RestoreThread(state);
+    const pending = write_result catch |err| {
+        if (err == error.Backpressure)
+            c.PyErr_SetString(c.PyExc_BufferError, "websocket outbound queue full")
+        else
+            c.PyErr_SetString(c.PyExc_RuntimeError, "ws close failed");
+        return null;
+    };
+    return c.PyBool_FromLong(if (pending) 1 else 0);
+}
+
+pub fn ws_fileno(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var capsule_obj: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "O", &capsule_obj) == 0) return null;
+    const conn = capsuleToConn(capsule_obj) orelse {
+        py.setError("invalid ws capsule", .{});
+        return null;
+    };
+    return c.PyLong_FromLong(conn.stream.socket.handle);
+}
+
+pub fn ws_set_nonblocking(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var capsule_obj: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "O", &capsule_obj) == 0) return null;
+    const conn = capsuleToConn(capsule_obj) orelse {
+        py.setError("invalid ws capsule", .{});
+        return null;
+    };
+    conn.setNonblocking() catch {
+        c.PyErr_SetString(c.PyExc_RuntimeError, "failed to enable nonblocking websocket I/O");
+        return null;
+    };
+    return py.pyNone();
+}
+
+pub fn ws_flush(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var capsule_obj: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "O", &capsule_obj) == 0) return null;
+    const conn = capsuleToConn(capsule_obj) orelse {
+        py.setError("invalid ws capsule", .{});
+        return null;
+    };
+    const empty = conn.flushPendingFrames() catch {
+        c.PyErr_SetString(c.PyExc_RuntimeError, "ws flush failed");
+        return null;
+    };
+    return c.PyBool_FromLong(if (empty) 1 else 0);
+}
+
+fn wsMetricPut(dict: *c.PyObject, name: [*:0]const u8, value: usize) bool {
+    const number = c.PyLong_FromSize_t(value) orelse return false;
+    defer c.Py_DecRef(number);
+    return c.PyDict_SetItemString(dict, name, number) == 0;
+}
+
+pub fn ws_metrics(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var capsule_obj: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "O", &capsule_obj) == 0) return null;
+    const conn = capsuleToConn(capsule_obj) orelse {
+        py.setError("invalid ws capsule", .{});
+        return null;
+    };
+    conn.write_mutex.lockUncancelable(runtime.io);
+    const outbound_messages = conn.pending_count;
+    const outbound_bytes = conn.pending_bytes;
+    conn.write_mutex.unlock(runtime.io);
+
+    const result = c.PyDict_New() orelse return null;
+    if (!wsMetricPut(result, "inbound_messages", 0) or
+        !wsMetricPut(result, "inbound_bytes", conn.read_len + conn.fragment_buf.items.len) or
+        !wsMetricPut(result, "outbound_messages", outbound_messages) or
+        !wsMetricPut(result, "outbound_bytes", outbound_bytes) or
+        !wsMetricPut(result, "message_limit", ws_queue_message_limit) or
+        !wsMetricPut(result, "byte_limit", ws_queue_byte_limit))
+    {
+        c.Py_DecRef(result);
+        return null;
+    }
+    return result;
+}
+
+pub fn ws_abort(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var capsule_obj: ?*c.PyObject = null;
+    var code: c_int = 1013;
+    var reason: [*c]const u8 = null;
+    var reason_len: c.Py_ssize_t = 0;
+    if (c.PyArg_ParseTuple(args, "Oi|s#", &capsule_obj, &code, &reason, &reason_len) == 0) return null;
+    if (!isValidWebSocketCloseCode(code)) {
+        c.PyErr_SetString(c.PyExc_ValueError, "invalid WebSocket close code");
+        return null;
+    }
+    if (reason_len > 123) {
+        c.PyErr_SetString(c.PyExc_ValueError, "WebSocket close reason exceeds 123 UTF-8 bytes");
+        return null;
+    }
+    const conn = capsuleToConn(capsule_obj) orelse {
+        py.setError("invalid ws capsule", .{});
+        return null;
+    };
+    const reason_slice = if (reason_len > 0 and reason != null) reason[0..@intCast(reason_len)] else "";
     const save = py.PyEval_SaveThread();
-    conn.sendClose(@intCast(code), reason_slice);
+    conn.abort(@intCast(code), reason_slice);
+    py.PyEval_RestoreThread(save);
+    return py.pyNone();
+}
+
+pub fn ws_shutdown(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var capsule_obj: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "O", &capsule_obj) == 0) return null;
+    const conn = capsuleToConn(capsule_obj) orelse {
+        py.setError("invalid ws capsule", .{});
+        return null;
+    };
+    const save = py.PyEval_SaveThread();
+    conn.shutdown();
     py.PyEval_RestoreThread(save);
     return py.pyNone();
 }
@@ -2296,12 +3301,12 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     // a valid prefix hide a missing version or trailing request-line tokens.
     const first_line_end = std.mem.indexOf(u8, request_head, "\r\n") orelse {
         sendUpgradeError(stream, 400, "Bad Request");
-        return;
+        return error.ConnectionClosed;
     };
     const first_line = request_head[0..first_line_end];
     const request_line = parseHttpRequestLine(first_line) catch {
         sendUpgradeError(stream, 400, "Bad Request");
-        return;
+        return error.ConnectionClosed;
     };
     const method = request_line.method;
     const raw_path = request_line.request_target;
@@ -2317,7 +3322,11 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     // hardcoded /ws-echo demo route.
     if (std.mem.eql(u8, request_line.version, "HTTP/1.1")) {
         switch (tryWebSocketUpgrade(stream, request_head, first_line_end, he, method, path, query_string, tstate)) {
-            .handled => return,
+            // Every handled non-transfer outcome is a bounded HTTP rejection
+            // with `Connection: close`. Stop the keep-alive loop immediately
+            // so a client cannot retain an HTTP worker after a failed upgrade.
+            .handled => return error.ConnectionClosed,
+            .transferred => return error.ConnectionTransferred,
             .not_websocket => {},
         }
     } else if (hasWebSocketUpgradeHeader(request_head, first_line_end, he)) {
@@ -2325,7 +3334,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
         // for other parsed versions, but fail a would-be upgrade closed before
         // route lookup, application guard, capacity admission, or 101.
         sendUpgradeError(stream, 400, "Bad Request");
-        return;
+        return error.ConnectionClosed;
     }
 
     // Phase 3: Route match EARLY — before header parsing, so fast handlers
@@ -3770,22 +4779,30 @@ fn cacheThreadWorker(ctx: *const CacheThreadCtx) void {
     }
 }
 
-test "websocket capacity always preserves the requested HTTP reserve" {
-    const ordinary = clampWebSocketCapacity(24, 4, 1000);
-    try std.testing.expectEqual(@as(usize, 4), ordinary.http_worker_reserve);
-    try std.testing.expectEqual(@as(usize, 20), ordinary.max_active);
+test "websocket capacity is bounded by its isolated worker pool" {
+    const ordinary = clampWebSocketCapacity(24, 1000);
+    try std.testing.expectEqual(@as(usize, 24), ordinary.worker_count);
+    try std.testing.expectEqual(@as(usize, 24), ordinary.max_active);
 
-    const zero_reserve = clampWebSocketCapacity(4, 0, 4);
-    try std.testing.expectEqual(@as(usize, 1), zero_reserve.http_worker_reserve);
-    try std.testing.expectEqual(@as(usize, 3), zero_reserve.max_active);
+    const smaller_limit = clampWebSocketCapacity(24, 4);
+    try std.testing.expectEqual(@as(usize, 24), smaller_limit.worker_count);
+    try std.testing.expectEqual(@as(usize, 4), smaller_limit.max_active);
 
-    const oversized_reserve = clampWebSocketCapacity(4, 99, 99);
-    try std.testing.expectEqual(@as(usize, 4), oversized_reserve.http_worker_reserve);
-    try std.testing.expectEqual(@as(usize, 0), oversized_reserve.max_active);
-
-    const no_workers = clampWebSocketCapacity(0, 0, 99);
-    try std.testing.expectEqual(@as(usize, 0), no_workers.http_worker_reserve);
+    const no_workers = clampWebSocketCapacity(0, 99);
+    try std.testing.expectEqual(@as(usize, 0), no_workers.worker_count);
     try std.testing.expectEqual(@as(usize, 0), no_workers.max_active);
+}
+
+test "websocket close code validation excludes reserved and out-of-range values" {
+    try std.testing.expect(isValidWebSocketCloseCode(1000));
+    try std.testing.expect(isValidWebSocketCloseCode(1013));
+    try std.testing.expect(isValidWebSocketCloseCode(3000));
+    try std.testing.expect(isValidWebSocketCloseCode(4999));
+    try std.testing.expect(!isValidWebSocketCloseCode(-1));
+    try std.testing.expect(!isValidWebSocketCloseCode(999));
+    try std.testing.expect(!isValidWebSocketCloseCode(1005));
+    try std.testing.expect(!isValidWebSocketCloseCode(1015));
+    try std.testing.expect(!isValidWebSocketCloseCode(5000));
 }
 
 test "response cache is safe under concurrent access" {
