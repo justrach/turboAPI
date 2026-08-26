@@ -120,10 +120,15 @@ pub const Method = enum(u3) {
 
 pub const Router = struct {
     trees: [8]?*RouteNode,
+    other_trees: std.StringHashMap(*RouteNode),
     alloc: Allocator,
 
     pub fn init(alloc: Allocator) Router {
-        return .{ .trees = .{null} ** 8, .alloc = alloc };
+        return .{
+            .trees = .{null} ** 8,
+            .other_trees = std.StringHashMap(*RouteNode).init(alloc),
+            .alloc = alloc,
+        };
     }
 
     pub fn deinit(self: *Router) void {
@@ -134,6 +139,15 @@ pub const Router = struct {
                 tree.* = null;
             }
         }
+
+        var it = self.other_trees.iterator();
+        while (it.next()) |entry| {
+            const root = entry.value_ptr.*;
+            root.deinitRecursive(self.alloc);
+            self.alloc.destroy(root);
+            self.alloc.free(entry.key_ptr.*);
+        }
+        self.other_trees.deinit();
     }
 
     /// Add a route pattern. `handler_key` is stored as-is (e.g. "GET /users/{id}").
@@ -141,19 +155,20 @@ pub const Router = struct {
     pub fn addRoute(self: *Router, method: []const u8, path: []const u8, handler_key: []const u8) !void {
         if (path.len == 0 or path[0] != '/') return error.InvalidPath;
         const m = Method.fromString(method);
-        const idx = @intFromEnum(m);
-        if (self.trees[idx] == null) {
-            const root = try self.alloc.create(RouteNode);
-            root.* = RouteNode.initEmpty();
-            self.trees[idx] = root;
-        }
-        try self.addRouteImpl(path[1..], handler_key, self.trees[idx].?);
+        const root = if (m == .OTHER)
+            try self.getOrCreateOtherTree(method)
+        else
+            try self.getOrCreateCommonTree(m);
+        try self.addRouteImpl(path[1..], handler_key, root);
     }
 
     /// Find the handler key and extract path parameters for the given path.
     pub fn findRoute(self: *const Router, method: []const u8, path: []const u8) ?RouteMatch {
         const m = Method.fromString(method);
-        const root = self.trees[@intFromEnum(m)] orelse return null;
+        const root = if (m == .OTHER)
+            self.other_trees.get(method) orelse return null
+        else
+            self.trees[@intFromEnum(m)] orelse return null;
         const search = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
         var params: RouteParams = .{};
@@ -168,6 +183,30 @@ pub const Router = struct {
         }
         owned.deinit(self.alloc);
         return null;
+    }
+
+    fn getOrCreateCommonTree(self: *Router, method: Method) !*RouteNode {
+        const idx = @intFromEnum(method);
+        if (self.trees[idx]) |root| return root;
+
+        const root = try self.alloc.create(RouteNode);
+        root.* = RouteNode.initEmpty();
+        self.trees[idx] = root;
+        return root;
+    }
+
+    fn getOrCreateOtherTree(self: *Router, method: []const u8) !*RouteNode {
+        if (self.other_trees.get(method)) |root| return root;
+
+        const method_key = try self.alloc.dupe(u8, method);
+        errdefer self.alloc.free(method_key);
+
+        const root = try self.alloc.create(RouteNode);
+        errdefer self.alloc.destroy(root);
+        root.* = RouteNode.initEmpty();
+
+        try self.other_trees.putNoClobber(method_key, root);
+        return root;
     }
 
     // ── addRoute internals ──────────────────────────────────────────────
@@ -514,6 +553,25 @@ test "multiple methods on same path" {
 
     const m3 = r.findRoute("DELETE", "/items");
     try std.testing.expect(m3 == null);
+}
+
+test "custom methods on the same path stay isolated" {
+    const alloc = std.testing.allocator;
+    var r = Router.init(alloc);
+    defer r.deinit();
+
+    try r.addRoute("TRACE", "/diagnostics", "TRACE /diagnostics");
+    try r.addRoute("CONNECT", "/diagnostics", "CONNECT /diagnostics");
+
+    var trace = r.findRoute("TRACE", "/diagnostics").?;
+    defer trace.deinit();
+    try std.testing.expectEqualStrings("TRACE /diagnostics", trace.handler_key);
+
+    var connect = r.findRoute("CONNECT", "/diagnostics").?;
+    defer connect.deinit();
+    try std.testing.expectEqualStrings("CONNECT /diagnostics", connect.handler_key);
+
+    try std.testing.expect(r.findRoute("PROPFIND", "/diagnostics") == null);
 }
 
 test "parameterized routes" {
