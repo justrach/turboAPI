@@ -355,9 +355,108 @@ const MAX_CACHE_ENTRIES: usize = 10_000; // bounded to prevent OOM via unique pa
 const CacheInsertResult = enum { cached, capacity, out_of_memory };
 var model_schemas: ?std.StringHashMap(dhi.ModelSchema) = null;
 var router: ?router_mod.Router = null;
-var server_host: []const u8 = "127.0.0.1";
-var server_port: u16 = 8000;
 var cache_noargs_responses: bool = false;
+
+const SERVER_STATE_CAPSULE_NAME: [*:0]const u8 = "turbonet.ServerState";
+const SERVER_STATE_KEY: [*:0]const u8 = "_native_state";
+const SERVER_WEBSOCKET_OWNERS_KEY: [*:0]const u8 = "_websocket_callback_owners";
+
+const WebSocketRouteRegistry = struct {
+    // Entries borrow their callback pointers from the Python dictionary stored
+    // under SERVER_WEBSOCKET_OWNERS_KEY.  A dispatched connection takes its own
+    // INCREF'd snapshot before releasing this lock.
+    routes: std.StringHashMap(WebSocketRouteEntry),
+    lock: std.atomic.Mutex = .unlocked,
+    interpreter: ?*anyopaque,
+
+    fn init(interpreter: ?*anyopaque) WebSocketRouteRegistry {
+        return .{
+            .routes = std.StringHashMap(WebSocketRouteEntry).init(allocator),
+            .interpreter = interpreter,
+        };
+    }
+
+    fn lockRoutes(self: *WebSocketRouteRegistry) void {
+        while (!self.lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    fn unlockRoutes(self: *WebSocketRouteRegistry) void {
+        self.lock.unlock();
+    }
+};
+
+const ServerNativeState = struct {
+    host: []u8,
+    port: u16,
+    websocket_routes: WebSocketRouteRegistry,
+};
+
+fn serverStateFromObject(state_obj: ?*c.PyObject) ?*ServerNativeState {
+    const state_dict = state_obj orelse {
+        py.setError("missing TurboServer state", .{});
+        return null;
+    };
+    if (c.PyDict_Check(state_dict) == 0) {
+        py.setError("invalid TurboServer state", .{});
+        return null;
+    }
+    const capsule = c.PyDict_GetItemString(state_dict, SERVER_STATE_KEY) orelse {
+        py.setError("invalid TurboServer state", .{});
+        return null;
+    };
+    const raw = c.PyCapsule_GetPointer(capsule, SERVER_STATE_CAPSULE_NAME) orelse return null;
+    return @ptrCast(@alignCast(raw));
+}
+
+fn websocketOwnersFromObject(state_obj: ?*c.PyObject) ?*c.PyObject {
+    const state_dict = state_obj orelse {
+        py.setError("missing TurboServer state", .{});
+        return null;
+    };
+    const owners = c.PyDict_GetItemString(state_dict, SERVER_WEBSOCKET_OWNERS_KEY) orelse {
+        py.setError("invalid TurboServer callback owners", .{});
+        return null;
+    };
+    if (c.PyDict_Check(owners) == 0) {
+        py.setError("invalid TurboServer callback owners", .{});
+        return null;
+    }
+    return owners;
+}
+
+fn clearWebSocketRouteRegistry(registry: *WebSocketRouteRegistry) void {
+    registry.lockRoutes();
+    var detached_routes = registry.routes;
+    registry.routes = std.StringHashMap(WebSocketRouteEntry).init(allocator);
+    registry.unlockRoutes();
+
+    var it = detached_routes.iterator();
+    while (it.next()) |item| allocator.free(item.key_ptr.*);
+    detached_routes.deinit();
+}
+
+fn deinitServerState(state: *ServerNativeState) void {
+    // Registry entries are borrowed. The Python-visible owner dictionary
+    // releases callbacks, allowing Python's cyclic GC to see callback -> app /
+    // server cycles instead of leaving an opaque native strong-reference root.
+    // A running server's C argument tuple retains the state dict for the whole
+    // accept loop, so accepted HTTP jobs cannot outlive this registry. Once an
+    // upgrade is queued, WebSocketJob owns an INCREF'd callback snapshot and
+    // keeps only the registry address as diagnostic identity.
+    clearWebSocketRouteRegistry(&state.websocket_routes);
+
+    allocator.free(state.host);
+    allocator.destroy(state);
+}
+
+fn destroyServerState(capsule: ?*c.PyObject) callconv(.c) void {
+    const raw = c.PyCapsule_GetPointer(capsule, SERVER_STATE_CAPSULE_NAME) orelse {
+        c.PyErr_Clear();
+        return;
+    };
+    const state: *ServerNativeState = @ptrCast(@alignCast(raw));
+    deinitServerState(state);
+}
 
 var asyncio_run_fn: ?*c.PyObject = null;
 var turbo_run_coroutine_fn: ?*c.PyObject = null;
@@ -611,10 +710,22 @@ pub fn server_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
         return null;
     }
 
-    // Dupe the host string — the Python string's internal buffer may be freed
-    // by the GC once the Python object is collected.
-    server_host = allocator.dupe(u8, std.mem.span(host)) catch "127.0.0.1";
-    server_port = @intCast(port);
+    // Each Python TurboServer owns its listener identity and WebSocket route
+    // registry. HTTP route tables remain process-wide for now, but WebSocket
+    // dispatch must never borrow another app's handlers or guards.
+    const state = allocator.create(ServerNativeState) catch {
+        py.setError("server state alloc failed", .{});
+        return null;
+    };
+    state.* = .{
+        .host = allocator.dupe(u8, std.mem.span(host)) catch {
+            allocator.destroy(state);
+            py.setError("server host alloc failed", .{});
+            return null;
+        },
+        .port = @intCast(port),
+        .websocket_routes = WebSocketRouteRegistry.init(py.PyInterpreterState_Get()),
+    };
 
     // Eagerly initialize all globals — workers must never hit the lazy-init
     // path, which has a check-then-act race condition.
@@ -626,13 +737,54 @@ pub fn server_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
     _ = getResponseCache();
     _ = getModelSchemas();
     _ = getRouter();
-    // Return a state dict
-    const d = c.PyDict_New() orelse return null;
-    const h_obj = c.PyUnicode_FromString(host) orelse return null;
-    _ = c.PyDict_SetItemString(d, "host", h_obj);
+    // Return a state dict. The private capsule gives Python-visible server
+    // methods a stable identity. Callback ownership lives in a Python dict so
+    // Python's cyclic GC can see callback -> app / server cycles.
+    const capsule = c.PyCapsule_New(@ptrCast(state), SERVER_STATE_CAPSULE_NAME, destroyServerState) orelse {
+        deinitServerState(state);
+        return null;
+    };
+    const d = c.PyDict_New() orelse {
+        c.Py_DecRef(capsule);
+        return null;
+    };
+    if (c.PyDict_SetItemString(d, SERVER_STATE_KEY, capsule) != 0) {
+        c.Py_DecRef(capsule);
+        c.Py_DecRef(d);
+        return null;
+    }
+    c.Py_DecRef(capsule);
+
+    const websocket_owners = c.PyDict_New() orelse {
+        c.Py_DecRef(d);
+        return null;
+    };
+    if (c.PyDict_SetItemString(d, SERVER_WEBSOCKET_OWNERS_KEY, websocket_owners) != 0) {
+        c.Py_DecRef(websocket_owners);
+        c.Py_DecRef(d);
+        return null;
+    }
+    c.Py_DecRef(websocket_owners);
+
+    const h_obj = c.PyUnicode_FromString(host) orelse {
+        c.Py_DecRef(d);
+        return null;
+    };
+    if (c.PyDict_SetItemString(d, "host", h_obj) != 0) {
+        c.Py_DecRef(h_obj);
+        c.Py_DecRef(d);
+        return null;
+    }
     c.Py_DecRef(h_obj);
-    const p_obj = c.PyLong_FromLong(@intCast(port)) orelse return null;
-    _ = c.PyDict_SetItemString(d, "port", p_obj);
+    const p_obj = c.PyLong_FromLong(@intCast(port)) orelse {
+        c.Py_DecRef(d);
+        return null;
+    };
+    if (c.PyDict_SetItemString(d, "port", p_obj) != 0) {
+        c.Py_DecRef(p_obj);
+        c.Py_DecRef(d);
+        return null;
+    }
     c.Py_DecRef(p_obj);
     return d;
 }
@@ -1281,36 +1433,44 @@ const ConnectionPool = struct {
     thread_count: usize = 0,
 
     const Queue = struct {
-        items: [4096]std.Io.net.Stream = undefined,
+        const AcceptedConnection = struct {
+            stream: std.Io.net.Stream,
+            websocket_routes: *WebSocketRouteRegistry,
+        };
+
+        items: [4096]AcceptedConnection = undefined,
         head: usize = 0,
         tail: usize = 0,
         count: usize = 0,
         mutex: std.Io.Mutex = .init,
         not_empty: std.Io.Condition = .init,
 
-        fn push(self: *Queue, stream: std.Io.net.Stream) void {
+        fn push(self: *Queue, stream: std.Io.net.Stream, websocket_routes: *WebSocketRouteRegistry) void {
             self.mutex.lockUncancelable(runtime.io);
             defer self.mutex.unlock(runtime.io);
             if (self.count >= self.items.len) {
                 stream.close(runtime.io);
                 return;
             }
-            self.items[self.tail] = stream;
+            self.items[self.tail] = .{
+                .stream = stream,
+                .websocket_routes = websocket_routes,
+            };
             self.tail = (self.tail + 1) % self.items.len;
             self.count += 1;
             self.not_empty.signal(runtime.io);
         }
 
-        fn pop(self: *Queue) std.Io.net.Stream {
+        fn pop(self: *Queue) AcceptedConnection {
             self.mutex.lockUncancelable(runtime.io);
             defer self.mutex.unlock(runtime.io);
             while (self.count == 0) {
                 self.not_empty.waitUncancelable(runtime.io, &self.mutex);
             }
-            const stream = self.items[self.head];
+            const accepted = self.items[self.head];
             self.head = (self.head + 1) % self.items.len;
             self.count -= 1;
-            return stream;
+            return accepted;
         }
     };
 
@@ -1358,8 +1518,8 @@ const ConnectionPool = struct {
         }
 
         while (true) {
-            const stream = queue.pop();
-            handleConnection(stream, tstate);
+            const accepted = queue.pop();
+            handleConnection(accepted.stream, accepted.websocket_routes, tstate);
         }
     }
 };
@@ -1548,20 +1708,28 @@ fn ensureWebSocketPool(
     };
 }
 
-pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+pub fn server_run(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var state_obj: ?*c.PyObject = null;
+    if (c.PyArg_ParseTuple(args, "O", &state_obj) == 0) return null;
+    const state = serverStateFromObject(state_obj) orelse return null;
+    if (state.websocket_routes.interpreter != py.PyInterpreterState_Get()) {
+        py.setError("TurboServer belongs to a different Python interpreter", .{});
+        return null;
+    }
+
     // Initialize the shared Io runtime (no extra async threads — our ConnectionPool
     // manages workers via std.Thread.spawn to hook per-worker PyThreadState lifecycle).
     runtime.ensureInitialized(std.heap.c_allocator, .{
         .async_limit = .nothing,
     });
 
-    const ip_addr = std.Io.net.IpAddress.parse(server_host, server_port) catch {
-        py.setError("Invalid address: {s}:{d}", .{ server_host, server_port });
+    const ip_addr = std.Io.net.IpAddress.parse(state.host, state.port) catch {
+        py.setError("Invalid address: {s}:{d}", .{ state.host, state.port });
         return null;
     };
 
     var tcp_server = ip_addr.listen(runtime.io, .{ .reuse_address = true }) catch {
-        py.setError("Failed to bind to {s}:{d}", .{ server_host, server_port });
+        py.setError("Failed to bind to {s}:{d}", .{ state.host, state.port });
         return null;
     };
     defer tcp_server.deinit(runtime.io);
@@ -1609,7 +1777,7 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
         return null;
     };
 
-    logger.info("TurboNet-Zig server listening on {s}:{d}", .{ server_host, server_port });
+    logger.info("TurboNet-Zig server listening on {s}:{d}", .{ state.host, state.port });
     logger.info("Zig HTTP core active – {d}-thread pool (process-global), per-worker tstate!", .{http_config.worker_count});
     logger.info("WebSocket isolation – {d}-thread process pool, max active={d}", .{ ws_config.capacity.worker_count, ws_config.capacity.max_active });
 
@@ -1618,7 +1786,7 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
 
     while (true) {
         const stream = tcp_server.accept(runtime.io) catch continue;
-        pool.queue.push(stream);
+        pool.queue.push(stream, &state.websocket_routes);
     }
 
     py.PyEval_RestoreThread(save);
@@ -1762,7 +1930,7 @@ inline fn findHeaderEnd(buf: []const u8) ?usize {
     return null;
 }
 
-fn handleConnection(stream: std.Io.net.Stream, tstate: ?*anyopaque) void {
+fn handleConnection(stream: std.Io.net.Stream, websocket_routes: *WebSocketRouteRegistry, tstate: ?*anyopaque) void {
     var owns_stream = true;
     defer if (owns_stream) stream.close(runtime.io);
 
@@ -1775,7 +1943,7 @@ fn handleConnection(stream: std.Io.net.Stream, tstate: ?*anyopaque) void {
     std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
     while (true) {
-        handleOneRequest(stream, tstate) catch |err| switch (err) {
+        handleOneRequest(stream, websocket_routes, tstate) catch |err| switch (err) {
             error.ConnectionTransferred => {
                 owns_stream = false;
                 return;
@@ -1796,6 +1964,7 @@ const ECHO_PATH = "/ws-echo";
 
 const WebSocketJob = struct {
     stream: std.Io.net.Stream,
+    registry_identity: usize,
     path: []u8,
     query_string: []u8,
     headers: []HeaderPair,
@@ -1803,17 +1972,19 @@ const WebSocketJob = struct {
 
     fn init(
         stream: std.Io.net.Stream,
+        websocket_routes: *WebSocketRouteRegistry,
         path: []const u8,
         query_string: []const u8,
         headers: []const HeaderPair,
         route_snapshot: ?WebSocketRouteEntry,
     ) !WebSocketJob {
-        return initWithAllocator(allocator, stream, path, query_string, headers, route_snapshot);
+        return initWithAllocator(allocator, stream, websocket_routes, path, query_string, headers, route_snapshot);
     }
 
     fn initWithAllocator(
         job_allocator: std.mem.Allocator,
         stream: std.Io.net.Stream,
+        websocket_routes: *WebSocketRouteRegistry,
         path: []const u8,
         query_string: []const u8,
         headers: []const HeaderPair,
@@ -1841,6 +2012,7 @@ const WebSocketJob = struct {
         }
         return .{
             .stream = stream,
+            .registry_identity = @intFromPtr(websocket_routes),
             .path = owned_path,
             .query_string = owned_query,
             .headers = owned_headers,
@@ -1877,6 +2049,7 @@ const WebSocketJob = struct {
 };
 
 fn allocateTestWebSocketJob(job_allocator: std.mem.Allocator) !void {
+    var fake_registry: WebSocketRouteRegistry = undefined;
     const headers = [_]HeaderPair{
         .{ .name = "authorization", .value = "Bearer allocation-test" },
         .{ .name = "origin", .value = "https://example.test" },
@@ -1884,11 +2057,13 @@ fn allocateTestWebSocketJob(job_allocator: std.mem.Allocator) !void {
     var job = try WebSocketJob.initWithAllocator(
         job_allocator,
         undefined,
+        &fake_registry,
         "/ws",
         "tenant=alpha",
         &headers,
         null,
     );
+    try std.testing.expectEqual(@intFromPtr(&fake_registry), job.registry_identity);
     job.deinitMetadataWithAllocator(job_allocator);
 }
 
@@ -2509,6 +2684,7 @@ fn sendUpgradeError(stream: std.Io.net.Stream, status_code: u16, reason: []const
 /// the request (caller should stop normal HTTP dispatch).
 fn tryWebSocketUpgrade(
     stream: std.Io.net.Stream,
+    websocket_routes: *WebSocketRouteRegistry,
     request_head: []const u8,
     first_line_end: usize,
     header_end_pos: usize,
@@ -2591,7 +2767,7 @@ fn tryWebSocketUpgrade(
         if (route_snapshot) |route| releaseWebSocketRoute(route, tstate);
     }
     if (!std.mem.eql(u8, path, ECHO_PATH)) {
-        route_snapshot = retainWebSocketRoute(path, tstate) catch {
+        route_snapshot = retainWebSocketRoute(websocket_routes, path, tstate) catch {
             sendUpgradeError(stream, 500, "Internal Server Error");
             return .handled;
         };
@@ -2617,7 +2793,7 @@ fn tryWebSocketUpgrade(
     var slot_transferred = false;
     defer if (!slot_transferred) releaseWebSocketSlot();
 
-    var job = WebSocketJob.init(stream, path, query_string, headers.items, route_snapshot) catch {
+    var job = WebSocketJob.init(stream, websocket_routes, path, query_string, headers.items, route_snapshot) catch {
         sendUpgradeError(stream, 503, "Service Unavailable");
         return .handled;
     };
@@ -2667,35 +2843,16 @@ const WebSocketRouteEntry = struct {
     guard: ?*c.PyObject = null,
 };
 
-var ws_routes_map: ?std.StringHashMap(WebSocketRouteEntry) = null;
-var ws_routes_lock: std.atomic.Mutex = .unlocked;
-
-fn lockWebSocketRoutes() void {
-    while (!ws_routes_lock.tryLock()) std.atomic.spinLoopHint();
-}
-
-fn unlockWebSocketRoutes() void {
-    ws_routes_lock.unlock();
-}
-
-/// The caller must hold ws_routes_lock.
-fn getWebSocketRoutes() *std.StringHashMap(WebSocketRouteEntry) {
-    if (ws_routes_map == null) {
-        ws_routes_map = std.StringHashMap(WebSocketRouteEntry).init(allocator);
-    }
-    return &ws_routes_map.?;
-}
-
 /// Take an owned route snapshot while both the Python thread state and route
 /// lock are held. The lock is released before any guard/handler callback.
-fn retainWebSocketRoute(path: []const u8, tstate: ?*anyopaque) error{PythonThreadUnavailable}!?WebSocketRouteEntry {
+fn retainWebSocketRoute(registry: *WebSocketRouteRegistry, path: []const u8, tstate: ?*anyopaque) error{PythonThreadUnavailable}!?WebSocketRouteEntry {
     const thread_state = tstate orelse return error.PythonThreadUnavailable;
     py.PyEval_AcquireThread(thread_state);
     defer py.PyEval_ReleaseThread(thread_state);
 
-    lockWebSocketRoutes();
-    defer unlockWebSocketRoutes();
-    const route = getWebSocketRoutes().get(path) orelse return null;
+    registry.lockRoutes();
+    defer registry.unlockRoutes();
+    const route = registry.routes.get(path) orelse return null;
     c.Py_IncRef(route.handler);
     if (route.guard) |guard| c.Py_IncRef(guard);
     return route;
@@ -3282,7 +3439,7 @@ fn invokeHelper(
 // ── WebSocket FFI ──────────────────────────────────────────────────────────
 //
 // Python-facing primitives, exposed via main.zig method table:
-//   _server_add_websocket_route(path, handler)
+//   _server_add_websocket_route(server_state, path, handler, guard=None)
 //   _ws_recv(capsule) -> (type_str, data, write_pending) | None
 //   _ws_recv_blocking(capsule) -> (type_str, data)
 //   _ws_send_text(capsule, str)
@@ -3312,10 +3469,18 @@ inline fn capsuleToConn(capsule_obj: ?*c.PyObject) ?*WsConn {
 }
 
 pub fn server_add_websocket_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    var state_obj: ?*c.PyObject = null;
     var path: [*c]const u8 = null;
     var handler: ?*c.PyObject = null;
     var guard: ?*c.PyObject = null;
-    if (c.PyArg_ParseTuple(args, "sO|O", &path, &handler, &guard) == 0) return null;
+    if (c.PyArg_ParseTuple(args, "OsO|O", &state_obj, &path, &handler, &guard) == 0) return null;
+    const state = serverStateFromObject(state_obj) orelse return null;
+    if (state.websocket_routes.interpreter != py.PyInterpreterState_Get()) {
+        // Reject before retaining either callback or mutating native state.
+        py.setError("TurboServer belongs to a different Python interpreter", .{});
+        return null;
+    }
+    const owners = websocketOwnersFromObject(state_obj) orelse return null;
     if (c.PyCallable_Check(handler) == 0) {
         py.setError("WebSocket handler must be callable", .{});
         return null;
@@ -3328,36 +3493,54 @@ pub fn server_add_websocket_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(
         }
     }
     const path_s = std.mem.span(path);
+    const path_obj = c.PyUnicode_FromString(path) orelse return null;
+    defer c.Py_DecRef(path_obj);
+    const none = py.pyNone();
+    defer c.Py_DecRef(none);
+    const owner_pair = c.PyTuple_Pack(2, handler.?, guard_obj orelse none) orelse return null;
+    defer c.Py_DecRef(owner_pair);
+
     const path_owned = allocator.dupe(u8, path_s) catch {
         py.setError("ws route alloc failed", .{});
         return null;
     };
-    c.Py_IncRef(handler.?);
-    if (guard_obj) |value| c.Py_IncRef(value);
     const entry = WebSocketRouteEntry{ .handler = handler.?, .guard = guard_obj };
 
-    lockWebSocketRoutes();
-    var ws_routes = getWebSocketRoutes();
-    const route_slot = ws_routes.getOrPut(path_owned) catch {
-        unlockWebSocketRoutes();
+    const registry = &state.websocket_routes;
+    registry.lockRoutes();
+    const route_slot = registry.routes.getOrPut(path_owned) catch {
+        registry.unlockRoutes();
         allocator.free(path_owned);
-        c.Py_DecRef(entry.handler);
-        if (entry.guard) |value| c.Py_DecRef(value);
         py.setError("WebSocket route registration failed", .{});
         return null;
     };
     var replaced_entry: ?WebSocketRouteEntry = null;
     var duplicate_path: ?[]u8 = null;
     if (route_slot.found_existing) {
-        // Swap atomically while retaining the map's existing owned key.
+        // Keep the old callbacks alive across the owner-dict replacement. A
+        // decref may run arbitrary Python finalizers, so release these
+        // temporary references only after dropping the native registry lock.
         duplicate_path = path_owned;
         replaced_entry = route_slot.value_ptr.*;
-        route_slot.value_ptr.* = entry;
-    } else {
-        // The allocation has succeeded and assigning the value cannot fail.
-        route_slot.value_ptr.* = entry;
+        c.Py_IncRef(replaced_entry.?.handler);
+        if (replaced_entry.?.guard) |old_guard| c.Py_IncRef(old_guard);
     }
-    unlockWebSocketRoutes();
+
+    // Publish Python ownership before exposing borrowed pointers in the native
+    // map. On failure, remove the reserved new slot and leave replacements
+    // completely unchanged.
+    if (c.PyDict_SetItem(owners, path_obj, owner_pair) != 0) {
+        if (!route_slot.found_existing) _ = registry.routes.remove(path_s);
+        registry.unlockRoutes();
+        allocator.free(path_owned);
+        if (replaced_entry) |old_entry| {
+            c.Py_DecRef(old_entry.handler);
+            if (old_entry.guard) |old_guard| c.Py_DecRef(old_guard);
+        }
+        return null;
+    }
+    route_slot.value_ptr.* = entry;
+    registry.unlockRoutes();
 
     // Free/decref only after unlocking: Py_DecRef can run arbitrary Python
     // finalizers, and allocator work should not extend the critical section.
@@ -3689,7 +3872,7 @@ pub fn ws_shutdown(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObjec
     return py.pyNone();
 }
 
-fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
+fn handleOneRequest(stream: std.Io.net.Stream, websocket_routes: *WebSocketRouteRegistry, tstate: ?*anyopaque) !void {
     // Phase 1: Read headers into a fixed buffer (headers are typically < 8KB)
     var header_buf: [8192]u8 = undefined;
     var total_read: usize = 0;
@@ -3736,11 +3919,11 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
 
     // ── WebSocket upgrade short-circuit ─────────────────────────────────
     // Catches GET requests with Upgrade: websocket BEFORE the normal router
-    // lookup. WS routes are stored in a separate map (getWebSocketRoutes())
+    // lookup. WS routes are stored in the originating TurboServer's registry,
     // populated by the Python `@app.websocket(...)` decorator, plus the
     // hardcoded /ws-echo demo route.
     if (std.mem.eql(u8, request_line.version, "HTTP/1.1")) {
-        switch (tryWebSocketUpgrade(stream, request_head, first_line_end, he, method, path, query_string, tstate)) {
+        switch (tryWebSocketUpgrade(stream, websocket_routes, request_head, first_line_end, he, method, path, query_string, tstate)) {
             // Every handled non-transfer outcome is a bounded HTTP rejection
             // with `Connection: close`. Stop the keep-alive loop immediately
             // so a client cannot retain an HTTP worker after a failed upgrade.
