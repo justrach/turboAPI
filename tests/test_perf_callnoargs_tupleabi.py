@@ -24,6 +24,12 @@ from turboapi.request_handler import (
     create_fast_handler,
     create_fast_model_handler,
 )
+from turboapi.responses import (
+    _NATIVE_HEADER_ERROR,
+    _NATIVE_MAX_HEADER_BYTES,
+    _NATIVE_MAX_HEADER_PAIRS,
+    JSONResponse,
+)
 from turboapi.zig_integration import classify_handler
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -110,6 +116,69 @@ def test_fast_handler_returns_tuple_for_noargs():
     assert isinstance(result, tuple) and len(result) == 3
     assert result[0] == 200
     assert "ping" in result[2]
+
+
+def test_fast_handler_response_headers_extend_tuple_abi_only_when_needed():
+    """Application headers use the optional fourth ABI field."""
+
+    def with_headers():
+        return JSONResponse(
+            {"ok": True},
+            status_code=201,
+            headers={"cache-control": "no-store", "x-test": "present"},
+        )
+
+    result = create_fast_handler(with_headers, FakeRoute("GET"))()
+    assert result[:3] == (201, "application/json", b'{"ok":true}')
+    assert result[3] == (
+        "cache-control",
+        "no-store",
+        "x-test",
+        "present",
+    )
+
+
+def test_headerless_response_keeps_three_item_tuple_abi():
+    """Existing native consumers still receive the original ABI."""
+
+    def without_headers():
+        return JSONResponse({"ok": True}, status_code=201)
+
+    result = create_fast_handler(without_headers, FakeRoute("GET"))()
+    assert result == (201, "application/json", b'{"ok":true}')
+
+
+def test_native_header_pair_limit_is_exact_and_fails_with_marker():
+    headers = {f"x-{index:03d}": "v" for index in range(_NATIVE_MAX_HEADER_PAIRS)}
+    exact = JSONResponse({"secret": "original"}, status_code=299, headers=headers)._native_tuple()
+    assert isinstance(exact[3], tuple)
+    assert len(exact[3]) == _NATIVE_MAX_HEADER_PAIRS * 2
+
+    headers["strict-transport-security"] = "max-age=31536000"
+    over = JSONResponse({"secret": "original"}, status_code=299, headers=headers)._native_tuple()
+    assert over[3] == _NATIVE_HEADER_ERROR
+
+
+def test_native_header_byte_limit_counts_utf8_separator_and_crlf():
+    # "x" + ": " + value + CRLF is exactly 16 KiB on the wire. The
+    # implementation renders CRLF before each header, which has the same size.
+    exact_value = "é" * 8189 + "a"
+    assert len(exact_value.encode("utf-8")) + len("x") + 4 == _NATIVE_MAX_HEADER_BYTES
+    exact = JSONResponse({"ok": True}, headers={"x": exact_value})._native_tuple()
+    assert isinstance(exact[3], tuple)
+
+    over = JSONResponse({"ok": True}, headers={"x": exact_value + "a"})._native_tuple()
+    assert over[3] == _NATIVE_HEADER_ERROR
+
+
+def test_native_header_normalization_failure_uses_explicit_marker():
+    class OomValue:
+        def __str__(self):
+            raise MemoryError("simulated header normalization OOM")
+
+    response = JSONResponse({"secret": "original"}, status_code=299, headers={"x": OomValue()})
+    result = response._native_tuple()
+    assert result == (500, "application/json", b"", _NATIVE_HEADER_ERROR)
 
 
 def test_fast_handler_returns_tuple_with_path_param():

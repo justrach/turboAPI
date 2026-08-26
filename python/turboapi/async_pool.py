@@ -149,8 +149,7 @@ def run_coroutine(coro):
 
 def _normalize_response_tuple(result):
     if isinstance(result, Response):
-        body = result.body if isinstance(result.body, bytes) else result.body.encode("utf-8")
-        return (result.status_code, result.media_type or "application/json", body)
+        return result._native_tuple()
     if hasattr(result, "model_dump"):
         result = result.model_dump()
     if isinstance(result, tuple) and len(result) == 2:
