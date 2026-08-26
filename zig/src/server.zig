@@ -1174,21 +1174,43 @@ pub const WsConn = struct {
     /// continuation, freed when message completes or connection closes.
     fragment_buf: std.ArrayListUnmanaged(u8) = .empty,
     fragment_opcode: ws.Opcode = .continuation,
+    fragment_active: bool = false,
     /// True once we've seen a client close frame and replied with our own.
     closing: bool = false,
 
     pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
+    const MAX_WIRE_FRAME: usize = MAX_MESSAGE + 14; // 10-byte length + 4-byte mask
 
     fn deinit(self: *WsConn) void {
         if (self.read_overflow) |o| allocator.free(o);
         self.fragment_buf.deinit(allocator);
     }
 
-    /// Read more bytes from the socket into read_buf, appending. Returns
-    /// false if the peer closed.
+    fn readStorage(self: *WsConn) []u8 {
+        return self.read_overflow orelse self.read_buf[0..];
+    }
+
+    /// Ensure a socket read can make progress. The parser needs a complete
+    /// frame because it unmasks in place, so grow past the inline 16 KiB for
+    /// larger frames, bounded by the declared message limit plus wire header.
+    fn ensureReadSpace(self: *WsConn) bool {
+        const storage = self.readStorage();
+        if (self.read_len < storage.len) return true;
+        if (storage.len >= MAX_WIRE_FRAME) return false;
+        const next_len = @min(MAX_WIRE_FRAME, @max(storage.len * 2, self.read_len + 16 * 1024));
+        const next = allocator.alloc(u8, next_len) catch return false;
+        @memcpy(next[0..self.read_len], storage[0..self.read_len]);
+        if (self.read_overflow) |old| allocator.free(old);
+        self.read_overflow = next;
+        return true;
+    }
+
+    /// Read more bytes into the active buffer, appending. Returns false if
+    /// the peer closed or the bounded buffer cannot grow further.
     fn fillRead(self: *WsConn) bool {
-        if (self.read_len >= self.read_buf.len) return true; // buffer full — caller must drain
-        const n = posix.read(self.stream.socket.handle, self.read_buf[self.read_len..]) catch return false;
+        if (!self.ensureReadSpace()) return false;
+        const storage = self.readStorage();
+        const n = posix.read(self.stream.socket.handle, storage[self.read_len..]) catch return false;
         if (n == 0) return false;
         self.read_len += n;
         return true;
@@ -1199,7 +1221,8 @@ pub const WsConn = struct {
             self.read_len = 0;
             return;
         }
-        std.mem.copyForwards(u8, self.read_buf[0..], self.read_buf[n..self.read_len]);
+        const storage = self.readStorage();
+        std.mem.copyForwards(u8, storage[0..], storage[n..self.read_len]);
         self.read_len -= n;
     }
 
@@ -1381,6 +1404,10 @@ const NextMessage = union(enum) {
     protocol_error,
 };
 
+fn canAppendWebSocketFragment(current_len: usize, incoming_len: usize) bool {
+    return current_len <= WsConn.MAX_MESSAGE and incoming_len <= WsConn.MAX_MESSAGE - current_len;
+}
+
 /// Read frames until we have a complete user message (text or binary), the
 /// peer closes, or a protocol error occurs. Pings are auto-replied with
 /// pongs; pongs are dropped; close frames trigger close handshake.
@@ -1396,7 +1423,7 @@ fn wsReadNextMessage(conn: *WsConn) NextMessage {
             continue;
         }
 
-        const frame = ws.parseServerFrame(conn.read_buf[0..conn.read_len], WsConn.MAX_MESSAGE) catch |err| switch (err) {
+        const frame = ws.parseServerFrame(conn.readStorage()[0..conn.read_len], WsConn.MAX_MESSAGE) catch |err| switch (err) {
             ws.ParseError.Incomplete => {
                 if (!conn.fillRead()) return .closed;
                 continue;
@@ -1425,8 +1452,18 @@ fn wsReadNextMessage(conn: *WsConn) NextMessage {
                 return .closed;
             },
             .text, .binary => {
+                if (conn.fragment_active) {
+                    conn.sendClose(1002, "fragment sequence error");
+                    return .protocol_error;
+                }
                 if (!frame.fin) {
+                    conn.fragment_buf.clearRetainingCapacity();
+                    if (!canAppendWebSocketFragment(conn.fragment_buf.items.len, frame.payload.len)) {
+                        conn.sendClose(1009, "message too big");
+                        return .protocol_error;
+                    }
                     conn.fragment_opcode = frame.opcode;
+                    conn.fragment_active = true;
                     conn.fragment_buf.appendSlice(allocator, frame.payload) catch {
                         conn.sendClose(1009, "fragment too big");
                         return .protocol_error;
@@ -1449,8 +1486,12 @@ fn wsReadNextMessage(conn: *WsConn) NextMessage {
                 }
             },
             .continuation => {
-                if (conn.fragment_buf.items.len == 0) {
+                if (!conn.fragment_active) {
                     conn.sendClose(1002, "unexpected continuation");
+                    return .protocol_error;
+                }
+                if (!canAppendWebSocketFragment(conn.fragment_buf.items.len, frame.payload.len)) {
+                    conn.sendClose(1009, "message too big");
                     return .protocol_error;
                 }
                 conn.fragment_buf.appendSlice(allocator, frame.payload) catch {
@@ -1461,6 +1502,7 @@ fn wsReadNextMessage(conn: *WsConn) NextMessage {
                 const finalize = frame.fin;
                 conn.consumeRead(frame.consumed);
                 if (finalize) {
+                    conn.fragment_active = false;
                     return switch (op) {
                         .text => .{ .text = conn.fragment_buf.items },
                         .binary => .{ .binary = conn.fragment_buf.items },
@@ -3237,6 +3279,25 @@ test "response cache is safe under concurrent access" {
     try std.testing.expectEqual(@as(usize, 2), response_cache_count);
     try std.testing.expectEqualStrings("{\"item_id\":1}", getCachedResponse("GET /items/1").?);
     try std.testing.expectEqualStrings("{\"item_id\":2}", getCachedResponse("GET /items/2").?);
+}
+
+test "websocket read buffer grows past inline capacity without losing bytes" {
+    var conn = WsConn{ .stream = undefined };
+    defer conn.deinit();
+    @memset(&conn.read_buf, 0xA5);
+    conn.read_len = conn.read_buf.len;
+
+    try std.testing.expect(conn.ensureReadSpace());
+    try std.testing.expect(conn.read_overflow != null);
+    try std.testing.expect(conn.readStorage().len > conn.read_buf.len);
+    try std.testing.expectEqualSlices(u8, &conn.read_buf, conn.readStorage()[0..conn.read_buf.len]);
+}
+
+test "websocket fragmented message aggregate is bounded" {
+    try std.testing.expect(canAppendWebSocketFragment(0, WsConn.MAX_MESSAGE));
+    try std.testing.expect(canAppendWebSocketFragment(WsConn.MAX_MESSAGE - 1, 1));
+    try std.testing.expect(!canAppendWebSocketFragment(WsConn.MAX_MESSAGE, 1));
+    try std.testing.expect(!canAppendWebSocketFragment(WsConn.MAX_MESSAGE + 1, 0));
 }
 
 // ── Fuzz tests ───────────────────────────────────────────────────────────────

@@ -34,7 +34,7 @@ jobs:
       - name: Install Python package + test deps
         run: |
           pip install -e .
-          pip install pytest requests
+          pip install pytest pytest-asyncio requests websockets
 
       - name: Run tests (TurboAPI + TurboPG)
         run: |
