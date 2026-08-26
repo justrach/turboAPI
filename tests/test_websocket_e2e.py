@@ -133,11 +133,11 @@ async def test_ws_echo_binary_zig(ws_server: str) -> None:
 
 @pytest.mark.asyncio
 async def test_ws_echo_large_zig(ws_server: str) -> None:
-    """Exercise 16-bit length encoding."""
+    """Exercise a single 64-bit-length frame beyond the 16 KiB inline buffer."""
     async with websockets.connect(f"ws://{ws_server}/ws-echo") as ws:
-        msg = "x" * 1000
+        msg = "x" * 70_000
         await ws.send(msg)
-        reply = await ws.recv()
+        reply = await asyncio.wait_for(ws.recv(), timeout=2.0)
         assert reply == msg
 
 
@@ -256,3 +256,16 @@ async def test_ws_fragmented_message_reassembled(ws_server: str) -> None:
             await writer.wait_closed()
         except Exception:
             pass
+
+
+@pytest.mark.asyncio
+async def test_ws_fragmented_message_over_limit_closes_1009(ws_server: str) -> None:
+    """The 16 MiB cap applies to the complete message, not each fragment."""
+    chunk = "x" * (1024 * 1024)
+    async with websockets.connect(
+        f"ws://{ws_server}/ws-echo", max_size=None
+    ) as ws:
+        await ws.send([chunk] * 17)
+        with pytest.raises(websockets.exceptions.ConnectionClosed):
+            await ws.recv()
+        assert ws.close_code == 1009
