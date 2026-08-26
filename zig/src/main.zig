@@ -47,9 +47,16 @@ var methods = [_]py.PyMethodDef{
     // WebSocket functions
     .{ .ml_name = "_server_add_websocket_route", .ml_meth = @ptrCast(&server.server_add_websocket_route), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_ws_recv", .ml_meth = @ptrCast(&server.ws_recv), .ml_flags = c.METH_VARARGS, .ml_doc = null },
+    .{ .ml_name = "_ws_recv_blocking", .ml_meth = @ptrCast(&server.ws_recv_blocking), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_ws_send_text", .ml_meth = @ptrCast(&server.ws_send_text), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_ws_send_bytes", .ml_meth = @ptrCast(&server.ws_send_bytes), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_ws_close", .ml_meth = @ptrCast(&server.ws_close), .ml_flags = c.METH_VARARGS, .ml_doc = null },
+    .{ .ml_name = "_ws_fileno", .ml_meth = @ptrCast(&server.ws_fileno), .ml_flags = c.METH_VARARGS, .ml_doc = null },
+    .{ .ml_name = "_ws_set_nonblocking", .ml_meth = @ptrCast(&server.ws_set_nonblocking), .ml_flags = c.METH_VARARGS, .ml_doc = null },
+    .{ .ml_name = "_ws_flush", .ml_meth = @ptrCast(&server.ws_flush), .ml_flags = c.METH_VARARGS, .ml_doc = null },
+    .{ .ml_name = "_ws_metrics", .ml_meth = @ptrCast(&server.ws_metrics), .ml_flags = c.METH_VARARGS, .ml_doc = null },
+    .{ .ml_name = "_ws_abort", .ml_meth = @ptrCast(&server.ws_abort), .ml_flags = c.METH_VARARGS, .ml_doc = null },
+    .{ .ml_name = "_ws_shutdown", .ml_meth = @ptrCast(&server.ws_shutdown), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     // DB functions
     .{ .ml_name = "_db_configure", .ml_meth = @ptrCast(&db.db_configure), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_db_add_route", .ml_meth = @ptrCast(&db.db_add_route), .ml_flags = c.METH_VARARGS, .ml_doc = null },
@@ -163,6 +170,17 @@ const bootstrap_code: [*:0]const u8 =
     \\                self._zig_conn = None
     \\                self._accepted = False
     \\                self._closed = False
+    \\            async def _shutdown_transport(self):
+    \\                if not self._closed:
+    \\                    try:
+    \\                        _m._ws_close(self._zig_conn, 1000, "")
+    \\                    except Exception:
+    \\                        pass
+    \\                    self._closed = True
+    \\                try:
+    \\                    _m._ws_shutdown(self._zig_conn)
+    \\                except Exception:
+    \\                    pass
     \\    ws = WebSocket(scope={
     \\        "type": "websocket",
     \\        "scheme": "ws",
@@ -176,21 +194,26 @@ const bootstrap_code: [*:0]const u8 =
     \\    # Handshake already completed by Zig before this helper runs.
     \\    ws._accepted = True
     \\    ws.client_state = "connected"
+    \\    async def _run():
+    \\        try:
+    \\            bind_loop = getattr(ws, "_bind_native_loop", None)
+    \\            if bind_loop is not None:
+    \\                bind_loop()
+    \\            coro = handler(ws)
+    \\            if asyncio.iscoroutine(coro):
+    \\                await coro
+    \\        finally:
+    \\            try:
+    \\                await ws._shutdown_transport()
+    \\            finally:
+    \\                ws._zig_conn = None
     \\    try:
-    \\        coro = handler(ws)
-    \\        if asyncio.iscoroutine(coro):
-    \\            asyncio.run(coro)
+    \\        asyncio.run(_run())
     \\    except WebSocketDisconnect:
     \\        pass
     \\    except Exception:
     \\        import traceback
     \\        traceback.print_exc()
-    \\    finally:
-    \\        if not ws._closed:
-    \\            try:
-    \\                _m._ws_close(conn_capsule, 1000, "")
-    \\            except Exception:
-    \\                pass
     \\_m._ws_invoke_handler = _ws_invoke_handler
     \\
     \\class RequestContext:

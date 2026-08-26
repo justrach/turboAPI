@@ -20,6 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python 3.14t (free-threaded)
         uses: actions/setup-python@v5
@@ -38,7 +40,22 @@ jobs:
       - name: Install Python package + deps
         run: |
           pip install -e .
-          pip install uv
+          pip install uv websockets
+
+      - name: Gate persistent Python WebSocket handler against PR base
+        if: github.event_name == 'pull_request'
+        run: |
+          git worktree add --detach /tmp/turboapi-perf-base "${{ github.event.pull_request.base.sha }}"
+          (cd /tmp/turboapi-perf-base && python zig/build_turbonet.py --install --release)
+          python benchmarks/bench_websocket_python_handler.py \
+            --source-root /tmp/turboapi-perf-base \
+            --output /tmp/websocket_perf_base.json
+          python benchmarks/bench_websocket_python_handler.py \
+            --source-root . \
+            --baseline /tmp/websocket_perf_base.json \
+            --max-regression-pct 10 \
+            --output /tmp/websocket_perf_head.json
+          git worktree remove --force /tmp/turboapi-perf-base
 
       - name: Install wrk
         run: sudo apt-get update && sudo apt-get install -y wrk
@@ -101,6 +118,8 @@ jobs:
           path: |
             /tmp/bench_results.json
             /tmp/bench_pr_comment.md
+            /tmp/websocket_perf_base.json
+            /tmp/websocket_perf_head.json
 
   fastapi-comparison:
     name: "TurboAPI vs FastAPI weekly"

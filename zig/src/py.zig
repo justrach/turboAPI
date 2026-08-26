@@ -104,6 +104,7 @@ pub extern fn PyEval_AcquireThread(tstate: ?*anyopaque) void;
 pub extern fn PyEval_ReleaseThread(tstate: ?*anyopaque) void;
 pub extern fn PyThreadState_New(interp: ?*anyopaque) ?*anyopaque;
 pub extern fn PyThreadState_Clear(tstate: ?*anyopaque) void;
+pub extern fn PyThreadState_Delete(tstate: ?*anyopaque) void;
 pub extern fn PyThreadState_DeleteCurrent() void;
 pub extern fn PyInterpreterState_Get() ?*anyopaque;
 

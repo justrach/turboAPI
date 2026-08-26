@@ -55,6 +55,8 @@ pub const ParseError = error{
     UnmaskedClientFrame,
     /// Payload length exceeds caller-provided cap.
     PayloadTooLarge,
+    /// Extended length encoding was non-minimal or used the forbidden high bit.
+    NonCanonicalLength,
 };
 
 pub const PARSE_DEFAULT_MAX_PAYLOAD: usize = 16 * 1024 * 1024; // 16 MB
@@ -94,11 +96,14 @@ pub fn parseServerFrame(buf: []u8, max_payload: usize) ParseError!Frame {
         126 => {
             if (buf.len < 4) return ParseError.Incomplete;
             payload_len = std.mem.readInt(u16, buf[2..4], .big);
+            if (payload_len < 126) return ParseError.NonCanonicalLength;
             header_len = 4;
         },
         127 => {
             if (buf.len < 10) return ParseError.Incomplete;
             payload_len = std.mem.readInt(u64, buf[2..10], .big);
+            if ((payload_len & (@as(u64, 1) << 63)) != 0 or payload_len <= 0xFFFF)
+                return ParseError.NonCanonicalLength;
             header_len = 10;
         },
     }
@@ -228,6 +233,17 @@ test "accept key — RFC §1.3 worked example" {
     const written = try computeAcceptKey("dGhlIHNhbXBsZSBub25jZQ==", &out);
     try std.testing.expectEqual(ACCEPT_LEN, written);
     try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", out[0..]);
+}
+
+test "parse rejects non-canonical extended payload lengths" {
+    var encoded_125_as_126 = [_]u8{ 0x81, 0xFE, 0x00, 0x7D };
+    try std.testing.expectError(ParseError.NonCanonicalLength, parseServerFrame(&encoded_125_as_126, PARSE_DEFAULT_MAX_PAYLOAD));
+
+    var encoded_65535_as_127 = [_]u8{ 0x82, 0xFF, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF };
+    try std.testing.expectError(ParseError.NonCanonicalLength, parseServerFrame(&encoded_65535_as_127, PARSE_DEFAULT_MAX_PAYLOAD));
+
+    var high_bit_set = [_]u8{ 0x82, 0xFF, 0x80, 0, 0, 0, 0, 0, 0, 0 };
+    try std.testing.expectError(ParseError.NonCanonicalLength, parseServerFrame(&high_bit_set, PARSE_DEFAULT_MAX_PAYLOAD));
 }
 
 test "parse: smallest text frame from client" {

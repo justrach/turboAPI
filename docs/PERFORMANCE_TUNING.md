@@ -77,31 +77,92 @@ Typical values:
 - 8-core: 14 workers (capped)
 - 16-core: 14 workers (capped)
 
-### WebSocket Worker Reserve
+The native HTTP worker pool and I/O runtime are process-global. The first HTTP
+pool initialization that starts at least one worker freezes
+`TURBO_THREAD_POOL_SIZE`; later native listeners reuse the same workers rather
+than resetting their queue or multiplying threads. This remains frozen if a
+later startup phase fails. Use separate processes for different HTTP pool
+sizes.
 
-The current WebSocket runtime uses one connection worker for the lifetime of
-each upgraded socket. TurboAPI therefore reserves four workers for ordinary
-HTTP by default and caps active WebSockets at the remaining worker count.
+### WebSocket Isolation and Backpressure
 
-The two WebSocket-specific environment variables tune those bounds before the
-server starts:
+Upgraded sockets transfer immediately from the ordinary HTTP pool to a
+dedicated, bounded WebSocket pool. Long-lived or slow WebSockets therefore do
+not retain HTTP workers. The Python bridge keeps sequential handler I/O on a
+direct native fast path and switches to descriptor readiness for yielded or
+concurrent I/O, with bounded per-connection inbound/outbound queues. It does
+not submit each frame to an executor.
+
+Tune the bounds before the server starts:
 
 ```bash
 TURBO_THREAD_POOL_SIZE=24 \
-TURBO_HTTP_WORKER_RESERVE=4 \
-TURBO_MAX_WEBSOCKETS=20 \
+TURBO_WS_WORKER_POOL_SIZE=24 \
+TURBO_MAX_WEBSOCKETS=24 \
+TURBO_WS_QUEUE_MESSAGES=64 \
+TURBO_WS_QUEUE_BYTES=16777216 \
+TURBO_WS_WRITE_TIMEOUT_MS=5000 \
 python app.py
 ```
 
-- `TURBO_HTTP_WORKER_RESERVE` is clamped to at least one worker and at most the
-  configured pool size.
-- `TURBO_MAX_WEBSOCKETS` is clamped to `pool size - HTTP reserve`; zero disables
-  WebSocket admission.
+Every numeric WebSocket setting uses one strict normalization contract in both
+the Python bridge and native server: a non-empty string of ASCII decimal digits
+that fits in an unsigned 64-bit integer. A sign, whitespace, non-ASCII digit,
+other character, empty value, or integer overflow makes the entire value
+invalid and selects its documented default. Leading zeroes are valid. Valid
+values are then clamped to the setting's minimum and maximum.
+
+The dedicated WebSocket pool is process-global. The first pool initialization
+that starts at least one worker freezes the normalized worker, admission,
+queue, and write-timeout settings for every listener in that process. This
+remains frozen even if a later HTTP-pool or listener startup phase fails. Later
+`app.run()` calls reuse the existing workers and queue; changing the environment
+after initialization has no effect. Start separate processes when listeners
+require different WebSocket limits.
+
+- `TURBO_WS_WORKER_POOL_SIZE` defaults to 24 and is clamped to 0–512. Zero, or
+  failure to start any worker, makes `app.run()` raise a startup error. If the
+  system starts only part of the requested pool, startup continues with that
+  bounded partial count.
+- `TURBO_MAX_WEBSOCKETS` defaults to the normalized worker count, is clamped to
+  0–512, and is then capped by that worker count. Zero disables WebSocket
+  admission.
+- `TURBO_WS_QUEUE_MESSAGES` and `TURBO_WS_QUEUE_BYTES` bound each direction of
+  each connected Python WebSocket. They default to 64 messages and 16 MiB and
+  are clamped to 1–1024 messages and 1 byte–16 MiB per direction. Overload
+  fails closed with code 1013 when a close frame can be written; a blocked
+  transport is shut down immediately.
+- `TURBO_WS_WRITE_TIMEOUT_MS` bounds how long an unwritable peer may retain a
+  WebSocket slot. It defaults to 5000 ms and is clamped to 100–30000 ms.
 - Excess upgrades receive HTTP `503 Service Unavailable` before the `101`
   WebSocket handshake.
 
-This is bounded containment for the worker-based runtime. It does not make
-WebSockets evented or suitable for unbounded connection counts.
+`websocket.transport_metrics` exposes queue counts, byte occupancy, limits,
+the normalized write timeout, and the actual process-global `worker_count` and
+`max_active` without exposing payload contents. The Python bridge synchronizes
+to these frozen native values before the handler starts. The runtime remains
+bounded and is not a claim of unbounded/evented connection scaling.
+
+The configured application-queue payload ceiling is
+`active WebSockets × 2 directions × TURBO_WS_QUEUE_BYTES` (768 MiB with the
+24-connection/16-MiB defaults). A conservative transport-payload bound must
+also include up to two 16-MiB receive buffers per active connection (socket
+frame storage plus fragmentation/reassembly) and up to 127 wire bytes per
+queued control frame. With every default queue and parser bound simultaneously
+full, that is roughly 1.5 GiB across 24 connections before fixed runtime,
+Python object, thread-stack, and allocator overhead. It is a worst-case bound,
+not an RSS prediction, and none of these payload buffers are eagerly
+allocated. Lower the byte limit for workloads with many small update messages.
+
+`await websocket.send_*()` means the ordered, bounded transport accepted the
+message; it does not mean the peer has read it. This lets independent producer
+and receiver tasks progress without tying the handler loop to a slow socket
+write.
+
+The pull-request performance workflow builds both the PR base and head, then
+runs `benchmarks/bench_websocket_python_handler.py` against the same persistent,
+output-verified Python echo workload. Median p50, p95, and throughput must each
+remain within the repository's 10% regression limit.
 
 ### Semaphore Capacity
 

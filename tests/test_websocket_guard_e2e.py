@@ -109,7 +109,7 @@ def guarded_server(tmp_path_factory: pytest.TempPathFactory):
     env.update(
         {
             "TURBO_THREAD_POOL_SIZE": "4",
-            "TURBO_HTTP_WORKER_RESERVE": "1",
+            "TURBO_WS_WORKER_POOL_SIZE": "1",
             "TURBO_MAX_WEBSOCKETS": "1",
         }
     )

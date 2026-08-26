@@ -727,6 +727,75 @@ class TestOpenAPI:
 
 
 class TestWebSocket:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (None, 64),
+            ("", 64),
+            ("-1", 64),
+            (" 1", 64),
+            ("1 ", 64),
+            ("+1", 64),
+            ("invalid", 64),
+            ("١", 64),
+            ("18446744073709551616", 64),
+            ("0", 1),
+            ("7", 7),
+            ("1", 1),
+            ("1024", 1024),
+            ("1025", 1024),
+            ("18446744073709551615", 1024),
+            ("000000000000000000000000000000000000", 1),
+        ],
+    )
+    def test_websocket_numeric_env_contract(self, monkeypatch, raw, expected):
+        from turboapi.websockets import _bounded_int_env
+
+        if raw is None:
+            monkeypatch.delenv("TURBO_TEST_WS_BOUND", raising=False)
+        else:
+            monkeypatch.setenv("TURBO_TEST_WS_BOUND", raw)
+        assert _bounded_int_env("TURBO_TEST_WS_BOUND", 64, 1, 1024) == expected
+
+    @pytest.mark.parametrize(
+        ("name", "default", "hard_min", "hard_max", "raw", "expected"),
+        [
+            ("TURBO_WS_WORKER_POOL_SIZE", 24, 0, 512, "0", 0),
+            ("TURBO_WS_WORKER_POOL_SIZE", 24, 0, 512, "512", 512),
+            ("TURBO_WS_WORKER_POOL_SIZE", 24, 0, 512, "7", 7),
+            ("TURBO_MAX_WEBSOCKETS", 24, 0, 512, "0", 0),
+            ("TURBO_MAX_WEBSOCKETS", 24, 0, 512, "512", 512),
+            ("TURBO_MAX_WEBSOCKETS", 24, 0, 512, "7", 7),
+            ("TURBO_WS_QUEUE_MESSAGES", 64, 1, 1024, "1", 1),
+            ("TURBO_WS_QUEUE_MESSAGES", 64, 1, 1024, "1024", 1024),
+            ("TURBO_WS_QUEUE_MESSAGES", 64, 1, 1024, "17", 17),
+            ("TURBO_WS_QUEUE_BYTES", 16 * 1024 * 1024, 1, 16 * 1024 * 1024, "1", 1),
+            ("TURBO_WS_QUEUE_BYTES", 16 * 1024 * 1024, 1, 16 * 1024 * 1024, "16777216", 16 * 1024 * 1024),
+            ("TURBO_WS_QUEUE_BYTES", 16 * 1024 * 1024, 1, 16 * 1024 * 1024, "4096", 4096),
+            ("TURBO_WS_WRITE_TIMEOUT_MS", 5000, 100, 30000, "100", 100),
+            ("TURBO_WS_WRITE_TIMEOUT_MS", 5000, 100, 30000, "30000", 30000),
+            ("TURBO_WS_WRITE_TIMEOUT_MS", 5000, 100, 30000, "750", 750),
+        ],
+    )
+    def test_each_shared_websocket_env_uses_its_exact_bounds(
+        self, monkeypatch, name, default, hard_min, hard_max, raw, expected
+    ):
+        from turboapi.websockets import _bounded_int_env
+
+        monkeypatch.setenv(name, raw)
+        assert _bounded_int_env(name, default, hard_min, hard_max) == expected
+
+    def test_websocket_constructor_uses_normalized_queue_limits(self, monkeypatch):
+        monkeypatch.setenv("TURBO_WS_QUEUE_MESSAGES", "3")
+        assert WebSocket()._zig_inbound.maxsize == 3
+        monkeypatch.setenv("TURBO_WS_QUEUE_MESSAGES", "+3")
+        monkeypatch.setenv("TURBO_WS_QUEUE_BYTES", " 4096")
+        monkeypatch.setenv("TURBO_WS_WRITE_TIMEOUT_MS", "-100")
+        websocket = WebSocket()
+        assert websocket._zig_inbound.maxsize == 64
+        assert websocket._queue_bytes == 16 * 1024 * 1024
+        assert websocket._write_timeout_s == 5.0
+
     def test_websocket_decorator(self):
         app = TurboAPI(title="WSTest")
 
@@ -760,6 +829,17 @@ class TestWebSocket:
         sent = await ws._send_queue.get()
         assert sent["type"] == "text"
         assert json.loads(sent["data"]) == {"key": "value"}
+
+    @pytest.mark.asyncio
+    async def test_websocket_rejects_invalid_close_code_and_oversized_reason(self):
+        ws = WebSocket()
+        await ws.accept()
+        with pytest.raises(ValueError, match="close code"):
+            await ws.close(code=1005)
+        with pytest.raises(ValueError, match="123 UTF-8 bytes"):
+            await ws.close(code=1000, reason="x" * 124)
+        with pytest.raises(ValueError, match="valid UTF-8"):
+            await ws.close(code=1000, reason="\ud800")
 
     def test_websocket_scope_metadata(self):
         ws = WebSocket(
