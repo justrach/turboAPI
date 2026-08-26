@@ -301,10 +301,6 @@ var server_host: []const u8 = "127.0.0.1";
 var server_port: u16 = 8000;
 var cache_noargs_responses: bool = false;
 
-// Interpreter reference captured before releasing the GIL at server start.
-// Workers use this to create their own PyThreadState rather than calling
-// PyGILState_Ensure (which pays a per-call thread-state lookup cost).
-var py_interp: ?*anyopaque = null;
 var asyncio_run_fn: ?*c.PyObject = null;
 var turbo_run_coroutine_fn: ?*c.PyObject = null;
 var turbo_run_coroutine_response_fn: ?*c.PyObject = null;
@@ -983,6 +979,7 @@ const WebSocketCapacity = struct {
 
 var active_websockets: std.atomic.Value(usize) = .init(0);
 var max_active_websockets: std.atomic.Value(usize) = .init(0);
+var actual_websocket_workers: std.atomic.Value(usize) = .init(0);
 
 /// Parse the cross-language WebSocket numeric environment contract: non-empty
 /// ASCII decimal digits representing a u64. Signs, whitespace, non-ASCII
@@ -1074,6 +1071,23 @@ fn clampWebSocketCapacity(worker_count: usize, requested_max: usize) WebSocketCa
     };
 }
 
+fn capacityAfterWorkerSpawns(successful_workers: usize, requested_max: usize) error{NoWorkers}!WebSocketCapacity {
+    if (successful_workers == 0) return error.NoWorkers;
+    return clampWebSocketCapacity(successful_workers, requested_max);
+}
+
+test "WebSocket capacity follows partial worker spawn success" {
+    const partial = try capacityAfterWorkerSpawns(3, 24);
+    try std.testing.expectEqual(@as(usize, 3), partial.worker_count);
+    try std.testing.expectEqual(@as(usize, 3), partial.max_active);
+
+    const disabled_admission = try capacityAfterWorkerSpawns(3, 0);
+    try std.testing.expectEqual(@as(usize, 3), disabled_admission.worker_count);
+    try std.testing.expectEqual(@as(usize, 0), disabled_admission.max_active);
+
+    try std.testing.expectError(error.NoWorkers, capacityAfterWorkerSpawns(0, 24));
+}
+
 fn webSocketCapacity() WebSocketCapacity {
     const worker_count = readBoundedUsizeEnv("TURBO_WS_WORKER_POOL_SIZE", DEFAULT_WS_POOL_SIZE, 0, MAX_POOL_SIZE);
     const requested_max = readBoundedUsizeEnv("TURBO_MAX_WEBSOCKETS", worker_count, 0, MAX_POOL_SIZE);
@@ -1081,6 +1095,7 @@ fn webSocketCapacity() WebSocketCapacity {
 }
 
 fn tryAcquireWebSocketSlot() bool {
+    if (!ws_pool_gate.isReady()) return false;
     const limit = max_active_websockets.load(.acquire);
     var current = active_websockets.load(.acquire);
     while (current < limit) {
@@ -1098,9 +1113,112 @@ fn releaseWebSocketSlot() void {
     std.debug.assert(previous > 0);
 }
 
+/// Shared bounded spawn policy. The callback owns each successful worker
+/// handle (production detaches it); stopping at the first failure preserves a
+/// deterministic partial count without ever panicking or oversubscribing.
+fn startBoundedWorkers(
+    requested_count: usize,
+    context: anytype,
+    comptime start_one: anytype,
+) error{NoWorkers}!usize {
+    var started: usize = 0;
+    while (started < @min(requested_count, MAX_POOL_SIZE)) {
+        if (!start_one(context)) break;
+        started += 1;
+    }
+    if (started == 0) return error.NoWorkers;
+    return started;
+}
+
+const ProcessInitGate = struct {
+    lock: std.atomic.Mutex = .unlocked,
+    ready: std.atomic.Value(bool) = .init(false),
+
+    /// Returns true with the init lock held only for the single initializer.
+    fn begin(self: *ProcessInitGate) bool {
+        if (self.ready.load(.acquire)) return false;
+        while (!self.lock.tryLock()) std.atomic.spinLoopHint();
+        if (self.ready.load(.monotonic)) {
+            self.lock.unlock();
+            return false;
+        }
+        return true;
+    }
+
+    fn publish(self: *ProcessInitGate) void {
+        self.ready.store(true, .release);
+        self.lock.unlock();
+    }
+
+    fn abort(self: *ProcessInitGate) void {
+        self.lock.unlock();
+    }
+
+    fn isReady(self: *const ProcessInitGate) bool {
+        return self.ready.load(.acquire);
+    }
+};
+
+test "process initialization gate admits exactly one concurrent initializer" {
+    const Context = struct {
+        gate: *ProcessInitGate,
+        initializations: *std.atomic.Value(usize),
+
+        fn run(context: *@This()) void {
+            if (!context.gate.begin()) return;
+            _ = context.initializations.fetchAdd(1, .acq_rel);
+            context.gate.publish();
+        }
+    };
+
+    var gate = ProcessInitGate{};
+    var initializations: std.atomic.Value(usize) = .init(0);
+    var context = Context{ .gate = &gate, .initializations = &initializations };
+    var threads: [32]std.Thread = undefined;
+    for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, Context.run, .{&context});
+    for (threads) |thread| thread.join();
+
+    try std.testing.expect(gate.isReady());
+    try std.testing.expectEqual(@as(usize, 1), initializations.load(.acquire));
+}
+
+test "process initialization gate publishes only after success and permits retry" {
+    var gate = ProcessInitGate{};
+    try std.testing.expect(gate.begin());
+    try std.testing.expect(!gate.isReady());
+    gate.abort();
+    try std.testing.expect(!gate.isReady());
+
+    try std.testing.expect(gate.begin());
+    try std.testing.expect(!gate.isReady());
+    gate.publish();
+    try std.testing.expect(gate.isReady());
+    try std.testing.expect(!gate.begin());
+}
+
+test "bounded worker spawn policy reports zero and partial failures" {
+    const FakeSpawner = struct {
+        remaining: usize,
+
+        fn start(self: *@This()) bool {
+            if (self.remaining == 0) return false;
+            self.remaining -= 1;
+            return true;
+        }
+    };
+
+    var zero = FakeSpawner{ .remaining = 0 };
+    try std.testing.expectError(error.NoWorkers, startBoundedWorkers(24, &zero, FakeSpawner.start));
+
+    var partial = FakeSpawner{ .remaining = 3 };
+    try std.testing.expectEqual(@as(usize, 3), try startBoundedWorkers(24, &partial, FakeSpawner.start));
+
+    var capped = FakeSpawner{ .remaining = MAX_POOL_SIZE + 10 };
+    try std.testing.expectEqual(@as(usize, MAX_POOL_SIZE), try startBoundedWorkers(MAX_POOL_SIZE + 10, &capped, FakeSpawner.start));
+}
+
 const ConnectionPool = struct {
-    queue: Queue,
-    threads: [MAX_POOL_SIZE]std.Thread = undefined,
+    queue: Queue = .{},
     thread_count: usize = 0,
 
     const Queue = struct {
@@ -1137,19 +1255,43 @@ const ConnectionPool = struct {
         }
     };
 
-    fn init(self: *ConnectionPool, thread_count: usize) void {
+    fn init(self: *ConnectionPool, requested_count: usize, interp: ?*anyopaque) error{NoWorkers}!usize {
+        std.debug.assert(self.thread_count == 0);
         self.queue = .{};
-        self.thread_count = @min(thread_count, MAX_POOL_SIZE);
-        for (0..self.thread_count) |i| {
-            self.threads[i] = std.Thread.spawn(.{}, workerLoop, .{&self.queue}) catch @panic("thread spawn");
-        }
+        const worker_limit = @min(requested_count, MAX_POOL_SIZE);
+        if (worker_limit == 0 or interp == null) return error.NoWorkers;
+
+        const SpawnContext = struct {
+            queue: *Queue,
+            interp: ?*anyopaque,
+
+            fn start(context: *@This()) bool {
+                const tstate = py.PyThreadState_New(context.interp) orelse {
+                    c.PyErr_Clear();
+                    return false;
+                };
+                const thread = std.Thread.spawn(.{}, workerLoop, .{ context.queue, tstate }) catch {
+                    py.PyThreadState_Clear(tstate);
+                    py.PyThreadState_Delete(tstate);
+                    return false;
+                };
+                thread.detach();
+                return true;
+            }
+        };
+        var context = SpawnContext{ .queue = &self.queue, .interp = interp };
+        const started = startBoundedWorkers(worker_limit, &context, SpawnContext.start) catch {
+            self.thread_count = 0;
+            return error.NoWorkers;
+        };
+        self.thread_count = started;
+        return started;
     }
 
     // Each worker creates its own PyThreadState once and reuses it for every
     // request. This replaces PyGILState_Ensure/Release (which re-does a
     // thread-state lookup on every call) with the cheaper AcquireThread path.
-    fn workerLoop(queue: *Queue) void {
-        const tstate = py.PyThreadState_New(py_interp) orelse @panic("PyThreadState_New failed");
+    fn workerLoop(queue: *Queue, tstate: ?*anyopaque) void {
         defer {
             py.PyEval_AcquireThread(tstate);
             py.PyThreadState_Clear(tstate);
@@ -1163,11 +1305,43 @@ const ConnectionPool = struct {
     }
 };
 
-var pool: ConnectionPool = undefined;
+var pool: ConnectionPool = .{};
+var pool_gate: ProcessInitGate = .{};
+var pool_interp: ?*anyopaque = null;
+var actual_http_workers: std.atomic.Value(usize) = .init(0);
+
+const HttpRuntimeConfig = struct {
+    worker_count: usize,
+    header_timeout_ms: usize,
+};
+
+fn ensureConnectionPool(
+    requested_count: usize,
+    requested_header_timeout_ms: usize,
+    interp: ?*anyopaque,
+) error{ NoWorkers, DifferentInterpreter }!HttpRuntimeConfig {
+    if (!pool_gate.begin()) {
+        if (interp == null or interp != pool_interp) return error.DifferentInterpreter;
+        return .{
+            .worker_count = actual_http_workers.load(.acquire),
+            .header_timeout_ms = http_header_timeout_ms,
+        };
+    }
+    errdefer pool_gate.abort();
+
+    const started = try pool.init(requested_count, interp);
+    pool_interp = interp;
+    http_header_timeout_ms = requested_header_timeout_ms;
+    actual_http_workers.store(started, .release);
+    pool_gate.publish();
+    return .{
+        .worker_count = started,
+        .header_timeout_ms = http_header_timeout_ms,
+    };
+}
 
 const WebSocketPool = struct {
-    queue: Queue,
-    threads: [MAX_POOL_SIZE]std.Thread = undefined,
+    queue: Queue = .{},
     thread_count: usize = 0,
 
     const Queue = struct {
@@ -1180,14 +1354,15 @@ const WebSocketPool = struct {
         mutex: std.Io.Mutex = .init,
         not_empty: std.Io.Condition = .init,
 
-        fn push(self: *Queue, job: WebSocketJob) void {
+        fn push(self: *Queue, job: WebSocketJob) bool {
             self.mutex.lockUncancelable(runtime.io);
             defer self.mutex.unlock(runtime.io);
-            std.debug.assert(self.count < self.items.len);
+            if (self.count >= self.items.len) return false;
             self.items[self.tail] = job;
             self.tail = (self.tail + 1) % self.items.len;
             self.count += 1;
             self.not_empty.signal(runtime.io);
+            return true;
         }
 
         fn pop(self: *Queue) WebSocketJob {
@@ -1201,16 +1376,45 @@ const WebSocketPool = struct {
         }
     };
 
-    fn init(self: *WebSocketPool, thread_count: usize) void {
+    /// Initialize this process-global pool once. Python thread states are
+    /// allocated while the starting server still owns the interpreter lock,
+    /// so a worker cannot asynchronously panic during its own bootstrap.
+    /// Successfully spawned workers are detached and retained for the process
+    /// lifetime; a later spawn failure freezes the pool at the partial count.
+    fn init(self: *WebSocketPool, requested_count: usize, interp: ?*anyopaque) error{NoWorkers}!usize {
+        std.debug.assert(self.thread_count == 0);
         self.queue = .{};
-        self.thread_count = @min(thread_count, MAX_POOL_SIZE);
-        for (0..self.thread_count) |i| {
-            self.threads[i] = std.Thread.spawn(.{}, workerLoop, .{&self.queue}) catch @panic("websocket thread spawn");
-        }
+        const worker_limit = @min(requested_count, MAX_POOL_SIZE);
+        if (worker_limit == 0 or interp == null) return error.NoWorkers;
+
+        const SpawnContext = struct {
+            queue: *Queue,
+            interp: ?*anyopaque,
+
+            fn start(context: *@This()) bool {
+                const tstate = py.PyThreadState_New(context.interp) orelse {
+                    c.PyErr_Clear();
+                    return false;
+                };
+                const thread = std.Thread.spawn(.{}, workerLoop, .{ context.queue, tstate }) catch {
+                    py.PyThreadState_Clear(tstate);
+                    py.PyThreadState_Delete(tstate);
+                    return false;
+                };
+                thread.detach();
+                return true;
+            }
+        };
+        var context = SpawnContext{ .queue = &self.queue, .interp = interp };
+        const started = startBoundedWorkers(worker_limit, &context, SpawnContext.start) catch {
+            self.thread_count = 0;
+            return error.NoWorkers;
+        };
+        self.thread_count = started;
+        return started;
     }
 
-    fn workerLoop(queue: *Queue) void {
-        const tstate = py.PyThreadState_New(py_interp) orelse @panic("PyThreadState_New failed");
+    fn workerLoop(queue: *Queue, tstate: ?*anyopaque) void {
         defer {
             py.PyEval_AcquireThread(tstate);
             py.PyThreadState_Clear(tstate);
@@ -1224,15 +1428,73 @@ const WebSocketPool = struct {
     }
 };
 
-var ws_pool: WebSocketPool = undefined;
+var ws_pool: WebSocketPool = .{};
+var ws_pool_gate: ProcessInitGate = .{};
+var ws_pool_interp: ?*anyopaque = null;
+
+const WebSocketRuntimeConfig = struct {
+    capacity: WebSocketCapacity,
+    queue_message_limit: usize,
+    queue_byte_limit: usize,
+    write_timeout_ms: usize,
+};
+
+fn requestedWebSocketRuntimeConfig() WebSocketRuntimeConfig {
+    return .{
+        .capacity = webSocketCapacity(),
+        .queue_message_limit = readBoundedUsizeEnv("TURBO_WS_QUEUE_MESSAGES", DEFAULT_WS_QUEUE_MESSAGES, 1, MAX_WS_QUEUE_MESSAGES),
+        .queue_byte_limit = readBoundedUsizeEnv("TURBO_WS_QUEUE_BYTES", DEFAULT_WS_QUEUE_BYTES, 1, MAX_WS_QUEUE_BYTES),
+        .write_timeout_ms = readBoundedUsizeEnv("TURBO_WS_WRITE_TIMEOUT_MS", DEFAULT_WS_WRITE_TIMEOUT_MS, MIN_WS_WRITE_TIMEOUT_MS, MAX_WS_WRITE_TIMEOUT_MS),
+    };
+}
+
+const WebSocketPoolInitError = error{ NoWorkers, DifferentInterpreter };
+
+/// The dedicated WebSocket runtime is process-global and never shuts down.
+/// Its first successful pool initialization freezes the worker/admission/
+/// queue/deadline configuration. Later servers reuse the same queue/workers.
+fn ensureWebSocketPool(
+    requested: WebSocketRuntimeConfig,
+    interp: ?*anyopaque,
+) WebSocketPoolInitError!WebSocketRuntimeConfig {
+    if (!ws_pool_gate.begin()) {
+        if (interp == null or interp != ws_pool_interp) return error.DifferentInterpreter;
+        return .{
+            .capacity = .{
+                .worker_count = actual_websocket_workers.load(.acquire),
+                .max_active = max_active_websockets.load(.acquire),
+            },
+            .queue_message_limit = ws_queue_message_limit,
+            .queue_byte_limit = ws_queue_byte_limit,
+            .write_timeout_ms = ws_write_timeout_ms,
+        };
+    }
+    errdefer ws_pool_gate.abort();
+
+    const started = try ws_pool.init(requested.capacity.worker_count, interp);
+    const effective_capacity = try capacityAfterWorkerSpawns(started, requested.capacity.max_active);
+    ws_pool_interp = interp;
+    ws_queue_message_limit = requested.queue_message_limit;
+    ws_queue_byte_limit = requested.queue_byte_limit;
+    ws_write_timeout_ms = requested.write_timeout_ms;
+    max_active_websockets.store(effective_capacity.max_active, .release);
+    actual_websocket_workers.store(effective_capacity.worker_count, .release);
+    ws_pool_gate.publish();
+
+    return .{
+        .capacity = effective_capacity,
+        .queue_message_limit = ws_queue_message_limit,
+        .queue_byte_limit = ws_queue_byte_limit,
+        .write_timeout_ms = ws_write_timeout_ms,
+    };
+}
 
 pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     // Initialize the shared Io runtime (no extra async threads — our ConnectionPool
     // manages workers via std.Thread.spawn to hook per-worker PyThreadState lifecycle).
-    runtime.initWithOptions(std.heap.c_allocator, .{
+    runtime.ensureInitialized(std.heap.c_allocator, .{
         .async_limit = .nothing,
     });
-    defer runtime.deinit();
 
     const ip_addr = std.Io.net.IpAddress.parse(server_host, server_port) catch {
         py.setError("Invalid address: {s}:{d}", .{ server_host, server_port });
@@ -1245,9 +1507,10 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     };
     defer tcp_server.deinit(runtime.io);
 
-    // Capture interpreter state before releasing the GIL.
-    // Workers need this to create their own PyThreadState.
-    py_interp = py.PyInterpreterState_Get();
+    // Capture this call's interpreter without publishing it globally. Both
+    // process pools bind to the first successful interpreter under their init
+    // locks and reject a different interpreter before spawning more workers.
+    const current_interp = py.PyInterpreterState_Get();
     if (getTurboRunCoroutineFn() == null and getAsyncioRunFn() == null) c.PyErr_Print();
     if (getTurboRunCoroutineResponseFn() == null) c.PyErr_Print();
     if (getTurboRunCoroutineResponseEagerFn() == null) c.PyErr_Print();
@@ -1260,24 +1523,36 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     }
 
     // Configure both independently bounded pools before either can receive a
-    // connection. Neither pool may exceed its static storage ceiling.
+    // connection. The WebSocket pool is process-global and exactly-once: the
+    // first successful pool initialization freezes its settings. The ordinary
+    // HTTP pool is process-global as well.
     const effective_thread_count = @min(thread_count, MAX_POOL_SIZE);
-    const ws_capacity = webSocketCapacity();
-    ws_queue_message_limit = readBoundedUsizeEnv("TURBO_WS_QUEUE_MESSAGES", DEFAULT_WS_QUEUE_MESSAGES, 1, MAX_WS_QUEUE_MESSAGES);
-    ws_queue_byte_limit = readBoundedUsizeEnv("TURBO_WS_QUEUE_BYTES", DEFAULT_WS_QUEUE_BYTES, 1, MAX_WS_QUEUE_BYTES);
-    ws_write_timeout_ms = readBoundedUsizeEnv("TURBO_WS_WRITE_TIMEOUT_MS", DEFAULT_WS_WRITE_TIMEOUT_MS, MIN_WS_WRITE_TIMEOUT_MS, MAX_WS_WRITE_TIMEOUT_MS);
-    http_header_timeout_ms = readBoundedUsizeEnv("TURBO_HTTP_HEADER_TIMEOUT_MS", 30000, 100, 30000);
-    active_websockets.store(0, .release);
-    max_active_websockets.store(ws_capacity.max_active, .release);
+    const ws_config = ensureWebSocketPool(requestedWebSocketRuntimeConfig(), current_interp) catch |err| {
+        switch (err) {
+            error.NoWorkers => py.setError("WebSocket worker pool could not start any workers", .{}),
+            error.DifferentInterpreter => py.setError("WebSocket worker pool belongs to a different Python interpreter", .{}),
+        }
+        return null;
+    };
 
-    // Start thread pool (workers create their tstates after this point,
-    // but py_interp is set before SaveThread so there's no race).
-    ws_pool.init(ws_capacity.worker_count);
-    pool.init(effective_thread_count);
+    // The ordinary pool is process-global for the same reason as the native
+    // route tables and runtime. Repeated listeners enqueue into it instead of
+    // resetting a queue under existing waiters.
+    const http_config = ensureConnectionPool(
+        effective_thread_count,
+        readBoundedUsizeEnv("TURBO_HTTP_HEADER_TIMEOUT_MS", 30000, 100, 30000),
+        current_interp,
+    ) catch |err| {
+        switch (err) {
+            error.NoWorkers => py.setError("HTTP worker pool could not start any workers", .{}),
+            error.DifferentInterpreter => py.setError("HTTP worker pool belongs to a different Python interpreter", .{}),
+        }
+        return null;
+    };
 
     logger.info("TurboNet-Zig server listening on {s}:{d}", .{ server_host, server_port });
-    logger.info("Zig HTTP core active – {d}-thread pool, per-worker tstate!", .{pool.thread_count});
-    logger.info("WebSocket isolation – {d}-thread dedicated pool, max active={d}", .{ ws_capacity.worker_count, ws_capacity.max_active });
+    logger.info("Zig HTTP core active – {d}-thread pool (process-global), per-worker tstate!", .{http_config.worker_count});
+    logger.info("WebSocket isolation – {d}-thread process pool, max active={d}", .{ ws_config.capacity.worker_count, ws_config.capacity.max_active });
 
     // Release the GIL — workers acquire it per-request via AcquireThread.
     const save = py.PyEval_SaveThread();
@@ -2314,7 +2589,12 @@ fn tryWebSocketUpgrade(
     };
     std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&write_timeout)) catch {};
 
-    ws_pool.queue.push(job);
+    if (!ws_pool_gate.isReady() or !ws_pool.queue.push(job)) {
+        // Readiness is permanent once published and admission bounds queue
+        // occupancy below capacity, so this is only a defensive fail-closed
+        // path. The HTTP worker still owns and closes the upgraded socket.
+        return .handled;
+    }
     // The queued job now owns the retained Python route references. They stay
     // alive across route replacement until this connection's worker exits.
     route_snapshot = null;
@@ -3305,7 +3585,9 @@ pub fn ws_metrics(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
         !wsMetricPut(result, "outbound_bytes", outbound_bytes) or
         !wsMetricPut(result, "message_limit", ws_queue_message_limit) or
         !wsMetricPut(result, "byte_limit", ws_queue_byte_limit) or
-        !wsMetricPut(result, "write_timeout_ms", ws_write_timeout_ms))
+        !wsMetricPut(result, "write_timeout_ms", ws_write_timeout_ms) or
+        !wsMetricPut(result, "worker_count", actual_websocket_workers.load(.acquire)) or
+        !wsMetricPut(result, "max_active", max_active_websockets.load(.acquire)))
     {
         c.Py_DecRef(result);
         return null;
@@ -4888,8 +5170,8 @@ test "websocket close code validation excludes reserved and out-of-range values"
 
 test "response cache is safe under concurrent access" {
     // std.Io.Mutex requires an initialized runtime.io — set up a minimal threaded runtime.
-    runtime.initWithOptions(std.heap.c_allocator, .{ .async_limit = .nothing });
-    defer runtime.deinit();
+    runtime.initForTest(std.heap.c_allocator, .{ .async_limit = .nothing });
+    defer runtime.deinitForTest();
 
     response_cache = null;
     response_cache_count = 0;

@@ -77,6 +77,13 @@ Typical values:
 - 8-core: 14 workers (capped)
 - 16-core: 14 workers (capped)
 
+The native HTTP worker pool and I/O runtime are process-global. The first HTTP
+pool initialization that starts at least one worker freezes
+`TURBO_THREAD_POOL_SIZE`; later native listeners reuse the same workers rather
+than resetting their queue or multiplying threads. This remains frozen if a
+later startup phase fails. Use separate processes for different HTTP pool
+sizes.
+
 ### WebSocket Isolation and Backpressure
 
 Upgraded sockets transfer immediately from the ordinary HTTP pool to a
@@ -105,8 +112,18 @@ other character, empty value, or integer overflow makes the entire value
 invalid and selects its documented default. Leading zeroes are valid. Valid
 values are then clamped to the setting's minimum and maximum.
 
-- `TURBO_WS_WORKER_POOL_SIZE` defaults to 24 and is clamped to 0–512. Zero
-  disables the dedicated pool.
+The dedicated WebSocket pool is process-global. The first pool initialization
+that starts at least one worker freezes the normalized worker, admission,
+queue, and write-timeout settings for every listener in that process. This
+remains frozen even if a later HTTP-pool or listener startup phase fails. Later
+`app.run()` calls reuse the existing workers and queue; changing the environment
+after initialization has no effect. Start separate processes when listeners
+require different WebSocket limits.
+
+- `TURBO_WS_WORKER_POOL_SIZE` defaults to 24 and is clamped to 0–512. Zero, or
+  failure to start any worker, makes `app.run()` raise a startup error. If the
+  system starts only part of the requested pool, startup continues with that
+  bounded partial count.
 - `TURBO_MAX_WEBSOCKETS` defaults to the normalized worker count, is clamped to
   0–512, and is then capped by that worker count. Zero disables WebSocket
   admission.
@@ -121,9 +138,10 @@ values are then clamped to the setting's minimum and maximum.
   WebSocket handshake.
 
 `websocket.transport_metrics` exposes queue counts, byte occupancy, limits,
-and the normalized write timeout without exposing payload contents. The
-runtime remains bounded and is not a claim of unbounded/evented connection
-scaling.
+the normalized write timeout, and the actual process-global `worker_count` and
+`max_active` without exposing payload contents. The Python bridge synchronizes
+to these frozen native values before the handler starts. The runtime remains
+bounded and is not a claim of unbounded/evented connection scaling.
 
 The configured application-queue payload ceiling is
 `active WebSockets × 2 directions × TURBO_WS_QUEUE_BYTES` (768 MiB with the

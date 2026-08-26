@@ -246,6 +246,7 @@ class WebSocket:
         self._close_lock = asyncio.Lock()
         self._handler_task: asyncio.Task | None = None
         self._zig_owner_thread: int | None = None
+        self._native_config_synced = False
         self._nonblocking_transport = False
         self._control_scheduled = False
         self.client_state = "connecting"
@@ -317,6 +318,19 @@ class WebSocket:
             raise RuntimeError(
                 "native WebSockets must be used from their handler event loop"
             )
+        if self._is_zig_backed and not self._native_config_synced:
+            t = _turbonet()
+            if t is None:
+                raise RuntimeError("WebSocket transport is unavailable")
+            metrics = dict(t._ws_metrics(self._zig_conn))
+            # The native pool is process-global and freezes these settings on
+            # its first successful pool initialization. Synchronize before the
+            # handler can enqueue anything, so later environment changes cannot
+            # split the Python and Zig queue/deadline contracts.
+            self._zig_inbound = asyncio.Queue(maxsize=int(metrics["message_limit"]))
+            self._queue_bytes = int(metrics["byte_limit"])
+            self._write_timeout_s = int(metrics["write_timeout_ms"]) / 1000
+            self._native_config_synced = True
 
     def _require_readiness_loop(self) -> None:
         loop = asyncio.get_running_loop()
@@ -595,6 +609,8 @@ class WebSocket:
                 "message_limit": 0,
                 "byte_limit": 0,
                 "write_timeout_ms": 0,
+                "worker_count": 0,
+                "max_active": 0,
             }
         self._bind_native_loop()
         t = _turbonet()
