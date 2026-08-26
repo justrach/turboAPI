@@ -12,12 +12,31 @@ Usage:
 import argparse
 import importlib.machinery
 import os
+import platform
+import re
 import shutil
 import subprocess
 import sys
 import sysconfig
 
 REQUIRED_ZIG_VERSION = "0.17.0-dev.1862+40ebd8162"
+_MACOS_DEPLOYMENT_TARGET = re.compile(r"^[0-9]+\.[0-9]+(?:\.[0-9]+)?$")
+
+
+def macos_zig_target(machine: str, deployment_target: str) -> str:
+    """Return a Zig target with an explicit macOS deployment floor."""
+    architectures = {
+        "arm64": "aarch64",
+        "aarch64": "aarch64",
+        "x86_64": "x86_64",
+        "amd64": "x86_64",
+    }
+    architecture = architectures.get(machine.strip().lower())
+    if architecture is None:
+        raise ValueError(f"unsupported macOS architecture: {machine}")
+    if not _MACOS_DEPLOYMENT_TARGET.fullmatch(deployment_target):
+        raise ValueError(f"invalid macOS deployment target: {deployment_target}")
+    return f"{architecture}-macos.{deployment_target}"
 
 
 def require_zig_version():
@@ -28,9 +47,7 @@ def require_zig_version():
     result = subprocess.run([zig, "version"], check=True, capture_output=True, text=True)
     actual = result.stdout.strip()
     if actual != REQUIRED_ZIG_VERSION:
-        raise SystemExit(
-            f"Zig {REQUIRED_ZIG_VERSION} is required; found {actual} at {zig}"
-        )
+        raise SystemExit(f"Zig {REQUIRED_ZIG_VERSION} is required; found {actual} at {zig}")
 
 
 def detect_python():
@@ -62,7 +79,11 @@ def main():
     parser.add_argument("--release", action="store_true", help="Build with ReleaseFast")
     parser.add_argument(
         "--target",
-        help="Zig target, including a minimum libc version when building portable Linux wheels",
+        help="Explicit Zig target, including a minimum OS or libc version",
+    )
+    parser.add_argument(
+        "--macos-deployment-target",
+        help="Build a native macOS extension with this explicit deployment floor",
     )
     parser.add_argument(
         "--glibc-compat",
@@ -70,6 +91,11 @@ def main():
         help="Include compatibility code for the manylinux glibc floor",
     )
     args = parser.parse_args()
+
+    if args.target and args.macos_deployment_target:
+        parser.error("--target and --macos-deployment-target are mutually exclusive")
+    if args.macos_deployment_target and platform.system() != "Darwin":
+        parser.error("--macos-deployment-target requires a macOS build host")
 
     require_zig_version()
     info = detect_python()
@@ -89,12 +115,22 @@ def main():
     else:
         py_arg = "3.13"
 
-    cmd = ["zig", "build", f"-Dpython={py_arg}",
-           f"-Dpy-include={info['include']}",
-           f"-Dpy-libdir={info['libdir']}"]
+    cmd = [
+        "zig",
+        "build",
+        f"-Dpython={py_arg}",
+        f"-Dpy-include={info['include']}",
+        f"-Dpy-libdir={info['libdir']}",
+    ]
 
-    if args.target:
-        cmd.append(f"-Dtarget={args.target}")
+    build_target = args.target
+    if args.macos_deployment_target:
+        try:
+            build_target = macos_zig_target(platform.machine(), args.macos_deployment_target)
+        except ValueError as error:
+            parser.error(str(error))
+    if build_target:
+        cmd.append(f"-Dtarget={build_target}")
 
     if args.glibc_compat:
         cmd.append("-Dglibc-compat=true")
@@ -107,7 +143,6 @@ def main():
     if result.returncode != 0:
         sys.exit(result.returncode)
 
-    import platform
     lib_ext = ".dylib" if platform.system() == "Darwin" else ".so"
     dylib = os.path.join(zig_dir, "zig-out", "lib", f"libturbonet{lib_ext}")
     target = os.path.join(project_dir, "python", "turboapi", f"turbonet{info['suffix']}")
