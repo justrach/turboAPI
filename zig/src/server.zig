@@ -359,8 +359,12 @@ var cache_noargs_responses: bool = false;
 
 const SERVER_STATE_CAPSULE_NAME: [*:0]const u8 = "turbonet.ServerState";
 const SERVER_STATE_KEY: [*:0]const u8 = "_native_state";
+const SERVER_WEBSOCKET_OWNERS_KEY: [*:0]const u8 = "_websocket_callback_owners";
 
 const WebSocketRouteRegistry = struct {
+    // Entries borrow their callback pointers from the Python dictionary stored
+    // under SERVER_WEBSOCKET_OWNERS_KEY.  A dispatched connection takes its own
+    // INCREF'd snapshot before releasing this lock.
     routes: std.StringHashMap(WebSocketRouteEntry),
     lock: std.atomic.Mutex = .unlocked,
     interpreter: ?*anyopaque,
@@ -404,25 +408,42 @@ fn serverStateFromObject(state_obj: ?*c.PyObject) ?*ServerNativeState {
     return @ptrCast(@alignCast(raw));
 }
 
-fn deinitServerState(state: *ServerNativeState) void {
-    // The capsule belongs to exactly one interpreter. A normal server teardown
-    // therefore holds the correct interpreter lock and can release every
-    // registry-owned Python reference before freeing the native map.
-    const owns_python_refs = py.PyInterpreterState_Get() == state.websocket_routes.interpreter;
-    state.websocket_routes.lockRoutes();
-    var detached_routes = state.websocket_routes.routes;
-    state.websocket_routes.routes = std.StringHashMap(WebSocketRouteEntry).init(allocator);
-    state.websocket_routes.unlockRoutes();
+fn websocketOwnersFromObject(state_obj: ?*c.PyObject) ?*c.PyObject {
+    const state_dict = state_obj orelse {
+        py.setError("missing TurboServer state", .{});
+        return null;
+    };
+    const owners = c.PyDict_GetItemString(state_dict, SERVER_WEBSOCKET_OWNERS_KEY) orelse {
+        py.setError("invalid TurboServer callback owners", .{});
+        return null;
+    };
+    if (c.PyDict_Check(owners) == 0) {
+        py.setError("invalid TurboServer callback owners", .{});
+        return null;
+    }
+    return owners;
+}
+
+fn clearWebSocketRouteRegistry(registry: *WebSocketRouteRegistry) void {
+    registry.lockRoutes();
+    var detached_routes = registry.routes;
+    registry.routes = std.StringHashMap(WebSocketRouteEntry).init(allocator);
+    registry.unlockRoutes();
 
     var it = detached_routes.iterator();
-    while (it.next()) |item| {
-        allocator.free(item.key_ptr.*);
-        if (owns_python_refs) {
-            c.Py_DecRef(item.value_ptr.handler);
-            if (item.value_ptr.guard) |guard| c.Py_DecRef(guard);
-        }
-    }
+    while (it.next()) |item| allocator.free(item.key_ptr.*);
     detached_routes.deinit();
+}
+
+fn deinitServerState(state: *ServerNativeState) void {
+    // Registry entries are borrowed. The Python-visible owner dictionary
+    // releases callbacks, allowing Python's cyclic GC to see callback -> app /
+    // server cycles instead of leaving an opaque native strong-reference root.
+    // A running server's C argument tuple retains the state dict for the whole
+    // accept loop, so accepted HTTP jobs cannot outlive this registry. Once an
+    // upgrade is queued, WebSocketJob owns an INCREF'd callback snapshot and
+    // keeps only the registry address as diagnostic identity.
+    clearWebSocketRouteRegistry(&state.websocket_routes);
 
     allocator.free(state.host);
     allocator.destroy(state);
@@ -717,7 +738,8 @@ pub fn server_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
     _ = getModelSchemas();
     _ = getRouter();
     // Return a state dict. The private capsule gives Python-visible server
-    // methods a stable identity and owns all native WebSocket references.
+    // methods a stable identity. Callback ownership lives in a Python dict so
+    // Python's cyclic GC can see callback -> app / server cycles.
     const capsule = c.PyCapsule_New(@ptrCast(state), SERVER_STATE_CAPSULE_NAME, destroyServerState) orelse {
         deinitServerState(state);
         return null;
@@ -732,6 +754,17 @@ pub fn server_new(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject
         return null;
     }
     c.Py_DecRef(capsule);
+
+    const websocket_owners = c.PyDict_New() orelse {
+        c.Py_DecRef(d);
+        return null;
+    };
+    if (c.PyDict_SetItemString(d, SERVER_WEBSOCKET_OWNERS_KEY, websocket_owners) != 0) {
+        c.Py_DecRef(websocket_owners);
+        c.Py_DecRef(d);
+        return null;
+    }
+    c.Py_DecRef(websocket_owners);
 
     const h_obj = c.PyUnicode_FromString(host) orelse {
         c.Py_DecRef(d);
@@ -3447,6 +3480,7 @@ pub fn server_add_websocket_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(
         py.setError("TurboServer belongs to a different Python interpreter", .{});
         return null;
     }
+    const owners = websocketOwnersFromObject(state_obj) orelse return null;
     if (c.PyCallable_Check(handler) == 0) {
         py.setError("WebSocket handler must be callable", .{});
         return null;
@@ -3459,12 +3493,17 @@ pub fn server_add_websocket_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(
         }
     }
     const path_s = std.mem.span(path);
+    const path_obj = c.PyUnicode_FromString(path) orelse return null;
+    defer c.Py_DecRef(path_obj);
+    const none = py.pyNone();
+    defer c.Py_DecRef(none);
+    const owner_pair = c.PyTuple_Pack(2, handler.?, guard_obj orelse none) orelse return null;
+    defer c.Py_DecRef(owner_pair);
+
     const path_owned = allocator.dupe(u8, path_s) catch {
         py.setError("ws route alloc failed", .{});
         return null;
     };
-    c.Py_IncRef(handler.?);
-    if (guard_obj) |value| c.Py_IncRef(value);
     const entry = WebSocketRouteEntry{ .handler = handler.?, .guard = guard_obj };
 
     const registry = &state.websocket_routes;
@@ -3472,22 +3511,35 @@ pub fn server_add_websocket_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(
     const route_slot = registry.routes.getOrPut(path_owned) catch {
         registry.unlockRoutes();
         allocator.free(path_owned);
-        c.Py_DecRef(entry.handler);
-        if (entry.guard) |value| c.Py_DecRef(value);
         py.setError("WebSocket route registration failed", .{});
         return null;
     };
     var replaced_entry: ?WebSocketRouteEntry = null;
     var duplicate_path: ?[]u8 = null;
     if (route_slot.found_existing) {
-        // Swap atomically while retaining the map's existing owned key.
+        // Keep the old callbacks alive across the owner-dict replacement. A
+        // decref may run arbitrary Python finalizers, so release these
+        // temporary references only after dropping the native registry lock.
         duplicate_path = path_owned;
         replaced_entry = route_slot.value_ptr.*;
-        route_slot.value_ptr.* = entry;
-    } else {
-        // The allocation has succeeded and assigning the value cannot fail.
-        route_slot.value_ptr.* = entry;
+        c.Py_IncRef(replaced_entry.?.handler);
+        if (replaced_entry.?.guard) |old_guard| c.Py_IncRef(old_guard);
     }
+
+    // Publish Python ownership before exposing borrowed pointers in the native
+    // map. On failure, remove the reserved new slot and leave replacements
+    // completely unchanged.
+    if (c.PyDict_SetItem(owners, path_obj, owner_pair) != 0) {
+        if (!route_slot.found_existing) _ = registry.routes.remove(path_s);
+        registry.unlockRoutes();
+        allocator.free(path_owned);
+        if (replaced_entry) |old_entry| {
+            c.Py_DecRef(old_entry.handler);
+            if (old_entry.guard) |old_guard| c.Py_DecRef(old_guard);
+        }
+        return null;
+    }
+    route_slot.value_ptr.* = entry;
     registry.unlockRoutes();
 
     // Free/decref only after unlocking: Py_DecRef can run arbitrary Python
