@@ -761,6 +761,21 @@ class TestWebSocket:
         assert sent["type"] == "text"
         assert json.loads(sent["data"]) == {"key": "value"}
 
+    def test_websocket_scope_metadata(self):
+        ws = WebSocket(
+            scope={
+                "type": "websocket",
+                "path": "/ws",
+                "query_string": b"repo=codedb&tag=one&tag=two&empty=",
+                "headers": [(b"X-CodeDB-Tenant", b"alpha"), (b"x-trace-id", b"trace-196")],
+                "path_params": {"workspace": "codedb"},
+            }
+        )
+
+        assert ws.headers == {"x-codedb-tenant": "alpha", "x-trace-id": "trace-196"}
+        assert ws.query_params == {"repo": "codedb", "tag": "two", "empty": ""}
+        assert ws.path_params == {"workspace": "codedb"}
+
 
 # ============================================================
 # Test: Static Files

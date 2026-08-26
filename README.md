@@ -48,14 +48,17 @@
 > - **Basic slow-loris protection** exists via a 30s read timeout, but production
 >   deployments should still use a reverse proxy with stricter limits
 > - **No configurable max body size** — hardcoded 16MB cap
-> - **WebSocket support** is in progress, not production-ready
+> - **Zig-native WebSocket support is available but still alpha** — routes are
+>   exact-match, each connection currently consumes an HTTP worker, and the 101
+>   upgrade happens before Python handler code. Enforce authentication at an edge
+>   proxy such as Cloudflare Access; handler checks can only close an upgraded socket.
 > - **Free-threaded Python 3.14t** is itself relatively new — some C extensions may not be thread-safe
 >
 > See [SECURITY.md](SECURITY.md) for the full threat model and deployment recommendations.
 
 | What works today                                       | What's in progress                       |
 |--------------------------------------------------------|------------------------------------------|
-| ~140k req/s on uncached HTTP routes (~16x FastAPI)     | WebSocket support                        |
+| ~140k req/s on uncached HTTP routes (~16x FastAPI)     | Evented WebSocket scaling/backpressure   |
 | FastAPI-compatible route decorators                    | Native HTTP/2, HTTP/3/QUIC, and TLS     |
 | Zig HTTP server with 24-thread pool + keep-alive       | Cloudflare Workers WASM target           |
 | Zig-native JSON schema validation (dhi)                | Fiber-based concurrency (via [zag](https://github.com/justrach/zag))  |
@@ -67,6 +70,7 @@
 | Full security stack (OAuth2, Bearer, API Key)          |                                          |
 | Python 3.14t free-threaded support                     |                                          |
 | Native FFI handlers (C/Zig, no Python at all)          |                                          |
+| Zig-native WebSocket transport (alpha)                 |                                          |
 | Fuzz-tested HTTP parser, router, validator             |                                          |
 
 ---
@@ -456,7 +460,7 @@ python3.14t app.py
 | Zig-side JSON→Python dict (no json.loads) | ✅ |
 | Large body support (up to 16MB) | ✅ |
 | Python 3.14t free-threaded | ✅ |
-| WebSocket support | 🔧 In progress |
+| WebSocket support | ✅ Alpha (exact routes; use edge auth) |
 | HTTP/2 + TLS via reverse proxy | ✅ |
 | HTTP/3 + QUIC via reverse proxy | ✅ |
 | Native HTTP/2 + TLS | 🔧 Future runtime work |
@@ -543,8 +547,7 @@ python3.14t zig/build_turbonet.py --install
 pip install -e ".[dev]"
 
 # 5. Run tests
-python -m pytest tests/ -p no:anchorpy \
-  --deselect tests/test_fastapi_parity.py::TestWebSocket -v
+python -m pytest tests/ -p no:anchorpy -v
 ```
 
 Or use the Makefile:

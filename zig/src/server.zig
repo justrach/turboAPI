@@ -1146,7 +1146,6 @@ fn handleConnection(stream: std.Io.net.Stream, tstate: ?*anyopaque) void {
     }
 }
 
-
 // ── WebSocket runtime ──────────────────────────────────────────────────────
 //
 // Connection model: each accepted TCP connection runs in the same thread as
@@ -1300,6 +1299,7 @@ fn tryWebSocketUpgrade(
     header_end_pos: usize,
     method: []const u8,
     path: []const u8,
+    query_string: []const u8,
     tstate: ?*anyopaque,
 ) WsUpgradeOutcome {
     if (!std.mem.eql(u8, method, "GET")) return .not_websocket;
@@ -1367,7 +1367,7 @@ fn tryWebSocketUpgrade(
     streamWriteAll(stream, resp_buf[0..resp_len]) catch return .handled;
 
     // Run the connection.
-    runWebSocketConnection(stream, path, tstate) catch |err| {
+    runWebSocketConnection(stream, path, query_string, headers.items, tstate) catch |err| {
         logger.warn("[WS] connection ended with error: {}", .{err});
     };
     return .handled;
@@ -1521,7 +1521,13 @@ fn wsReadNextMessage(conn: *WsConn) NextMessage {
 
 /// Drive a live WebSocket connection. Dispatches to either the in-Zig echo
 /// loop (for /ws-echo) or the Python handler invoke path.
-fn runWebSocketConnection(stream: std.Io.net.Stream, path: []const u8, tstate: ?*anyopaque) !void {
+fn runWebSocketConnection(
+    stream: std.Io.net.Stream,
+    path: []const u8,
+    query_string: []const u8,
+    headers: []const HeaderPair,
+    tstate: ?*anyopaque,
+) !void {
     var conn = WsConn{ .stream = stream };
     defer conn.deinit();
 
@@ -1535,7 +1541,7 @@ fn runWebSocketConnection(stream: std.Io.net.Stream, path: []const u8, tstate: ?
         return;
     };
 
-    runPythonHandler(&conn, handler, path, tstate);
+    runPythonHandler(&conn, handler, path, query_string, headers, tstate);
 }
 
 fn runEchoLoop(conn: *WsConn) void {
@@ -1553,7 +1559,14 @@ fn runEchoLoop(conn: *WsConn) void {
 /// We construct a WebSocket Python object wrapping a PyCapsule that holds
 /// the *WsConn pointer, then call into the Python bootstrap helper
 /// `_ws_invoke_handler` which runs the coroutine.
-fn runPythonHandler(conn: *WsConn, handler: *c.PyObject, path: []const u8, tstate: ?*anyopaque) void {
+fn runPythonHandler(
+    conn: *WsConn,
+    handler: *c.PyObject,
+    path: []const u8,
+    query_string: []const u8,
+    headers: []const HeaderPair,
+    tstate: ?*anyopaque,
+) void {
     // handleOneRequest runs without GIL by default; each Python-calling helper
     // acquires it. Do the same here, then drop it again when the handler
     // returns so subsequent FFI calls (which release+reacquire) can interleave
@@ -1572,7 +1585,7 @@ fn runPythonHandler(conn: *WsConn, handler: *c.PyObject, path: []const u8, tstat
     defer c.Py_DecRef(capsule);
 
     // Find the bootstrap-installed helper on the turbonet module:
-    // `_ws_invoke_handler(handler, capsule, path)`.
+    // `_ws_invoke_handler(handler, capsule, path, query_string, headers, path_params)`.
     const turbonet_mod = c.PyImport_ImportModule("turboapi.turbonet") orelse blk: {
         c.PyErr_Clear();
         break :blk c.PyImport_ImportModule("turbonet") orelse {
@@ -1582,14 +1595,50 @@ fn runPythonHandler(conn: *WsConn, handler: *c.PyObject, path: []const u8, tstat
         };
     };
     defer c.Py_DecRef(turbonet_mod);
-    invokeHelper(turbonet_mod, handler, capsule, path);
+    invokeHelper(turbonet_mod, handler, capsule, path, query_string, headers);
 
     // Handler returned (or raised). If it didn't close the connection itself,
     // send a clean close now.
     if (!conn.closing) conn.sendClose(1000, "");
 }
 
-fn invokeHelper(mod: *c.PyObject, handler: *c.PyObject, capsule: *c.PyObject, path: []const u8) void {
+fn websocketHeadersToPyList(headers: []const HeaderPair) ?*c.PyObject {
+    const list = c.PyList_New(0) orelse return null;
+    for (headers) |header| {
+        const name = py.newBytes(header.name) orelse {
+            c.Py_DecRef(list);
+            return null;
+        };
+        const value = py.newBytes(header.value) orelse {
+            c.Py_DecRef(name);
+            c.Py_DecRef(list);
+            return null;
+        };
+        const pair = c.PyTuple_Pack(2, name, value);
+        c.Py_DecRef(name);
+        c.Py_DecRef(value);
+        if (pair == null) {
+            c.Py_DecRef(list);
+            return null;
+        }
+        if (c.PyList_Append(list, pair) != 0) {
+            c.Py_DecRef(pair);
+            c.Py_DecRef(list);
+            return null;
+        }
+        c.Py_DecRef(pair);
+    }
+    return list;
+}
+
+fn invokeHelper(
+    mod: *c.PyObject,
+    handler: *c.PyObject,
+    capsule: *c.PyObject,
+    path: []const u8,
+    query_string: []const u8,
+    headers: []const HeaderPair,
+) void {
     const helper = c.PyObject_GetAttrString(mod, "_ws_invoke_handler") orelse {
         c.PyErr_Print();
         return;
@@ -1602,7 +1651,29 @@ fn invokeHelper(mod: *c.PyObject, handler: *c.PyObject, capsule: *c.PyObject, pa
     };
     defer c.Py_DecRef(py_path);
 
-    const args = c.PyTuple_Pack(3, handler, capsule, py_path) orelse {
+    const py_query_string = py.newBytes(query_string) orelse {
+        c.PyErr_Print();
+        return;
+    };
+    defer c.Py_DecRef(py_query_string);
+
+    const py_headers = websocketHeadersToPyList(headers) orelse {
+        c.PyErr_Print();
+        return;
+    };
+    defer c.Py_DecRef(py_headers);
+
+    // WebSocket routes are exact-match in the current native runtime, so no
+    // path parameters are resolved yet. Keep the ASGI field explicit so the
+    // bridge can pass real values without another public API change when
+    // parameterized WebSocket routing lands.
+    const py_path_params = c.PyDict_New() orelse {
+        c.PyErr_Print();
+        return;
+    };
+    defer c.Py_DecRef(py_path_params);
+
+    const args = c.PyTuple_Pack(6, handler, capsule, py_path, py_query_string, py_headers, py_path_params) orelse {
         c.PyErr_Print();
         return;
     };
@@ -1762,8 +1833,6 @@ pub fn ws_close(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
     return py.pyNone();
 }
 
-
-
 fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     // Phase 1: Read headers into a fixed buffer (headers are typically < 8KB)
     var header_buf: [8192]u8 = undefined;
@@ -1808,7 +1877,7 @@ fn handleOneRequest(stream: std.Io.net.Stream, tstate: ?*anyopaque) !void {
     // lookup. WS routes are stored in a separate map (getWebSocketRoutes())
     // populated by the Python `@app.websocket(...)` decorator, plus the
     // hardcoded /ws-echo demo route.
-    switch (tryWebSocketUpgrade(stream, request_head, first_line_end, he, method, path, tstate)) {
+    switch (tryWebSocketUpgrade(stream, request_head, first_line_end, he, method, path, query_string, tstate)) {
         .handled => return,
         .not_websocket => {},
     }

@@ -1,11 +1,15 @@
 # WebSocket Status in TurboAPI
 
-TurboAPI currently exposes provisional Python WebSocket API objects and route
-registration, but the Zig HTTP runtime does not yet implement real WebSocket
-upgrade handling, frame parsing, or live connection wiring.
+TurboAPI's Zig HTTP runtime implements the RFC 6455 upgrade, text and binary
+frames, ping/pong, close handling, fragmentation, and live Python handler
+wiring. The transport is usable but remains alpha: native WebSocket routes are
+exact-match and each long-lived connection currently occupies one HTTP worker.
 
-The examples below describe the intended API shape. They should not be treated
-as production-ready runtime support until issue `#114` is implemented and tested.
+The native runtime completes the HTTP 101 handshake before it invokes the
+Python handler. Consequently, `await websocket.accept()` preserves the familiar
+API shape but does not control the handshake. Use an authenticating edge proxy
+for public endpoints; a Python handler can inspect metadata and close the
+already-upgraded connection, but cannot return a pre-upgrade HTTP 401 or 403.
 
 ## Quick Start
 
@@ -32,6 +36,17 @@ WebSocket connections use HTTP upgrade:
 2. Server responds with 101 Switching Protocols
 3. Connection upgrades to WebSocket protocol
 4. Bidirectional message exchange begins
+```
+
+For a Zig-backed connection, request metadata is available as normalized
+convenience mappings and in its ASGI-shaped raw form:
+
+```python
+tenant = websocket.headers.get("x-tenant")
+repo = websocket.query_params.get("repo")
+raw_query = websocket.scope["query_string"]
+raw_headers = websocket.scope["headers"]
+path_params = websocket.path_params  # {} for current exact-match native routes
 ```
 
 ## Handler Types
@@ -125,15 +140,20 @@ async def broadcast_handler(websocket):
 
 ## Zig Runtime Status
 
-WebSocket support is planned for the Zig HTTP core. The remaining runtime work
-is tracked in issue `#114`.
+The Zig HTTP core handles real WebSocket connections. Current limitations are:
+
+- native WebSocket routes use exact path matching; path parameters are not resolved yet;
+- the 101 response is sent before Python runs, so application code cannot reject
+  an upgrade with an HTTP authentication response;
+- every live WebSocket currently occupies one HTTP worker;
+- subprotocol negotiation and `permessage-deflate` are not implemented.
 
 ## Performance Tips
 
 1. **Use binary for large data**: Binary messages avoid UTF-8 encoding overhead
 2. **Batch small messages**: Combine multiple small updates into one message
-3. **Compress if needed**: For large JSON payloads, consider compression
-4. **Connection pooling**: Reuse connections for multiple interactions
+3. **Keep payloads bounded**: Native `permessage-deflate` is not implemented
+4. **Reuse connections**: Avoid reconnecting for every message
 
 ## Client Examples
 
@@ -172,23 +192,31 @@ asyncio.run(client())
 
 ## Security
 
-1. **Validate Origin**: Check Origin header to prevent CSRF
-2. **Authentication**: Validate tokens before accepting connections
+1. **Authenticate at the edge**: Use Cloudflare Access, Caddy, nginx, or another
+   proxy that rejects unauthenticated requests before the WebSocket upgrade
+2. **Validate Origin**: Inspect the propagated `Origin` header and close with a
+   policy-violation code when it is not allowed
 3. **Rate Limiting**: Limit messages per second per client
 4. **Input Validation**: Sanitize all received messages
 
 ```python
 @app.websocket("/secure")
 async def secure_handler(websocket):
-    # Check authentication
-    token = websocket.query_params.get('token')
+    # This is a post-upgrade policy check, not pre-upgrade authentication.
+    # Prefer an Authorization header; query tokens can leak into logs.
+    token = websocket.headers.get('authorization')
     if not validate_token(token):
-        await websocket.close(code=4001)
+        await websocket.close(code=1008, reason='policy violation')
         return
 
     await websocket.accept()
     # ... handle messages
 ```
+
+Because the 101 handshake has already completed when the handler starts, the
+check above is defense in depth. Keep the TurboAPI origin private and enforce
+the actual authentication decision at the edge until a native pre-upgrade guard
+API is implemented.
 
 ## See Also
 

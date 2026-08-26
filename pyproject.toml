@@ -36,6 +36,7 @@ Documentation = "https://github.com/justrach/turboAPI#readme"
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
+    "websockets>=14.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
 ]
