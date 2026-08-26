@@ -47,6 +47,9 @@ jobs:
         # Known: Linux x86_64 may segfault on Zig thread cleanup between tests
         continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
 
+      - name: WebSocket capacity containment E2E
+        run: python -m pytest tests/test_websocket_capacity_e2e.py -v --tb=short
+
       - name: Thread-safety stress test
         run: |
           python -c "

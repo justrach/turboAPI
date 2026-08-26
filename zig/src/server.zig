@@ -955,6 +955,62 @@ fn renderResponse(status: u16, content_type: []const u8, body: []const u8) ?[]co
 
 const MAX_POOL_SIZE = 128;
 const DEFAULT_POOL_SIZE = 24;
+const DEFAULT_HTTP_WORKER_RESERVE = 4;
+
+/// WebSockets currently consume one connection worker for their full lifetime.
+/// Keep their admission count below the pool size so ordinary HTTP always has
+/// workers left. This is containment for the blocking connection model, not an
+/// evented-WebSocket implementation.
+const WebSocketCapacity = struct {
+    http_worker_reserve: usize,
+    max_active: usize,
+};
+
+var active_websockets: std.atomic.Value(usize) = .init(0);
+var max_active_websockets: std.atomic.Value(usize) = .init(0);
+
+fn readUsizeEnv(name: [*:0]const u8, fallback: usize) usize {
+    const ptr = std.c.getenv(name) orelse return fallback;
+    return std.fmt.parseInt(usize, std.mem.span(ptr), 10) catch fallback;
+}
+
+fn clampWebSocketCapacity(worker_count: usize, requested_reserve: usize, requested_max: usize) WebSocketCapacity {
+    if (worker_count == 0) return .{ .http_worker_reserve = 0, .max_active = 0 };
+
+    // A zero reserve would allow WebSockets to occupy every worker, so clamp
+    // it to at least one. Oversized values safely disable WebSocket admission.
+    const reserve = @min(worker_count, @max(@as(usize, 1), requested_reserve));
+    const available = worker_count - reserve;
+    return .{
+        .http_worker_reserve = reserve,
+        .max_active = @min(requested_max, available),
+    };
+}
+
+fn webSocketCapacity(worker_count: usize) WebSocketCapacity {
+    const requested_reserve = readUsizeEnv("TURBO_HTTP_WORKER_RESERVE", DEFAULT_HTTP_WORKER_RESERVE);
+    const available_after_default_reserve = worker_count -| @min(worker_count, @max(@as(usize, 1), requested_reserve));
+    const requested_max = readUsizeEnv("TURBO_MAX_WEBSOCKETS", available_after_default_reserve);
+    return clampWebSocketCapacity(worker_count, requested_reserve, requested_max);
+}
+
+fn tryAcquireWebSocketSlot() bool {
+    const limit = max_active_websockets.load(.acquire);
+    var current = active_websockets.load(.acquire);
+    while (current < limit) {
+        if (active_websockets.cmpxchgWeak(current, current + 1, .acq_rel, .acquire)) |observed| {
+            current = observed;
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
+fn releaseWebSocketSlot() void {
+    const previous = active_websockets.fetchSub(1, .acq_rel);
+    std.debug.assert(previous > 0);
+}
 
 const ConnectionPool = struct {
     queue: Queue,
@@ -1056,12 +1112,21 @@ pub fn server_run(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
         if (thread_count == 0) thread_count = DEFAULT_POOL_SIZE;
     }
 
+    // Configure WebSocket admission before workers can receive connections.
+    // `ConnectionPool.init` also caps at MAX_POOL_SIZE, so use that same
+    // effective count when deriving the HTTP reserve.
+    const effective_thread_count = @min(thread_count, MAX_POOL_SIZE);
+    const ws_capacity = webSocketCapacity(effective_thread_count);
+    active_websockets.store(0, .release);
+    max_active_websockets.store(ws_capacity.max_active, .release);
+
     // Start thread pool (workers create their tstates after this point,
     // but py_interp is set before SaveThread so there's no race).
-    pool.init(thread_count);
+    pool.init(effective_thread_count);
 
     logger.info("TurboNet-Zig server listening on {s}:{d}", .{ server_host, server_port });
     logger.info("Zig HTTP core active – {d}-thread pool, per-worker tstate!", .{pool.thread_count});
+    logger.info("WebSocket containment – max active={d}, reserved HTTP workers={d}", .{ ws_capacity.max_active, ws_capacity.http_worker_reserve });
 
     // Release the GIL — workers acquire it per-request via AcquireThread.
     const save = py.PyEval_SaveThread();
@@ -1352,6 +1417,15 @@ fn tryWebSocketUpgrade(
         sendUpgradeError(stream, 404, "Not Found");
         return .handled;
     }
+
+    // Admission must happen before the 101 response. Every accepted WebSocket
+    // below owns this HTTP worker until close, so reject once the bounded share
+    // is full and release the slot on every subsequent exit path.
+    if (!tryAcquireWebSocketSlot()) {
+        sendUpgradeError(stream, 503, "Service Unavailable");
+        return .handled;
+    }
+    defer releaseWebSocketSlot();
 
     // Handshake.
     var accept_buf: [ws.ACCEPT_LEN]u8 = undefined;
@@ -3322,6 +3396,24 @@ fn cacheThreadWorker(ctx: *const CacheThreadCtx) void {
         const cached = getCachedResponse(ctx.key) orelse continue;
         std.debug.assert(std.mem.eql(u8, cached, ctx.body));
     }
+}
+
+test "websocket capacity always preserves the requested HTTP reserve" {
+    const ordinary = clampWebSocketCapacity(24, 4, 1000);
+    try std.testing.expectEqual(@as(usize, 4), ordinary.http_worker_reserve);
+    try std.testing.expectEqual(@as(usize, 20), ordinary.max_active);
+
+    const zero_reserve = clampWebSocketCapacity(4, 0, 4);
+    try std.testing.expectEqual(@as(usize, 1), zero_reserve.http_worker_reserve);
+    try std.testing.expectEqual(@as(usize, 3), zero_reserve.max_active);
+
+    const oversized_reserve = clampWebSocketCapacity(4, 99, 99);
+    try std.testing.expectEqual(@as(usize, 4), oversized_reserve.http_worker_reserve);
+    try std.testing.expectEqual(@as(usize, 0), oversized_reserve.max_active);
+
+    const no_workers = clampWebSocketCapacity(0, 0, 99);
+    try std.testing.expectEqual(@as(usize, 0), no_workers.http_worker_reserve);
+    try std.testing.expectEqual(@as(usize, 0), no_workers.max_active);
 }
 
 test "response cache is safe under concurrent access" {

@@ -77,6 +77,32 @@ Typical values:
 - 8-core: 14 workers (capped)
 - 16-core: 14 workers (capped)
 
+### WebSocket Worker Reserve
+
+The current WebSocket runtime uses one connection worker for the lifetime of
+each upgraded socket. TurboAPI therefore reserves four workers for ordinary
+HTTP by default and caps active WebSockets at the remaining worker count.
+
+The two WebSocket-specific environment variables tune those bounds before the
+server starts:
+
+```bash
+TURBO_THREAD_POOL_SIZE=24 \
+TURBO_HTTP_WORKER_RESERVE=4 \
+TURBO_MAX_WEBSOCKETS=20 \
+python app.py
+```
+
+- `TURBO_HTTP_WORKER_RESERVE` is clamped to at least one worker and at most the
+  configured pool size.
+- `TURBO_MAX_WEBSOCKETS` is clamped to `pool size - HTTP reserve`; zero disables
+  WebSocket admission.
+- Excess upgrades receive HTTP `503 Service Unavailable` before the `101`
+  WebSocket handshake.
+
+This is bounded containment for the worker-based runtime. It does not make
+WebSockets evented or suitable for unbounded connection counts.
+
 ### Semaphore Capacity
 
 Default: `cpu_cores * 1024` concurrent requests
