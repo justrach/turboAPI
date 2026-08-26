@@ -39,7 +39,7 @@ var methods = [_]py.PyMethodDef{
     .{ .ml_name = "_server_add_native_route", .ml_meth = @ptrCast(&server.server_add_native_route), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_server_add_static_route", .ml_meth = @ptrCast(&server.server_add_static_route), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_server_add_middleware", .ml_meth = @ptrCast(&server.server_add_middleware), .ml_flags = c.METH_VARARGS, .ml_doc = null },
-    .{ .ml_name = "_server_run", .ml_meth = @ptrCast(&server.server_run), .ml_flags = c.METH_NOARGS, .ml_doc = null },
+    .{ .ml_name = "_server_run", .ml_meth = @ptrCast(&server.server_run), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "configure_rate_limiting", .ml_meth = @ptrCast(&server.configure_rate_limiting), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_server_configure_cors", .ml_meth = @ptrCast(&server.server_configure_cors), .ml_flags = c.METH_VARARGS, .ml_doc = null },
     .{ .ml_name = "_server_enable_response_cache", .ml_meth = @ptrCast(&server.server_enable_response_cache), .ml_flags = c.METH_NOARGS, .ml_doc = null },
@@ -129,7 +129,7 @@ const bootstrap_code: [*:0]const u8 =
     \\    def add_middleware(self, middleware):
     \\        _m._server_add_middleware(middleware)
     \\    def run(self):
-    \\        _m._server_run()
+    \\        _m._server_run(self._state)
     \\    def configure_cors(self, origins="*", methods="GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD", headers="*", max_age=600, credentials=0):
     \\        _m._server_configure_cors(origins, methods, headers, max_age, int(credentials))
     \\    def enable_response_cache(self):
@@ -139,7 +139,7 @@ const bootstrap_code: [*:0]const u8 =
     \\    def add_db_route(self, method, path, op, table, pk_column, pk_param, columns):
     \\        _m._db_add_route(method, path, op, table, pk_column or "", pk_param or "", columns or "")
     \\    def add_websocket_route(self, path, handler, guard=None):
-    \\        _m._server_add_websocket_route(path, handler, guard)
+    \\        _m._server_add_websocket_route(self._state, path, handler, guard)
     \\
     \\def _ws_invoke_guard(guard, path, query_string, headers):
     \\    """Return 0 to allow or an HTTP status to reject before upgrade.
