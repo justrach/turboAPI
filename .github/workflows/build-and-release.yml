@@ -11,6 +11,8 @@ on:
       - 'python/**'
       - 'scripts/install-zig-linux.sh'
       - 'scripts/smoke_test_wheel.py'
+      - 'scripts/wheel_platform.py'
+      - 'tests/test_wheel_platform.py'
       - 'zig/**'
   workflow_dispatch:
 
@@ -41,12 +43,11 @@ jobs:
             test "$VERSION" = "$TAG_VERSION"
           fi
 
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Version: $VERSION"
 
   build:
     name: "build (${{ matrix.os }}, ${{ matrix.python }})"
-    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
     needs: [check-version]
     strategy:
@@ -82,15 +83,10 @@ jobs:
           # Re-tag as platform-specific (contains compiled .so)
           PYTAG=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
           ABITAG=$(python -c "import sys; ft='t' if hasattr(sys,'_is_gil_enabled') and not sys._is_gil_enabled() else ''; print(f'cp{sys.version_info.major}{sys.version_info.minor}{ft}')")
-          PLAT=$(python -c "
-          import sysconfig, platform
-          p = sysconfig.get_platform().replace('-','_').replace('.','_')
-          if platform.system() == 'Linux':
-              arch = platform.machine()
-              p = f'manylinux_2_17_{arch}.manylinux2014_{arch}'
-          print(p)
-          ")
-          python -m wheel tags --python-tag=$PYTAG --abi-tag=$ABITAG --platform-tag=$PLAT --remove dist-tmp/*.whl
+          # Preserve the deployment target inferred from the Mach-O binary, but
+          # replace a misleading universal2 architecture with the native slice.
+          PLAT=$(python scripts/wheel_platform.py tag dist-tmp/*.whl)
+          python -m wheel tags --python-tag="$PYTAG" --abi-tag="$ABITAG" --platform-tag="$PLAT" --remove dist-tmp/*.whl
           mkdir -p dist && mv dist-tmp/*.whl dist/
 
       - name: Verify wheel can import native backend
@@ -105,9 +101,10 @@ jobs:
           print("native backend import ok")
           PY
 
-      - name: Verify macOS wheel has no Python framework dependency
+      - name: Verify macOS wheel architecture and linkage
         if: runner.os == 'macOS'
         run: |
+          python scripts/wheel_platform.py verify dist/*.whl
           python - <<'PY'
           import pathlib
           import subprocess
