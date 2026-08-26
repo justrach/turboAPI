@@ -1,0 +1,51 @@
+{
+  "timestamp": "2026-08-26T10-12-05",
+  "results": {
+    "GET /health": 88909.49,
+    "GET /": 91902.31,
+    "GET /json": 85581.08,
+    "GET /users/123": 80592.97,
+    "POST /items": 49350.59,
+    "GET /status201": 77544.77
+  },
+  "detailed": {
+    "GET /health": {
+      "requests_per_second": 88909.49,
+      "latency_avg_ms": 0.21367,
+      "latency_p99_ms": 0.92
+    },
+    "GET /": {
+      "requests_per_second": 91902.31,
+      "latency_avg_ms": 0.20063999999999999,
+      "latency_p99_ms": 0.765
+    },
+    "GET /json": {
+      "requests_per_second": 85581.08,
+      "latency_avg_ms": 0.20834,
+      "latency_p99_ms": 0.56
+    },
+    "GET /users/123": {
+      "requests_per_second": 80592.97,
+      "latency_avg_ms": 0.21108000000000002,
+      "latency_p99_ms": 0.808
+    },
+    "POST /items": {
+      "requests_per_second": 49350.59,
+      "latency_avg_ms": 0.44676,
+      "latency_p99_ms": 1.05
+    },
+    "GET /status201": {
+      "requests_per_second": 77544.77,
+      "latency_avg_ms": 0.23124,
+      "latency_p99_ms": 0.794
+    }
+  },
+  "commit": "b5927a2ce09ae7df7d489c9fd21e973909b079c3",
+  "runner": "ci-main",
+  "os": "ubuntu-latest",
+  "vcpus": "2",
+  "duration": 10,
+  "threads": 4,
+  "connections": 100,
+  "workers": 24
+}
