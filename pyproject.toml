@@ -41,6 +41,7 @@ dev = [
     "mypy>=1.0.0",
 ]
 benchmark = [
+    "aiohttp>=3.10.0",
     "matplotlib>=3.5.0",
     "requests>=2.25.0",
 ]

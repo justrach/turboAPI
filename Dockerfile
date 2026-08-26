@@ -1,5 +1,10 @@
-# TurboAPI — Python 3.14 free-threaded + Zig 0.17-dev native backend
-FROM python:3.14-bookworm AS builder
+# TurboAPI — optimized Python 3.14t + Zig 0.17-dev native backend
+FROM python:3.14.7-bookworm AS builder
+
+# Pin and verify the interpreter source. The root image is used by latency-
+# sensitive deployments, so silently following a mutable Python tag is unsafe.
+ARG PYTHON_VERSION=3.14.7
+ARG PYTHON_SOURCE_SHA256=62859805f6fdf25e2bcbf3fa3217801e1996887ca33e6a2af80674bdfa2dbe07
 
 # Keep this exact nightly aligned with zig/build.zig.zon and CI.
 ARG ZIG_VERSION=0.17.0-dev.1862+40ebd8162
@@ -17,18 +22,33 @@ RUN ARCH=$(dpkg --print-architecture) \
     && test "$(zig version)" = "$ZIG_VERSION" \
     && rm "/tmp/${ARCHIVE}"
 
-# Build Python 3.14 free-threaded from source
+# Build the free-threaded interpreter with the same optimization guarantees as
+# the known-good uv/astral CPython runtime. BOLT is deliberately not required:
+# Debian's native GCC toolchain supports reproducible PGO + full LTO on both
+# amd64 and arm64, while BOLT would require a separate LLVM profile pipeline.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential libssl-dev zlib1g-dev libbz2-dev libreadline-dev \
         libsqlite3-dev libncurses5-dev libffi-dev liblzma-dev \
-    && PYVER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')") \
-    && curl -fSL "https://www.python.org/ftp/python/${PYVER}/Python-${PYVER}.tgz" | tar xz -C /tmp \
-    && cd /tmp/Python-${PYVER} \
-    && ./configure --prefix=/opt/python3.14t --disable-gil --enable-shared --with-ensurepip=install \
-       LDFLAGS="-Wl,-rpath,/opt/python3.14t/lib" 2>&1 | tail -5 \
-    && make -j$(nproc) 2>&1 | tail -3 \
-    && make install 2>&1 | tail -3 \
-    && /opt/python3.14t/bin/python3 -c "import sys; assert not sys._is_gil_enabled(); print('Free-threaded OK')" \
+    && PYTHON_ARCHIVE="Python-${PYTHON_VERSION}.tgz" \
+    && curl -fSL \
+       "https://www.python.org/ftp/python/${PYTHON_VERSION}/${PYTHON_ARCHIVE}" \
+       -o "/tmp/${PYTHON_ARCHIVE}" \
+    && echo "${PYTHON_SOURCE_SHA256}  /tmp/${PYTHON_ARCHIVE}" | sha256sum --check - \
+    && tar -xzf "/tmp/${PYTHON_ARCHIVE}" -C /tmp \
+    && cd "/tmp/Python-${PYTHON_VERSION}" \
+    && ./configure \
+       --prefix=/opt/python3.14t \
+       --disable-gil \
+       --enable-shared \
+       --enable-optimizations \
+       --with-lto=full \
+       --with-mimalloc \
+       --with-ensurepip=install \
+       LDFLAGS="-Wl,-rpath,/opt/python3.14t/lib" \
+    && make -j"$(nproc)" \
+    && make install \
+    && /opt/python3.14t/bin/python3 -c \
+       "import sys; assert sys.version_info[:3] == (3, 14, 7); assert not sys._is_gil_enabled()" \
     && rm -rf /tmp/Python-*
 
 ENV PATH="/opt/python3.14t/bin:$PATH"
@@ -42,9 +62,13 @@ RUN python3 zig/build_turbonet.py --install --release
 # ── Runtime stage ──
 FROM debian:bookworm-slim
 
+ARG PYTHON_VERSION=3.14.7
+
 # Copy free-threaded Python + turboapi
 COPY --from=builder /opt/python3.14t /opt/python3.14t
-ENV PATH="/opt/python3.14t/bin:$PATH"
+ENV PATH="/opt/python3.14t/bin:$PATH" \
+    PYTHON_VERSION="${PYTHON_VERSION}" \
+    PYTHON_BUILD_FEATURES="free-threaded,pgo,lto,mimalloc"
 
 # Runtime deps for Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -56,7 +80,10 @@ WORKDIR /app
 COPY --from=builder /app /app
 
 # Install turboapi + deps
-RUN pip3 install --no-cache-dir -e .
+RUN pip3 install --no-cache-dir -e . \
+    && python3 scripts/verify_optimized_runtime.py \
+       --expect-version "${PYTHON_VERSION}" \
+       --require-native
 
 EXPOSE 8000
 CMD ["python3", "test_docker_app.py"]
