@@ -22,6 +22,16 @@ pub fn build(b: *std.Build) void {
     else
         "python3.13";
 
+    // Zig 0.17 removed @cImport. Translate the selected Python's headers into
+    // a private Zig module once and share it with the library and test roots.
+    const python_translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/python_api.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    python_translate_c.addIncludePath(.{ .cwd_relative = include_path });
+    const python_c_mod = python_translate_c.createModule();
+
     // ── dhi modules (fetched via build.zig.zon) ──
     const dhi_dep = b.dependency("dhi", .{
         .target = target,
@@ -31,13 +41,7 @@ pub fn build(b: *std.Build) void {
     const validator_mod = dhi_dep.module("validator");
     const json_validator_mod = dhi_dep.module("json_validator");
     const model_mod = dhi_dep.module("model");
-
-    // validators_comprehensive isn't exported by dhi — create from dep source
-    const validators_comprehensive_mod = b.createModule(.{
-        .root_source_file = dhi_dep.path("src/validators_comprehensive.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    const validators_comprehensive_mod = dhi_dep.module("validators_comprehensive");
 
     // ── pg.zig (Postgres client, fetched via build.zig.zon) ──
     const pg_dep = b.dependency("pg", .{
@@ -68,6 +72,7 @@ pub fn build(b: *std.Build) void {
     lib.root_module.addImport("model", model_mod);
     lib.root_module.addImport("pg", pg_mod);
     lib.root_module.addImport("turboapi-core", core_mod);
+    lib.root_module.addImport("python_c", python_c_mod);
 
     lib.root_module.addIncludePath(.{ .cwd_relative = include_path });
     lib.root_module.addRPathSpecial("@loader_path");
@@ -119,6 +124,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("model", model_mod);
     tests.root_module.addImport("pg", pg_mod);
     tests.root_module.addImport("turboapi-core", core_mod);
+    tests.root_module.addImport("python_c", python_c_mod);
     tests.root_module.addIncludePath(.{ .cwd_relative = include_path });
     tests.root_module.addLibraryPath(.{ .cwd_relative = lib_path });
     tests.root_module.linkSystemLibrary(py_lib_name, .{});

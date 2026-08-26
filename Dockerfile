@@ -1,12 +1,21 @@
-# TurboAPI — Python 3.14 free-threaded + Zig 0.15 native backend
+# TurboAPI — Python 3.14 free-threaded + Zig 0.17-dev native backend
 FROM python:3.14-bookworm AS builder
 
-# Install Zig 0.15.2
+# Keep this exact nightly aligned with zig/build.zig.zon and CI.
+ARG ZIG_VERSION=0.17.0-dev.1862+40ebd8162
 RUN ARCH=$(dpkg --print-architecture) \
-    && if [ "$ARCH" = "arm64" ]; then ZIG_ARCH=aarch64; else ZIG_ARCH=x86_64; fi \
-    && curl -fSL "https://ziglang.org/download/0.15.2/zig-${ZIG_ARCH}-linux-0.15.2.tar.xz" \
-       | tar -xJ -C /opt \
-    && ln -s /opt/zig-${ZIG_ARCH}-linux-0.15.2/zig /usr/local/bin/zig
+    && case "$ARCH" in \
+        arm64) ZIG_ARCH=aarch64; ZIG_SHA256=f2bda379a3fa49f8450d17d80ca6280549bb160cf4d1aff81f54c64ac2d474be ;; \
+        amd64) ZIG_ARCH=x86_64; ZIG_SHA256=8e76bc57585fc9c257c6c3053a522501f6a6e7baae801490d269ec036c75b58d ;; \
+        *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;; \
+    esac \
+    && ARCHIVE="zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" \
+    && curl -fSL "https://ziglang.org/builds/${ARCHIVE}" -o "/tmp/${ARCHIVE}" \
+    && echo "${ZIG_SHA256}  /tmp/${ARCHIVE}" | sha256sum --check - \
+    && tar -xJf "/tmp/${ARCHIVE}" -C /opt \
+    && ln -s "/opt/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig \
+    && test "$(zig version)" = "$ZIG_VERSION" \
+    && rm "/tmp/${ARCHIVE}"
 
 # Build Python 3.14 free-threaded from source
 RUN apt-get update && apt-get install -y --no-install-recommends \

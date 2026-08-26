@@ -26,7 +26,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0-dev.1862+40ebd8162
 
       - name: Build turbonet extension
         run: python zig/build_turbonet.py --install
@@ -120,7 +120,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0-dev.1862+40ebd8162
 
       - name: Run turboapi-core unit tests
         run: cd turboapi-core && zig build test
@@ -161,7 +161,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0-dev.1862+40ebd8162
 
       - name: Set up Python 3.14 (for headers)
         uses: actions/setup-python@v5

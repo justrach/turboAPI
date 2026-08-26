@@ -1,14 +1,15 @@
 .{
     .name = .zig,
-    .version = "0.16.0",
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0-dev.1862+40ebd8162",
     .dependencies = .{
         .dhi = .{
-            .url = "https://github.com/justrach/dhi/archive/4f607331c51b2ec974310e8cb5d40cf61a8ab6b1.tar.gz",
-            .hash = "dhi-0.1.0-Fz3bn1CFAwDexo2jviNTcIrQeJZ5TM6fCcHcdPIO2wK1",
+            .url = "git+https://github.com/justrach/dhi.git#8e2f422c23f3e0b75103f5e579e14821289a74bd",
+            .hash = "dhi-0.1.0-Fz3bnxPzAwDKFBdZaiqt6sSiXJFO4N5njkKKIpGfp8hv",
         },
         .pg = .{
-            .url = "git+https://github.com/justrach/pg.zig?ref=master#7605502f24e348c50341cbdf84ac135613d512af",
-            .hash = "pg-0.0.0-Wp_7gYTxBgDOvvLXaKfiXksk9WArPQJWgY833oQjfk1y",
+            .url = "git+https://github.com/justrach/pg.zig?ref=master#ad5102eaac664b397394c42cdffd8e748244934e",
+            .hash = "pg-0.0.0-Wp_7gSpcBwDFItWkh_w9w8rIq8ISQBFO6Hiozpgx3JQ8",
         },
         .turboapi_core = .{
             .path = "../turboapi-core",

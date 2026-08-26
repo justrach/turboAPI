@@ -1,10 +1,7 @@
-// Thin wrappers around the Python C-API, imported via @cImport.
+// Thin wrappers around the Python C-API, translated by build.zig.
 // Everything the rest of the Zig codebase needs goes through here.
 
-pub const c = @cImport({
-    @cDefine("PY_SSIZE_T_CLEAN", {});
-    @cInclude("Python.h");
-});
+pub const c = @import("python_c");
 
 // Re-export the types we use everywhere
 pub const PyObject = c.PyObject;
@@ -51,7 +48,7 @@ pub fn isNone(obj: *PyObject) bool {
 
 pub fn setError(comptime fmt: []const u8, args: anytype) void {
     var buf: [1024]u8 = undefined;
-    const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch {
+    const msg = std.fmt.bufPrintSentinel(&buf, fmt, args, 0) catch {
         c.PyErr_SetString(c.PyExc_RuntimeError, "internal error");
         return;
     };
@@ -96,8 +93,8 @@ pub fn parseArgs(args: ?*PyObject, fmt: [*:0]const u8, ptrs: anytype) bool {
 
 const std = @import("std");
 
-// GIL management — PyEval_SaveThread/RestoreThread return/take PyThreadState*
-// which Zig's @cImport can't translate. We declare them manually.
+// GIL management — keep these opaque so the rest of the backend does not
+// depend on the translated layout of CPython's private thread-state structs.
 pub extern fn PyEval_SaveThread() ?*anyopaque;
 pub extern fn PyEval_RestoreThread(state: ?*anyopaque) void;
 

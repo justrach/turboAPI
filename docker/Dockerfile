@@ -1,4 +1,4 @@
-# turboAPI demo image — Python 3.14t free-threaded + Zig 0.16 backend
+# turboAPI demo image — Python 3.14t free-threaded + Zig 0.17-dev backend
 #
 # Built and pushed automatically by .github/workflows/docker-image.yml on every
 # `v*` tag. Pull from `ghcr.io/justrach/turboapi:<tag>` or `:latest`.
@@ -11,11 +11,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates git build-essential xz-utils && \
     rm -rf /var/lib/apt/lists/*
 
-# Zig 0.16.0 — required by the telemetry module on main / v1.0.29+
+# Keep this exact nightly aligned with zig/build.zig.zon and CI.
+ARG ZIG_VERSION=0.17.0-dev.1862+40ebd8162
 RUN ARCH=$(uname -m) && \
-    curl -fsSL "https://ziglang.org/download/0.16.0/zig-${ARCH}-linux-0.16.0.tar.xz" \
-        | tar -xJ -C /opt && \
-    mv "/opt/zig-${ARCH}-linux-0.16.0" /opt/zig
+    case "$ARCH" in \
+        aarch64) ZIG_SHA256=f2bda379a3fa49f8450d17d80ca6280549bb160cf4d1aff81f54c64ac2d474be ;; \
+        x86_64) ZIG_SHA256=8e76bc57585fc9c257c6c3053a522501f6a6e7baae801490d269ec036c75b58d ;; \
+        *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;; \
+    esac && \
+    ARCHIVE="zig-${ARCH}-linux-${ZIG_VERSION}.tar.xz" && \
+    curl -fsSL "https://ziglang.org/builds/${ARCHIVE}" -o "/tmp/${ARCHIVE}" && \
+    echo "${ZIG_SHA256}  /tmp/${ARCHIVE}" | sha256sum --check - && \
+    tar -xJf "/tmp/${ARCHIVE}" -C /opt && \
+    mv "/opt/zig-${ARCH}-linux-${ZIG_VERSION}" /opt/zig && \
+    rm "/tmp/${ARCHIVE}" && \
+    test "$(/opt/zig/zig version)" = "$ZIG_VERSION"
 ENV PATH="/opt/zig:$PATH"
 
 # uv + free-threaded Python 3.14t (precompiled, no source build)
