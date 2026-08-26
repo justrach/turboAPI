@@ -5,11 +5,11 @@ frames, ping/pong, close handling, fragmentation, and live Python handler
 wiring. The transport is usable but remains alpha: native WebSocket routes are
 exact-match and each long-lived connection currently occupies one HTTP worker.
 
-The native runtime completes the HTTP 101 handshake before it invokes the
-Python handler. Consequently, `await websocket.accept()` preserves the familiar
-API shape but does not control the handshake. Use an authenticating edge proxy
-for public endpoints; a Python handler can inspect metadata and close the
-already-upgraded connection, but cannot return a pre-upgrade HTTP 401 or 403.
+The native runtime can invoke a synchronous route guard before the HTTP 101
+handshake. The guard can inspect request metadata and allow the upgrade or
+return a bounded status-only HTTP rejection. The asynchronous WebSocket handler
+still begins after 101, so `await websocket.accept()` preserves the familiar
+API shape but does not control the handshake.
 
 ## Quick Start
 
@@ -33,9 +33,10 @@ WebSocket connections use HTTP upgrade:
 
 ```
 1. Client sends HTTP request with Upgrade: websocket
-2. Server responds with 101 Switching Protocols
-3. Connection upgrades to WebSocket protocol
-4. Bidirectional message exchange begins
+2. Server validates RFC 6455 headers and resolves the route
+3. An optional route guard evaluates Authorization, Origin, and other metadata
+4. Server rejects with bounded HTTP 4xx/5xx, or reserves capacity and sends 101
+5. Bidirectional message exchange begins
 ```
 
 For a Zig-backed connection, request metadata is available as normalized
@@ -48,6 +49,75 @@ raw_query = websocket.scope["query_string"]
 raw_headers = websocket.scope["headers"]
 path_params = websocket.path_params  # {} for current exact-match native routes
 ```
+
+## Pre-upgrade guards
+
+Use `guard=` for a small synchronous policy that must run before the native
+runtime sends 101:
+
+```python
+from turboapi import (
+    TurboAPI,
+    WebSocketUpgradeRejection,
+    WebSocketUpgradeRequest,
+)
+
+app = TurboAPI()
+
+
+def allow_chat(request: WebSocketUpgradeRequest):
+    if request.headers.get("origin") not in {"https://app.example.com"}:
+        return WebSocketUpgradeRejection(403)
+
+    authorization = request.headers.get("authorization", "")
+    if not validate_bearer(authorization):
+        return WebSocketUpgradeRejection(401)
+
+    return True
+
+
+@app.websocket("/chat", guard=allow_chat)
+async def chat(websocket):
+    await websocket.accept()
+    # ... handle messages
+```
+
+`WebSocketUpgradeRequest` exposes the exact route path, lowercase headers,
+last-value query parameters, and raw query-string bytes. Put bearer credentials
+in the `Authorization` header, not in the URL query string, where intermediaries
+may log them.
+
+Only the literal `True` allows an upgrade. `False`, `None`, invalid results,
+asynchronous guards, and guard exceptions fail closed with HTTP 403. Safe
+application-selected rejection statuses are `400`, `401`, `403`, `404`, `429`,
+`500`, and `503`; any other native result is reduced to `403`. Rejections have
+an empty body and fixed bounded headers; request metadata and exception text are
+never included. A 401 rejection includes `WWW-Authenticate: Bearer`.
+
+TurboAPI rejects duplicate `Host`, `Authorization`, `Origin`,
+`Sec-WebSocket-Key`, or `Sec-WebSocket-Version` headers with HTTP 400 before
+invoking the guard. Header names are compared case-insensitively, preventing an
+edge and application from making different first-value/last-value decisions.
+Before guard evaluation, the native core also requires the RFC 6455 handshake
+fields, including a non-empty `Host`, version 13, and a canonical Base64
+`Sec-WebSocket-Key` that decodes to exactly 16 bytes. The complete request line
+must be exactly `METHOD SP TARGET SP HTTP/1.1`; missing or extra fields and
+WebSocket upgrades over HTTP/1.0 are rejected before route policy runs.
+
+Guards run after RFC 6455 validation and exact route lookup, but before active
+WebSocket capacity admission. Rejected sockets therefore do not consume an
+active WebSocket slot. Keep guard work short and non-blocking.
+
+Live route replacement is synchronized. An in-flight upgrade retains one owned
+handler/guard snapshot from policy evaluation through connection handling, while
+a replacement affects only subsequent upgrades. Registration is serialized per
+application across both Python route dictionaries and the native route map, so
+concurrent free-threaded replacements cannot split handler/guard state. If
+native registration fails, the Python route dictionaries retain the previous
+route. Startup registration snapshots route paths rather than iterating a live
+dictionary, then reads each current handler/guard pair immediately before its
+native add. Reentrant additions register live, and a reentrant replacement of a
+not-yet-processed path cannot be overwritten by stale startup state.
 
 ## Handler Types
 
@@ -143,8 +213,8 @@ async def broadcast_handler(websocket):
 The Zig HTTP core handles real WebSocket connections. Current limitations are:
 
 - native WebSocket routes use exact path matching; path parameters are not resolved yet;
-- the 101 response is sent before Python runs, so application code cannot reject
-  an upgrade with an HTTP authentication response;
+- guards are synchronous; database or network-backed authorization should be
+  performed at the edge rather than blocking a native connection worker;
 - every live WebSocket currently occupies one HTTP worker;
 - subprotocol negotiation and `permessage-deflate` are not implemented.
 
@@ -193,17 +263,18 @@ asyncio.run(client())
 ## Security
 
 1. **Authenticate at the edge**: Use Cloudflare Access, Caddy, nginx, or another
-   proxy that rejects unauthenticated requests before the WebSocket upgrade
-2. **Validate Origin**: Inspect the propagated `Origin` header and close with a
-   policy-violation code when it is not allowed
-3. **Rate Limiting**: Limit messages per second per client
-4. **Input Validation**: Sanitize all received messages
+   proxy as the outer boundary for public endpoints
+2. **Reject before upgrade**: Add a native route guard for Authorization and an
+   explicit Origin allowlist
+3. **Defend after upgrade**: Recheck session state and authorization when policy
+   can change during a long-lived connection
+4. **Rate Limiting**: Limit messages per second per client
+5. **Input Validation**: Sanitize all received messages
 
 ```python
 @app.websocket("/secure")
 async def secure_handler(websocket):
-    # This is a post-upgrade policy check, not pre-upgrade authentication.
-    # Prefer an Authorization header; query tokens can leak into logs.
+    # Defense in depth after the pre-upgrade guard, not a replacement for it.
     token = websocket.headers.get('authorization')
     if not validate_token(token):
         await websocket.close(code=1008, reason='policy violation')
@@ -213,10 +284,10 @@ async def secure_handler(websocket):
     # ... handle messages
 ```
 
-Because the 101 handshake has already completed when the handler starts, the
-check above is defense in depth. Keep the TurboAPI origin private and enforce
-the actual authentication decision at the edge until a native pre-upgrade guard
-API is implemented.
+Because the 101 handshake has already completed when the handler starts, this
+code can only send a WebSocket close, not an HTTP 401/403. Use the edge for the
+outer boundary, the route guard for native pre-upgrade rejection, and handler
+checks for post-upgrade defense in depth.
 
 ## See Also
 

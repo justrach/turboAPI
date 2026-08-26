@@ -92,7 +92,13 @@ from .sse import EventSourceResponse, ServerSentEvent, format_sse_event
 from .version_check import check_free_threading_support, get_python_threading_info
 
 # WebSocket
-from .websockets import WebSocket, WebSocketDisconnect
+from .websockets import (
+    WebSocket,
+    WebSocketDisconnect,
+    WebSocketUpgradeGuard,
+    WebSocketUpgradeRejection,
+    WebSocketUpgradeRequest,
+)
 
 __version__ = "1.0.35"
 __all__ = [
@@ -147,6 +153,9 @@ __all__ = [
     # WebSocket
     "WebSocket",
     "WebSocketDisconnect",
+    "WebSocketUpgradeGuard",
+    "WebSocketUpgradeRejection",
+    "WebSocketUpgradeRequest",
     # SSE
     "EventSourceResponse",
     "ServerSentEvent",
