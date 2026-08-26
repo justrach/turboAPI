@@ -123,7 +123,7 @@ pub const Router = struct {
     alloc: Allocator,
 
     pub fn init(alloc: Allocator) Router {
-        return .{ .trees = .{null} ** 8, .alloc = alloc };
+        return .{ .trees = @splat(null), .alloc = alloc };
     }
 
     pub fn deinit(self: *Router) void {
@@ -597,6 +597,14 @@ test "no match returns null" {
 
 // ── Fuzz tests ───────────────────────────────────────────────────────────────
 
+fn repeatString(comptime value: []const u8, comptime count: usize) [value.len * count]u8 {
+    var result: [value.len * count]u8 = undefined;
+    for (0..count) |i| {
+        @memcpy(result[i * value.len ..][0..value.len], value);
+    }
+    return result;
+}
+
 fn fuzz_findRoute(_: void, smith: *std.testing.Smith) anyerror!void {
     const input = smith.in orelse return;
     if (input.len == 0) return;
@@ -642,9 +650,9 @@ test "fuzz: router findRoute — never panics, no OOB on any path" {
         "\x00/health",                  // static route
         "\x00/files/deep/nested/path",  // wildcard
         // Adversarial inputs
-        "\x00" ++ "/" ++ ("a/" ** 70),  // 70 segments — exceeds 64-segment limit → null
+        "\x00" ++ "/" ++ repeatString("a/", 70), // 70 segments — exceeds 64-segment limit → null
         "\x00/\x00secret",             // null byte in path
-        "\x00/" ++ ("a" ** 4096),       // very long single segment
+        "\x00/" ++ repeatString("a", 4096), // very long single segment
         "\x00/%2F%2F/../admin",         // path traversal attempt
         "\x00/users/%00/profile",       // null byte percent-encoded
         "\x00//double//slash//path",    // double slashes
