@@ -57,7 +57,7 @@ fn currentHttpDate() []const u8 {
     const mon_names = [12][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
     const formatted = std.fmt.bufPrint(&cached_date_buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
-        dow_names[dow_idx],         month_day.day_index + 1,       mon_names[@intFromEnum(month_day.month) - 1], year_day.year,
+        dow_names[dow_idx],         month_day.day_index + 1,       mon_names[@backingInt(month_day.month) - 1], year_day.year,
         day_secs.getHoursIntoDay(), day_secs.getMinutesIntoHour(), day_secs.getSecondsIntoMinute(),
     }) catch {
         const fallback = "Thu, 01 Jan 2026 00:00:00 GMT";
@@ -752,7 +752,7 @@ pub fn server_add_native_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c)
     const symbol_name_s = std.mem.span(symbol_name);
 
     // dlopen the shared library
-    const lib_path_z = allocator.dupeZ(u8, lib_path_s) catch {
+    const lib_path_z = allocator.dupeSentinel(u8, lib_path_s, 0) catch {
         py.setError("OOM for lib path", .{});
         return null;
     };
@@ -776,7 +776,7 @@ pub fn server_add_native_route(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c)
     }
 
     // Resolve the handler symbol
-    const sym_z = allocator.dupeZ(u8, symbol_name_s) catch {
+    const sym_z = allocator.dupeSentinel(u8, symbol_name_s, 0) catch {
         py.setError("OOM for symbol name", .{});
         _ = std.c.dlclose(handle);
         return null;
@@ -939,7 +939,7 @@ fn renderResponse(status: u16, content_type: []const u8, body: []const u8) ?[]co
     const dw = [7][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
     const mn = [12][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
     const dt = std.fmt.bufPrint(&date_buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
-        dw[di],               md.day_index + 1,        mn[@intFromEnum(md.month) - 1], yd.year,
+        dw[di],               md.day_index + 1,        mn[@backingInt(md.month) - 1], yd.year,
         ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     }) catch "Thu, 01 Jan 2026 00:00:00 GMT";
     return std.fmt.allocPrint(
@@ -2465,7 +2465,7 @@ fn callPythonVectorcall(
     const argc = entry.param_count;
     var argv: [MAX_PARAMS]?*c.PyObject = undefined;
     // Track created objects for Py_DecRef after the call.
-    var created: [MAX_PARAMS]?*c.PyObject = [_]?*c.PyObject{null} ** MAX_PARAMS;
+    var created: [MAX_PARAMS]?*c.PyObject = @splat(null);
     defer for (created[0..argc]) |obj| {
         if (obj) |o| c.Py_DecRef(o);
     };
@@ -2569,7 +2569,7 @@ fn callPythonAsyncVectorcall(
 
     const argc = entry.param_count;
     var argv: [MAX_PARAMS]?*c.PyObject = undefined;
-    var created: [MAX_PARAMS]?*c.PyObject = [_]?*c.PyObject{null} ** MAX_PARAMS;
+    var created: [MAX_PARAMS]?*c.PyObject = @splat(null);
     defer for (created[0..argc]) |obj| {
         if (obj) |o| c.Py_DecRef(o);
     };
@@ -3492,7 +3492,7 @@ test "fuzz: percentDecode — output bounded, no OOB" {
             "hello+world", // plus → space
             "a%20b%20c", // spaces
             "%FF%FE%FD", // high bytes
-            &([_]u8{'%'} ** 200), // 200 bare percents
+            &@as([200]u8, @splat('%')), // 200 bare percents
             "%2F%2F..%2F..%2Fetc%2Fpasswd", // path traversal
             "%00%00%00", // three null bytes
         },
@@ -3525,7 +3525,7 @@ test "fuzz: queryStringGet — result is within input, no panic" {
             "k" ++ "k",
             "" ++ "=value",
             "foo" ++ "foo=bar&foo=baz", // duplicate key
-            "q" ++ "q=" ++ ("A" ** 2000), // very long value
+            "q" ++ "q=" ++ @as([2000]u8, @splat('A')), // very long value
             "k" ++ "k=\x00\xFF", // binary values
             "k" ++ "&&&&&", // no values, only separators
         },
@@ -3593,9 +3593,9 @@ test "fuzz: HTTP request-line and header parsing — no panic on malformed input
             // Null byte in path
             "GET /\x00secret HTTP/1.1\r\n\r\n",
             // Very long path (> 8KB header buffer)
-            "GET /" ++ ("a" ** 7000) ++ " HTTP/1.1\r\n\r\n",
+            "GET /" ++ @as([7000]u8, @splat('a')) ++ " HTTP/1.1\r\n\r\n",
             // Very long header value
-            "GET / HTTP/1.1\r\nX-Custom: " ++ ("B" ** 7000) ++ "\r\n\r\n",
+            "GET / HTTP/1.1\r\nX-Custom: " ++ @as([7000]u8, @splat('B')) ++ "\r\n\r\n",
             // Bare \n instead of \r\n
             "GET / HTTP/1.1\nHost: x\n\n",
             // No path at all

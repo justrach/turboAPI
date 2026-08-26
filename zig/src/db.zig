@@ -11,7 +11,6 @@ const dhi = @import("dhi_validator.zig");
 const logger = @import("logger.zig");
 const runtime = @import("runtime.zig");
 
-
 const allocator = std.heap.c_allocator;
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -64,7 +63,8 @@ var exec_many_mode: ExecManyMode = .dynamic_protocol;
 fn isDbCacheEnabled() bool {
     if (!db_cache_checked_env) {
         db_cache_checked_env = true;
-        if (std.c.getenv("TURBO_DISABLE_DB_CACHE")) |_p| { const val = std.mem.span(_p);
+        if (std.c.getenv("TURBO_DISABLE_DB_CACHE")) |_p| {
+            const val = std.mem.span(_p);
             if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
                 db_cache_enabled = false;
                 logger.info("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE", .{});
@@ -76,7 +76,8 @@ fn isDbCacheEnabled() bool {
 
 fn configureExecManyModeFromEnv() void {
     exec_many_mode = .multi_values;
-    if (std.c.getenv("TURBOPG_EXEC_MANY_MODE")) |_p| { const val = std.mem.span(_p);
+    if (std.c.getenv("TURBOPG_EXEC_MANY_MODE")) |_p| {
+        const val = std.mem.span(_p);
         if (std.mem.eql(u8, val, "multi") or std.mem.eql(u8, val, "multi_values")) {
             exec_many_mode = .multi_values;
         } else if (std.mem.eql(u8, val, "dynamic") or std.mem.eql(u8, val, "protocol")) {
@@ -86,7 +87,7 @@ fn configureExecManyModeFromEnv() void {
 }
 // Per-thread connections
 const MAX_WORKERS: usize = 24;
-var thread_conns: [MAX_WORKERS]?*pg.Conn = [_]?*pg.Conn{null} ** MAX_WORKERS;
+var thread_conns: [MAX_WORKERS]?*pg.Conn = @splat(null);
 var thread_conn_count: usize = 0;
 var use_thread_conns: bool = false;
 
@@ -676,7 +677,7 @@ pub fn handleDbRoute(
             // Collect params: path params first, then query string params
             var param_values: [16][]const u8 = undefined;
             var param_count: usize = 0;
-            var param_ints: [16]?i64 = [_]?i64{null} ** 16;
+            var param_ints: [16]?i64 = @splat(null);
 
             for (entry.param_names) |pname| {
                 if (param_count >= 16) break;
@@ -989,7 +990,6 @@ fn encodePySqlValue(item: *c.PyObject, buf: *[256]u8) usize {
     return 0;
 }
 
-
 fn execManyMultiValues(sql: []const u8, py_rows: *c.PyObject, max_rows: usize, cols_per_row: usize) ?i64 {
     const values_storage = allocator.alloc([256]u8, max_rows * cols_per_row) catch return null;
     defer allocator.free(values_storage);
@@ -1176,13 +1176,15 @@ pub fn db_configure(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     logger.info("[DB] Pool initialized: {d} connections to {s}", .{ size, uri_str });
 
     // Auto-check env vars for cache control
-    if (std.c.getenv("TURBO_DISABLE_DB_CACHE")) |_p| { const val = std.mem.span(_p);
+    if (std.c.getenv("TURBO_DISABLE_DB_CACHE")) |_p| {
+        const val = std.mem.span(_p);
         if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
             db_cache_enabled = false;
             logger.info("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE", .{});
         }
     }
-    if (std.c.getenv("TURBO_DB_CACHE_TTL")) |_p| { const val = std.mem.span(_p);
+    if (std.c.getenv("TURBO_DB_CACHE_TTL")) |_p| {
+        const val = std.mem.span(_p);
         db_cache_ttl = std.fmt.parseInt(i64, val, 10) catch 30;
         logger.info("[DB] Cache TTL set to {d}s", .{db_cache_ttl});
     }
@@ -1192,13 +1194,15 @@ pub fn db_configure(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
 
 /// Check env vars for cache control — called at startup or from Python.
 pub fn db_check_cache_env(_: ?*c.PyObject, _: ?*c.PyObject) callconv(.c) ?*c.PyObject {
-    if (std.c.getenv("TURBO_DISABLE_DB_CACHE")) |_p| { const val = std.mem.span(_p);
+    if (std.c.getenv("TURBO_DISABLE_DB_CACHE")) |_p| {
+        const val = std.mem.span(_p);
         if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) {
             db_cache_enabled = false;
             logger.info("[DB] Cache DISABLED via TURBO_DISABLE_DB_CACHE", .{});
         }
     }
-    if (std.c.getenv("TURBO_DB_CACHE_TTL")) |_p| { const val = std.mem.span(_p);
+    if (std.c.getenv("TURBO_DB_CACHE_TTL")) |_p| {
+        const val = std.mem.span(_p);
         db_cache_ttl = std.fmt.parseInt(i64, val, 10) catch 30;
         logger.info("[DB] Cache TTL set to {d}s", .{db_cache_ttl});
     }
@@ -1492,7 +1496,7 @@ pub fn db_query_raw(_: ?*c.PyObject, args: ?*c.PyObject) callconv(.c) ?*c.PyObje
     py.PyEval_RestoreThread(gil_state);
 
     // Pre-intern column name keys (created once, reused for all rows)
-    var py_keys: [32]?*c.PyObject = [_]?*c.PyObject{null} ** 32;
+    var py_keys: [32]?*c.PyObject = @splat(null);
     for (0..num_cols) |ci| {
         py_keys[ci] = c.PyUnicode_FromStringAndSize(
             @ptrCast(col_name_ptrs[ci].ptr),

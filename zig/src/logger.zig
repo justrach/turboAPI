@@ -7,7 +7,7 @@ const Level = telemetry.Level;
 
 pub fn log(comptime level: Level, comptime fmt: []const u8, args: anytype) void {
     if (!telemetry.isEnabled()) return;
-    if (@intFromEnum(level) < @intFromEnum(telemetry.getLevel())) return;
+    if (@backingInt(level) < @backingInt(telemetry.getLevel())) return;
     var buf: [1024]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch buf[0..];
     telemetry.pushEvent(.{ .log = .{ .level = level, .msg = msg } });

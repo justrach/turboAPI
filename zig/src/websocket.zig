@@ -22,7 +22,7 @@ pub const Opcode = enum(u4) {
     _,
 
     pub fn isControl(self: Opcode) bool {
-        return @intFromEnum(self) >= 0x8;
+        return @backingInt(self) >= 0x8;
     }
 };
 
@@ -80,7 +80,7 @@ pub fn parseServerFrame(buf: []u8, max_payload: usize) ParseError!Frame {
     const rsv3 = (b0 & 0x10) != 0;
     if (rsv1 or rsv2 or rsv3) return ParseError.ReservedBitsSet;
 
-    const opcode: Opcode = @enumFromInt(@as(u4, @truncate(b0 & 0x0F)));
+    const opcode: Opcode = @fromBackingInt(@intCast(@as(u4, @truncate(b0 & 0x0F))));
     const masked = (b1 & 0x80) != 0;
     if (!masked) return ParseError.UnmaskedClientFrame;
 
@@ -151,7 +151,7 @@ pub fn writeServerFrame(
     const total = header_len + extended_len_bytes + payload.len;
     if (out.len < total) return error.NoSpaceLeft;
 
-    out[0] = (@as(u8, if (fin) 0x80 else 0) | @intFromEnum(opcode));
+    out[0] = (@as(u8, if (fin) 0x80 else 0) | @backingInt(opcode));
 
     if (extended_len_bytes == 0) {
         out[1] = @intCast(payload.len);
@@ -235,9 +235,10 @@ test "parse: smallest text frame from client" {
     var buf = [_]u8{
         0x81, // FIN | text
         0x85, // MASK | len=5
-        0x01, 0x02, 0x03, 0x04, // mask
+        0x01,       0x02,       0x03,       0x04, // mask
         // payload "hello" xored byte-by-byte with mask
-        'h' ^ 0x01, 'e' ^ 0x02, 'l' ^ 0x03, 'l' ^ 0x04, 'o' ^ 0x01,
+        'h' ^ 0x01, 'e' ^ 0x02, 'l' ^ 0x03, 'l' ^ 0x04,
+        'o' ^ 0x01,
     };
     const frame = try parseServerFrame(&buf, PARSE_DEFAULT_MAX_PAYLOAD);
     try std.testing.expectEqual(true, frame.fin);
@@ -299,7 +300,7 @@ test "write: text frame small payload" {
 }
 
 test "write: 16-bit length boundary" {
-    const payload = [_]u8{'A'} ** 200;
+    const payload: [200]u8 = @splat('A');
     var out: [256]u8 = undefined;
     const written = try writeServerFrame(&out, true, .binary, &payload);
     try std.testing.expectEqual(@as(usize, 204), written);

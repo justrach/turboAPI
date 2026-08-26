@@ -17,6 +17,21 @@ import subprocess
 import sys
 import sysconfig
 
+REQUIRED_ZIG_VERSION = "0.17.0-dev.1862+40ebd8162"
+
+
+def require_zig_version():
+    zig = shutil.which("zig")
+    if zig is None:
+        raise SystemExit(f"Zig {REQUIRED_ZIG_VERSION} is required but zig is not on PATH")
+
+    result = subprocess.run([zig, "version"], check=True, capture_output=True, text=True)
+    actual = result.stdout.strip()
+    if actual != REQUIRED_ZIG_VERSION:
+        raise SystemExit(
+            f"Zig {REQUIRED_ZIG_VERSION} is required; found {actual} at {zig}"
+        )
+
 
 def detect_python():
     ver = sys.version_info
@@ -56,6 +71,7 @@ def main():
     )
     args = parser.parse_args()
 
+    require_zig_version()
     info = detect_python()
     zig_dir = os.path.dirname(os.path.abspath(__file__))
     project_dir = os.path.dirname(zig_dir)

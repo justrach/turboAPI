@@ -7,7 +7,7 @@ A high-performance Python web framework with a Zig HTTP backend. Drop-in FastAPI
 ## Requirements
 
 - **Python 3.14+** (free-threaded `3.14t` recommended)
-- **Zig 0.16+** (for building the native backend)
+- **Zig 0.17.0-dev.1862+40ebd8162** (exact nightly used by CI)
 - **uv** (Python package manager)
 
 ## Building
