@@ -203,6 +203,26 @@ def _persistent_http_ping(server: str) -> socket.socket:
     return client
 
 
+def _wait_for_log(
+    log_path: pathlib.Path,
+    expected: str,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    """Wait for a child-process diagnostic to become visible on disk."""
+    deadline = time.monotonic() + timeout
+    output = ""
+    while time.monotonic() < deadline:
+        output = log_path.read_text(errors="replace")
+        if expected in output:
+            return
+        time.sleep(0.01)
+
+    raise AssertionError(
+        f"server log did not contain {expected!r} within {timeout:.1f}s; last output: {output!r}"
+    )
+
+
 def _upgrade(server: str) -> tuple[socket.socket, int]:
     host, port_text = server.rsplit(":", 1)
     client = socket.create_connection((host, int(port_text)), timeout=1.0)
@@ -277,8 +297,10 @@ def test_requested_pool256_serves_256_persistent_clients(pool256_server) -> None
     clients: list[socket.socket] = []
     try:
         # This direct native-core signal makes the ceiling assertion independent
-        # of load timing.  The persistent clients below exercise the behavior.
-        assert "Zig HTTP core active – 256-thread pool" in log_path.read_text()
+        # of load timing. The child writes the log asynchronously relative to
+        # this test process, so allow a bounded interval for it to become visible.
+        # The persistent clients below remain the authoritative behavior check.
+        _wait_for_log(log_path, "Zig HTTP core active – 256-thread pool")
 
         for _ in range(256):
             clients.append(_persistent_http_ping(server))
