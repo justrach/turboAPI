@@ -73,7 +73,7 @@ jobs:
 
       - name: Run regression benchmark (main - full)
         if: github.ref == 'refs/heads/main'
-        run: uv run --python 3.14t python benchmarks/bench_regression.py --save --history
+        run: uv run --python 3.14t python benchmarks/bench_regression.py --save --history --fail-on-regression
         env:
           BENCH_THREADS: 4
           BENCH_CONNECTIONS: 100
@@ -102,7 +102,7 @@ jobs:
             });
 
       - name: Commit baseline + history on main
-        if: github.ref == 'refs/heads/main'
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

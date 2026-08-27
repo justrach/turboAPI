@@ -9,6 +9,7 @@ Usage:
     uv run --python 3.14t python benchmarks/bench_regression.py
     uv run --python 3.14t python benchmarks/bench_regression.py --save   # save as new baseline
     uv run --python 3.14t python benchmarks/bench_regression.py --ci     # exit(1) on regression
+    uv run --python 3.14t python benchmarks/bench_regression.py --fail-on-regression
     uv run --python 3.14t python benchmarks/bench_regression.py --history # save history snapshot
 """
 
@@ -217,9 +218,46 @@ def generate_pr_comment(results, detailed, thresholds, avg_threshold, regression
     return comment
 
 
+def persist_benchmark_artifacts(
+    results,
+    detailed,
+    *,
+    save_mode,
+    history_mode,
+    protect_baseline,
+):
+    """Persist benchmark output without accepting a failed strict run as baseline."""
+    if save_mode and protect_baseline:
+        print("\nBaseline not updated because the benchmark regressed")
+    elif save_mode:
+        with open(BASELINE_FILE, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"\nBaseline saved to {BASELINE_FILE}")
+
+    with open(RESULTS_FILE, "w") as f:
+        json.dump(
+            {
+                "metadata": {
+                    "duration": DURATION,
+                    "threads": THREADS,
+                    "connections": CONNECTIONS,
+                    "workers": WORKERS,
+                },
+                "results": results,
+                "detailed": detailed,
+            },
+            f,
+            indent=2,
+        )
+
+    if history_mode or save_mode:
+        save_history(results, detailed)
+
+
 def main():
     save_mode = "--save" in sys.argv
     ci_mode = "--ci" in sys.argv
+    fail_on_regression = "--fail-on-regression" in sys.argv
     history_mode = "--history" in sys.argv
 
     with open("/tmp/turboapi_regbench.py", "w") as f:
@@ -292,29 +330,14 @@ def main():
         regressions.append(("AVERAGE", avg, avg_threshold))
         print(f"  AVERAGE {avg:,.0f} < {avg_threshold:,} (threshold)")
 
-    if save_mode:
-        with open(BASELINE_FILE, "w") as f:
-            json.dump(results, f, indent=2)
-        print(f"\nBaseline saved to {BASELINE_FILE}")
-
-    with open(RESULTS_FILE, "w") as f:
-        json.dump(
-            {
-                "metadata": {
-                    "duration": DURATION,
-                    "threads": THREADS,
-                    "connections": CONNECTIONS,
-                    "workers": WORKERS,
-                },
-                "results": results,
-                "detailed": detailed,
-            },
-            f,
-            indent=2,
-        )
-
-    if history_mode or save_mode:
-        save_history(results, detailed)
+    strict_mode = ci_mode or fail_on_regression
+    persist_benchmark_artifacts(
+        results,
+        detailed,
+        save_mode=save_mode,
+        history_mode=history_mode,
+        protect_baseline=bool(regressions) and strict_mode,
+    )
 
     if ci_mode:
         generate_pr_comment(results, detailed, thresholds, avg_threshold, regressions)
@@ -325,7 +348,7 @@ def main():
         for name, actual, threshold in regressions:
             print(f"  {name}: {actual:,.0f} < {threshold:,.0f} (threshold)")
         print(f"{'!' * 60}")
-        if ci_mode:
+        if strict_mode:
             sys.exit(1)
 
     return results
